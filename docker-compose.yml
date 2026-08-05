@@ -6,6 +6,9 @@
 # `:?` defaults make a missing one fail at `up` rather than at the first query.
 
 x-app-env: &app-env
+  # POSTGRES_PASSWORD is interpolated here unencoded, so it must be URL-safe:
+  # [A-Za-z0-9._~-] only. An `@` in it makes the host `<rest>@db` and web dies
+  # in the migrator naming DNS while db sits there healthy.
   DATABASE_URL: "postgresql://${POSTGRES_USER:?see .env.example}:${POSTGRES_PASSWORD:?see .env.example}@db:5432/${POSTGRES_DB:?see .env.example}"
 
 services:
@@ -32,10 +35,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # ponytail: published for local use; on Dokploy, Traefik reaches the
-    # container over the docker network once a domain is attached.
+    # Loopback only. Traefik reaches the container over the docker network, so
+    # the published port is for local use — and this file is what gets pasted
+    # into Dokploy, on a host that is not ours alone. A 0.0.0.0 binding would
+    # put /telegram/webhook on plaintext :8000 for anyone (DECISIONS §14).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
 
   cron:

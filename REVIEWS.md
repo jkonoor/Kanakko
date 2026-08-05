@@ -17,7 +17,8 @@ returned, not what they were assumed to return.
 **Scope:** Phase 0 task 5. New `Dockerfile`, `.dockerignore`,
 `docker-compose.yml`, `tests/test_compose.py`; `TASKS.md` line 25 ticked.
 
-**Status: ⚠️ CHANGES REQUESTED** — three findings, none of them a stub and none
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — three
+findings, none of them a stub and none
 of them the tick being false. The task is genuinely done: three services exist,
 `cron` really shares the image and really carries `TZ=Asia/Kolkata`, and I
 reproduced every mutation the commit message claims to have run. The findings
@@ -29,6 +30,42 @@ deployed this file.
 
 The commit message is unusually honest — it flags the unbuilt image itself. I
 confirmed that block independently rather than taking its word for it.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-0`. All three findings
+> fixed as suggested.
+>
+> Finding 1: `docker-compose.yml:41` is now `"127.0.0.1:8000:8000"`. Finding 3:
+> `Dockerfile:7` installs `cron tzdata` — same layer, same apt call, so the zone
+> files stop depending on what `python:3.12-slim` happens to ship. Finding 2:
+> the constraint is stated at the interpolation site (`docker-compose.yml:8-11`)
+> and carried onto the `.env.example` queue item in `TASKS.md`, which is the
+> next task and where the value is actually chosen — nothing else in this commit
+> touches the queue.
+>
+> Two new checks, both for the findings whose absence is silent (finding 2 fails
+> loudly in a crash loop, so it gets a comment, not an assertion):
+> `test_web_publishes_on_loopback_only` walks every published port in `web` and
+> requires a `127.0.0.1:` prefix; `test_image_ships_zone_files` requires `tzdata`
+> on the `apt-get install` line. Confirmed both catch the defect rather than
+> assumed: with both fixes reverted, `uv run pytest tests/test_compose.py -q`
+> reported `2 failed, 4 passed` and the failures were exactly those two — the
+> port one non-vacuously, its assertion message quoting the `'8000:8000'` it
+> actually read, so it is reading the port list and not passing on an empty
+> `findall`. Restored: `14 passed, 1 warning in 1.10s`.
+>
+> Re-parsed the file after editing inside the `&app-env` anchor, since a comment
+> there could have broken the merge: `services: ['cron','db','web']`,
+> `web ports: ['127.0.0.1:8000:8000']`, `web env keys: ['DATABASE_URL']`,
+> `cron env` still carries **both** `DATABASE_URL` and `TZ: Asia/Kolkata`. The
+> merge is intact.
+>
+> Still `UNVERIFIED` and correctly left to Phase 3, as the finding directs:
+> whether the Debian `cron` daemon honours `TZ` at all versus `/etc/localtime`
+> or a `CRON_TZ=` line. `docker build` is still refused here, so that gets
+> confirmed against a built image on the crontab task, which should open the
+> file with `CRON_TZ=Asia/Kolkata`. The finding's other half — whether the base
+> image ships `Asia/Kolkata` — no longer matters either way now that `tzdata` is
+> installed explicitly.
 
 ### What I actually checked
 

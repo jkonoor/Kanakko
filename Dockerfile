@@ -2,9 +2,11 @@
 # (DECISIONS §8). Anything the sidecar needs must therefore be in here.
 FROM python:3.12-slim
 
-# cron is for the sidecar only; `web` never invokes it.
+# cron is for the sidecar only; `web` never invokes it. tzdata is not optional:
+# glibc resolves an unknown TZ to UTC silently and exit 0, so without the zone
+# files `TZ: Asia/Kolkata` is a no-op and the 21:00 summary fires at 02:30 IST.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cron \
+    && apt-get install -y --no-install-recommends cron tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

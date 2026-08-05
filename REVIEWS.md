@@ -12,6 +12,191 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `a69544e` — `.env.example` with every required key, plus two guards over it
+
+**Scope:** Phase 0 task 6. `.env.example` (new, 27 lines), `tests/test_compose.py`
+(+`ENV_EXAMPLE`/`ENV_KEYS` at module scope, +2 checks), `TASKS.md` line 26 ticked.
+`git show --stat HEAD` confirms exactly those three files; `docker-compose.yml` is
+untouched.
+
+**Status: ⚠️ CHANGES REQUESTED** — one blocking finding and one that matters
+before a real secret gets pasted into this file.
+
+The file itself is good and the commit message is honest about the three
+mutations it claims: I re-ran all three against the real file and got the same
+counts and the same `AssertionError` strings, quoted below. No secret is added,
+every key is empty, the `POSTGRES_PASSWORD` URL-safety constraint from the
+review of `4341744` is carried onto the key where the value is actually chosen,
+and `OPENROUTER_MODEL`'s documented default matches `DECISIONS.md` §2 verbatim
+("Default model `claude-opus-5`"). The judgement not to invent a webhook-secret
+or allowed-user key is correct — I grepped `docs/DECISIONS.md` for
+`env|secret|token|webhook|allow.?list|single.user` and the spec decides neither;
+§1 populates `user_id` with a constant rather than reading it from anywhere.
+
+What is wrong is the direction the new guard doesn't check. Three of the six
+keys have no route into any container, and the guard is structured so that it
+never could notice.
+
+Nothing here touches application code, so money/`Decimal`, `AT TIME ZONE
+'Asia/Kolkata'`, `active_transactions`, the injected current date, and the
+no-ORM/no-Celery/no-Redis decisions have no surface in this commit.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite green | `uv run pytest -q` | `16 passed, 1 warning in 1.00s` (was 14) |
+| Which env vars each service actually gets | `yaml.safe_load` on the real `docker-compose.yml`, printing `environment` and `env_file` per service | `db` → the three `POSTGRES_*`; `web` → `{DATABASE_URL}` only; `cron` → `{DATABASE_URL, TZ}`; `env_file` is `None` for all three |
+| Every `${VAR}` in the compose file | `re.findall(r'\$\{(\w+)', COMPOSE)` | `['POSTGRES_DB', 'POSTGRES_PASSWORD', 'POSTGRES_USER']` — nothing else |
+| Bare `$VAR` interpolation in the compose file | `re.findall(r'(?<!\$)\$(\w+)', COMPOSE)` | `[]` |
+| Are the other three keys named anywhere in compose? | substring test for each | `TELEGRAM_BOT_TOKEN: False`, `OPENROUTER_API_KEY: False`, `OPENROUTER_MODEL: False` |
+| `env_file:` anywhere in compose | substring test | `False` |
+| Is `.env.example` really committed and un-ignored? | `git ls-files --error-unmatch .env.example`; `git check-ignore -v .env.example` | tracked; `not ignored` |
+| Spec's default model | `grep -n -i model docs/DECISIONS.md` | line 29 — "Default model `claude-opus-5`" — matches the file's comment |
+| Spec decides a webhook secret / allowlist? | `grep -n -iE 'env\|secret\|token\|webhook\|allow.?list\|single.user' docs/DECISIONS.md` | 6 hits, none of them an env key; §13 line 261 uses the bot token for `initData` HMAC |
+| Secret in the diff | `git show HEAD` read in full | none — all six values empty |
+
+**Mutation battery.** I mutated the real `.env.example`, ran `-k env_example`,
+and restored from an in-memory copy each time. `git status --porcelain` was
+empty afterwards and a content comparison against the original returned `True`.
+The first three rows are the commit's own table, re-run independently; the rest
+are mine.
+
+| Mutation | Result |
+|---|---|
+| baseline | `2 passed` |
+| `POSTGRES_DB=` line deleted | `1 failed` — `AssertionError: POSTGRES_DB is interpolated by compose but absent` |
+| `TELEGRAM_BOT_TOKEN=123456:AAHrealtoken` | `1 failed` — `AssertionError: TELEGRAM_BOT_TOKEN carries a value` |
+| every `KEY=` commented out | `2 failed` — the second `AssertionError: .env.example has no keys — the guard would pass vacuously` |
+| `export TELEGRAM_BOT_TOKEN=123456:AAHrealtoken` | **`2 passed`** |
+| `··TELEGRAM_BOT_TOKEN=123456:AAHrealtoken` (two-space indent) | **`2 passed`** |
+| `OPENROUTER_API_KEY = sk-or-v1-real` (spaces around `=`) | **`2 passed`** |
+| `TELEGRAM_BOT_TOKEN=123456:AAHrealtoken` followed by a second `TELEGRAM_BOT_TOKEN=` | **`2 passed`** |
+
+The commit's three claims reproduce exactly. The last four rows are finding 2.
+
+I could not run `docker compose config` — the command was denied in this
+environment — so finding 1 rests on the compose file's own text rather than on
+Docker's rendering of it. That is sufficient: the file declares no `env_file`
+and names those three keys in zero `${...}` references, so there is no route
+this file provides for them to reach a process, whatever Compose does with the
+ones it does name.
+
+### Findings
+
+**1 — Three of the six keys never reach any container; the new guard checks only
+the direction that cannot catch it.** `docker-compose.yml:8-12` (`x-app-env`),
+`.env.example:1`, `tests/test_compose.py:73-81`.
+
+`.env.example` line 1 states "Every key the stack needs. Copy to .env for local
+`docker compose up`", and `docs/DEPLOYMENT.md:42` step 3 says
+`compose.saveEnvironment` carries "bot token, OpenRouter key, DB credentials".
+But `x-app-env` sets `DATABASE_URL` and nothing else, `cron` adds only `TZ`, no
+service declares `env_file`, and `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY` and
+`OPENROUTER_MODEL` appear nowhere in the compose file — verified by substring
+test and by the `${VAR}` enumeration above, which returns the three `POSTGRES_*`
+names only.
+
+So the commit message's "docker-compose.yml untouched — it already names every
+one of these keys" is not true: it names three of six.
+
+Failure scenario, and it is the quiet kind. The operator fills in all six —
+locally in `.env`, on Dokploy in `compose.saveEnvironment` per DEPLOYMENT step 3
+— and `docker compose up` succeeds, because the only keys carrying `:?see
+.env.example` are the three Postgres ones that *are* wired. `db` comes up
+healthy, `web` migrates, `/healthz` returns 200, the domain gets a certificate,
+and Phase 0 is signed off as deployed. The gap surfaces later, in Phase 1, the
+first time `kanakko/parse.py` reads `OPENROUTER_API_KEY` or the webhook handler
+reads `TELEGRAM_BOT_TOKEN` for the `initData` HMAC (`DECISIONS.md` §13, line
+261) — as a `KeyError`/`None` inside the container against an environment the
+operator can see, correctly set, in the Dokploy UI. The evidence points at the
+application; the cause is a compose file that never asked for the value.
+
+`test_env_example_lists_every_key_compose_interpolates` guards
+compose → `.env.example`. The reverse — a key the operator is told to set that
+no service consumes — is the one this repo actually has, and it is unguarded.
+The docstring calling `.env.example` "the only list of what the operator has to
+set" reads as if both directions were covered.
+
+Suggested fix: add the three to `x-app-env` so `web` and `cron` both get them —
+
+```yaml
+  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?see .env.example}"
+  OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?see .env.example}"
+  OPENROUTER_MODEL: "${OPENROUTER_MODEL:-}"
+```
+
+`OPENROUTER_MODEL` takes `:-` rather than `:?` precisely because §2 gives it a
+default; the other two are required and should stop the deploy, not the first
+webhook. Then invert the guard: every key in `ENV_KEYS` is either interpolated
+by compose or explicitly listed as compose-derived. `DATABASE_URL` is the only
+member of that second set today and is already commented out, so the exemption
+list is empty — which is the point.
+
+**2 — The committed-secret guard is bypassed by four ordinary `.env`
+spellings.** `tests/test_compose.py:21`.
+
+`ENV_KEYS = dict(re.findall(r"^(\w+)=(.*)$", ENV_EXAMPLE, re.M))` is anchored at
+column zero, requires `\w` immediately, requires no space around `=`, and
+collapses duplicates with `dict()` (last wins). All four mutations in the table
+above put a token-shaped value into the committed file and both guards returned
+`2 passed`:
+
+- `export TELEGRAM_BOT_TOKEN=<real>` — the `export ` prefix is how a `.env` gets
+  written when someone also `source`s it, and it is the most likely of the four
+  to happen by habit rather than by accident.
+- a leading indent, e.g. from a paste that carried whitespace.
+- `OPENROUTER_API_KEY = sk-or-v1-real` — spaces around `=`.
+- a duplicate key where the valued line comes first and an empty one follows;
+  `dict()` keeps the last, so the guard reads `''` and the secret above it is
+  invisible.
+
+The failure is exactly the one the docstring names: the value is committed and
+"nothing about the diff looks different from the placeholder it replaced" — and
+now the guard agrees with the diff. This is the same shape as findings 1 and 2
+on `c214544`: a regex enumerating spellings over a config file, which took two
+QA rounds to close for the published-port guard before `be74462` replaced it
+with the parser. The lesson is one commit old.
+
+Suggested fix: stop enumerating. Take every line that is non-blank and does not
+start with `#`, strip an optional `export `, split on the first `=`, strip both
+sides, and keep a **list** of pairs rather than a dict so a shadowed duplicate
+still gets asserted on. Roughly:
+
+```python
+def _pairs(text):
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        yield key.strip(), value.strip()
+
+ENV_PAIRS = list(_pairs(ENV_EXAMPLE))
+ENV_KEYS = {k for k, _ in ENV_PAIRS}
+```
+
+Then `test_env_example_holds_no_values` iterates `ENV_PAIRS`, and the vacuity
+assertion still works. All four rows above go red; the three the commit already
+covers stay red.
+
+### Notes, not findings
+
+- `.gitignore:3`'s `!.env.example` is doing nothing: `*.env` does not match
+  `.env.example` (the name ends in `.example`), and `.env` matches only itself.
+  `git check-ignore -v .env.example` returns `not ignored` with no matching
+  rule. Harmless, but `.env.example:5` and the docstring at
+  `tests/test_compose.py:85` both cite the negation as load-bearing, so the
+  reasoning is worth correcting if either is touched.
+- `re.findall(r"\$\{(\w+)", COMPOSE)` misses Compose's bare `$VAR` form. Not a
+  live problem — I checked, the file uses none — but if finding 1's fix is
+  written with `$TELEGRAM_BOT_TOKEN`, the guard goes quiet on it.
+- `TASKS.md:26` is legitimately ticked for the file it names. Finding 1 is not a
+  false tick on this task; it is an incomplete deploy contract that this commit
+  made visible by writing down the keys.
+
+---
+
 ## 2026-08-05 — `be74462` — published-port guard moved from regex to the YAML parser
 
 **Scope:** findings 1 and 2 from the review of `c214544`. `tests/test_compose.py`

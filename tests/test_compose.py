@@ -39,14 +39,26 @@ def test_image_ships_zone_files():
     assert re.search(r"apt-get install\b[^\n]*\btzdata\b", DOCKERFILE)
 
 
-def test_web_publishes_on_loopback_only():
+def test_no_service_publishes_beyond_loopback():
     """This file is pasted into Dokploy on a shared host (DECISIONS §14).
 
     A 0.0.0.0 binding answers /telegram/webhook over plaintext :8000 from
     anywhere, bypassing the HTTPS domain, and nothing about it looks wrong.
+    Every service, not just web: publishing 5432 to debug against the deployed
+    database is a one-line edit that puts Postgres on the host's public
+    interface with the credentials from .env.
     """
-    for published in re.findall(r"^\s+- \"([^\"]+)\"$", service("web"), re.M):
-        assert published.startswith("127.0.0.1:"), published
+    found = 0
+    for name in ("web", "db", "cron"):
+        block = re.search(r"^    ports:\n((?:      \S.*\n)+)", service(name), re.M)
+        if not block:
+            continue
+        # Long syntax has no bare list items, so the loop below would see none.
+        assert "target:" not in block.group(1), f"{name}: use short syntax with 127.0.0.1"
+        for published in re.findall(r"^      - \"?([^\"\n]+)\"?$", block.group(1), re.M):
+            found += 1
+            assert published.startswith("127.0.0.1:"), f"{name}: {published}"
+    assert found, "no published port found — the guard stopped reading the file"
 
 
 def test_web_and_cron_share_one_image():

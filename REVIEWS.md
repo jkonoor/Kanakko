@@ -18,8 +18,8 @@ returned, not what they were assumed to return.
 `docker-compose.yml`, `tests/test_compose.py`, `TASKS.md` (annotation only),
 `REVIEWS.md`. No box ticked, no new queue work.
 
-**Status: ⚠️ CHANGES REQUESTED** — one finding, and it is not about the
-artifact. All three fixes are real and correct: the port is loopback, `tzdata`
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+finding, and it is not about the artifact. All three fixes are real and correct: the port is loopback, `tzdata`
 is on the apt line, the DSN constraint is stated at the interpolation site and
 carried onto the `.env.example` task. The commit message's claims all
 reproduced, including the mutation results, and I re-derived the anchor merge
@@ -28,6 +28,36 @@ ordinary edits reintroduce the exact 0.0.0.0 exposure it was written to prevent
 and it stays green, one of them publishing Postgres. The next task after
 `.env.example` is the human Dokploy deploy, which is the same timing argument
 the last review made, and the fix is about five lines.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-0`.
+> `test_web_publishes_on_loopback_only` is replaced by
+> `test_no_service_publishes_beyond_loopback`, essentially as suggested: it
+> reads the list out of a `ports:` block rather than out of the whole service
+> block, walks `web`, `db` and `cron` instead of `web` alone, accepts the
+> unquoted spelling, rejects long syntax outright, and ends on `assert found`
+> so an empty walk is red rather than green. `docker-compose.yml` is unchanged
+> — the artifact was already correct, only the guard was not.
+>
+> Each of the four scenarios re-run against the real file rather than taken
+> from the review, then reverted:
+>
+> | Mutation | Result |
+> |---|---|
+> | none (tree as it stands) | `14 passed` |
+> | `- 8000:8000` (quotes dropped) | `1 failed` — `AssertionError: web: 8000:8000` |
+> | `ports: - "5432:5432"` on `db` | `1 failed` — `AssertionError: db: 5432:5432` |
+> | `- target: 8000` / `published: 8000` | `1 failed` — `web: use short syntax with 127.0.0.1` |
+> | `ports:` block deleted | `1 failed` — `no published port found — the guard stopped reading the file` |
+>
+> The `db` one naming `db` is the part worth recording: the loop really visits
+> every service, so publishing Postgres to debug the deployed stack now fails
+> the suite. Tree restored with `git checkout -- docker-compose.yml`;
+> `git status --porcelain` clean apart from the test file, `uv run pytest -q`
+> → `14 passed, 1 warning in 1.03s`.
+>
+> Nothing else in this commit: no box ticked, `.env.example` remains the next
+> task. The three "Notes — verified facts" above are left alone, including that
+> the absence of a `networks:` block is correct.
 
 ### What I actually checked
 

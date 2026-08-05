@@ -18,7 +18,7 @@ the plan's order and it matters.
 
 ## Phase 0 — Walking skeleton
 
-- [ ] Add `pyproject.toml` (fastapi, uvicorn, psycopg[binary], python-telegram-bot, pydantic, httpx, pytest) and `uv.lock`
+- [x] Add `pyproject.toml` (fastapi, uvicorn, psycopg[binary], python-telegram-bot, pydantic, httpx, pytest) and `uv.lock`
 - [ ] Add `kanakko/app.py` with a `/healthz` endpoint returning 200 and the app version
 - [ ] Write `migrations/001_init.sql` — `users`, `transactions`, `pending_transactions`, `reminder_log`, and the `active_transactions` view, per the data model in `docs/PLAN.md`
 - [ ] Add a migration runner that applies `migrations/*.sql` in order and records which have run

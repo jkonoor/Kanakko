@@ -14,7 +14,7 @@ uv sync                      # install dependencies
 uv run uvicorn kanakko.app:app --reload   # run locally
 uv run pytest                # run the checks
 docker compose up --build    # full stack (web + db + cron)
-psql "$DATABASE_URL" -f migrations/00N_*.sql   # apply a migration
+uv run python -m kanakko.migrate   # apply pending migrations (needs DATABASE_URL)
 ```
 
 ## Layout

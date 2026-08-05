@@ -14,7 +14,11 @@ import yaml
 ROOT = Path(__file__).parent.parent
 COMPOSE = (ROOT / "docker-compose.yml").read_text()
 DOCKERFILE = (ROOT / "Dockerfile").read_text()
+ENV_EXAMPLE = (ROOT / ".env.example").read_text()
 SERVICES = yaml.safe_load(COMPOSE)["services"]
+
+# key=value lines only — commented keys are documentation, not requirements.
+ENV_KEYS = dict(re.findall(r"^(\w+)=(.*)$", ENV_EXAMPLE, re.M))
 
 
 def service(name: str) -> str:
@@ -64,6 +68,28 @@ def test_no_service_publishes_beyond_loopback():
             # str(): long syntax parses to a dict, a bare port to an int.
             assert str(published).startswith("127.0.0.1:"), f"{name}: {published}"
     assert found, "no published port found — web's ports: block is gone"
+
+
+def test_env_example_lists_every_key_compose_interpolates():
+    """.env.example is the only list of what the operator has to set.
+
+    A key that exists in the compose file but not here is invisible until
+    `compose.saveEnvironment` is filled in from this file and the deploy dies
+    on `:?see .env.example` — a message pointing at a file that never had it.
+    """
+    for name in set(re.findall(r"\$\{(\w+)", COMPOSE)):
+        assert name in ENV_KEYS, f"{name} is interpolated by compose but absent"
+
+
+def test_env_example_holds_no_values():
+    """This file is committed (.gitignore negates it out of *.env).
+
+    Filling a value in during local debugging commits the secret, and nothing
+    about the diff looks different from the placeholder it replaced.
+    """
+    assert ENV_KEYS, ".env.example has no keys — the guard would pass vacuously"
+    for name, value in ENV_KEYS.items():
+        assert not value.strip(), f"{name} carries a value"
 
 
 def test_web_and_cron_share_one_image():

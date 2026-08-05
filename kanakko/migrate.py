@@ -25,6 +25,13 @@ def migrate(conn: psycopg.Connection) -> list[str]:
     syntax error in file 3 leaves files 1 and 2 unapplied rather than half a
     schema and a bookkeeping table that disagrees with it.
     """
+    files = sorted(MIGRATIONS.glob("*.sql"))
+    if not files:
+        # "applied nothing" and "nothing left to apply" must not be the same
+        # exit code — a wheel built without migrations/ would otherwise boot
+        # green on an empty schema and fail on the first webhook instead.
+        raise RuntimeError(f"no migrations found at {MIGRATIONS}")
+
     applied = []
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
@@ -35,7 +42,7 @@ def migrate(conn: psycopg.Connection) -> list[str]:
         )
         cur.execute("SELECT filename FROM schema_migrations")
         done = {filename for (filename,) in cur.fetchall()}
-        for sql in sorted(MIGRATIONS.glob("*.sql")):
+        for sql in files:
             if sql.name in done:
                 continue
             cur.execute(sql.read_text())

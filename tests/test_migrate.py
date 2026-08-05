@@ -1,11 +1,12 @@
 """The runner against a real Postgres, which is the only thing that parses DDL.
 
 `tests/test_migrations.py` reads the `.sql` files as text; this one executes
-them. Boots a throwaway cluster in a tmp dir, or uses `$TEST_DATABASE_URL` if
-one is set.
+them, in a throwaway cluster booted in a tmp dir. It deliberately offers no
+"point me at your own database" switch: the first assertion below only holds
+against a virgin database, and `migrate()` commits, so a persistent DSN would
+pass once and then fail on every later run.
 """
 
-import os
 import subprocess
 from decimal import Decimal
 from glob import glob
@@ -24,14 +25,9 @@ def pg_bin(name: str) -> str | None:
 
 @pytest.fixture(scope="module")
 def conn(tmp_path_factory):
-    if dsn := os.environ.get("TEST_DATABASE_URL"):
-        with psycopg.connect(dsn) as existing:
-            yield existing
-        return
-
     initdb, pg_ctl = pg_bin("initdb"), pg_bin("pg_ctl")
     if not (initdb and pg_ctl):
-        pytest.skip("no local Postgres server; set TEST_DATABASE_URL to use one")
+        pytest.skip("no local Postgres server binaries under /usr/lib/postgresql")
 
     data = tmp_path_factory.mktemp("pgdata") / "cluster"
     socket = tmp_path_factory.mktemp("pgsock")
@@ -45,6 +41,20 @@ def conn(tmp_path_factory):
             yield fresh
     finally:
         subprocess.run([pg_ctl, "-D", data, "-m", "immediate", "stop"], check=True)
+
+
+def test_migrate_refuses_to_succeed_with_no_migrations(tmp_path, monkeypatch):
+    """Finding nothing to apply is a packaging failure, not a clean run.
+
+    `MIGRATIONS` resolves relative to the installed module, so a wheel built
+    without `migrations/` makes the glob empty. Without this guard the migrator
+    exits 0 against an empty schema and the deploy looks green. No server
+    needed — the guard runs before the connection is touched, which is why this
+    check can't be skipped on a machine with no Postgres.
+    """
+    monkeypatch.setattr("kanakko.migrate.MIGRATIONS", tmp_path)
+    with pytest.raises(RuntimeError, match=str(tmp_path)):
+        migrate(None)
 
 
 def test_migrations_apply_and_are_recorded(conn):

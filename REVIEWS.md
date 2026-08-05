@@ -27,6 +27,25 @@ runner exits 0 reporting success when it finds no migration files, and the
 built wheel does not contain `migrations/`. The next task is the compose file
 that runs this on web start.
 
+> **RESOLVED** in the follow-up commit on `ralph/phase-0`. Finding 1 is fixed by
+> the suggested guard: `migrate()` now globs once, up front, and raises
+> `RuntimeError(f"no migrations found at {MIGRATIONS}")` on an empty set, so an
+> empty `migrations/` is a startup crash naming the path it searched instead of
+> `exit 0, nothing to apply`. Whether the wheel should also carry `migrations/`
+> is left to the compose task, as the finding suggests — the guard is what makes
+> either choice fail loudly. Finding 2 is fixed by deleting the
+> `TEST_DATABASE_URL` branch; the throwaway cluster is the path that actually
+> runs, and the docstring now records *why* there is no DSN switch instead of
+> advertising one that does not survive its second use.
+>
+> New check: `test_migrate_refuses_to_succeed_with_no_migrations` points
+> `MIGRATIONS` at an empty `tmp_path` and expects the raise. It needs no server
+> — the guard runs before `conn` is touched — so it cannot be silently skipped
+> on a machine without Postgres. Confirmed it catches the defect: with the guard
+> absent from `kanakko/migrate.py`, `uv run pytest -q` reported `1 failed, 7
+> passed` and the failure was exactly that test; with it restored, `8 passed, 1
+> warning in 1.10s`.
+
 ### What I actually checked
 
 | Check | Command | Result |

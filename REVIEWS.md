@@ -12,6 +12,156 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `e1032a1` — loopback binding, tzdata, DSN password constraint
+
+**Scope:** the three findings from the review of `4341744`. `Dockerfile`,
+`docker-compose.yml`, `tests/test_compose.py`, `TASKS.md` (annotation only),
+`REVIEWS.md`. No box ticked, no new queue work.
+
+**Status: ⚠️ CHANGES REQUESTED** — one finding, and it is not about the
+artifact. All three fixes are real and correct: the port is loopback, `tzdata`
+is on the apt line, the DSN constraint is stated at the interpolation site and
+carried onto the `.env.example` task. The commit message's claims all
+reproduced, including the mutation results, and I re-derived the anchor merge
+independently. The finding is that the **new port guard does not guard** — three
+ordinary edits reintroduce the exact 0.0.0.0 exposure it was written to prevent
+and it stays green, one of them publishing Postgres. The next task after
+`.env.example` is the human Dokploy deploy, which is the same timing argument
+the last review made, and the fix is about five lines.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite passes | `uv run pytest -q` | `14 passed, 1 warning in 1.13s`. Matches the commit's claim. |
+| **Commit's claim: both fixes reverted → 2 red** | reverted `127.0.0.1:` prefix *and* `tzdata` together, `uv run pytest tests/test_compose.py -q` | `2 failed, 4 passed` — exactly `test_image_ships_zone_files` and `test_web_publishes_on_loopback_only`. Claim verified verbatim. |
+| Port guard is non-vacuous on the quoted form | port → `- "8000:8000"` alone | `1 failed, 5 passed`, assertion message quoted `'8000:8000'` — it really walked a port list. Verified. |
+| tzdata guard is non-vacuous | `cron tzdata` → `cron` alone | `1 failed, 5 passed`, `assert None` at `tests/test_compose.py:39`. Verified. |
+| **Commit's claim: the `&app-env` merge survived the new comment** | `uv run --with pyyaml python -c "yaml.safe_load(...)"` | `services: ['cron','db','web']`; `web ports: ['127.0.0.1:8000:8000']`; `web env`: `DATABASE_URL` only; `cron env`: **both** `DATABASE_URL` and `TZ: Asia/Kolkata`. Merge intact, claim verified. |
+| **Port guard bypass — unquoted** | port → `- 8000:8000` (parses as the string `'8000:8000'`, a valid mapping — `8000` > 59 so no YAML sexagesimal) | **`6 passed`.** Host-wide exposure restored, guard green. |
+| **Port guard bypass — another service** | added `ports: - "5432:5432"` to `db`; parse confirms `db ports: ['5432:5432']` | **`6 passed`.** Postgres on `0.0.0.0:5432`, guard green. |
+| **Port guard bypass — long syntax** | `- target: 8000 / published: 8000` (no `host_ip`); parse confirms `[{'target': 8000, 'published': 8000}]` | **`6 passed`.** Guard green. |
+| Finding 2's DSN claim, re-run not assumed | `psycopg.conninfo.conninfo_to_dict` over `postgresql://kanakko:<pw>@db:5432/kanakko` | `p@ssw0rd` → **`host='ssw0rd@db'`**, `pw='p'`; `a/b` → `port='a'`, `dbname='b@db:5432/kanakko'`; `pa%ss` and `has space` → `ProgrammingError`; `simple123`, `x+y=z` → correct. The comment on `docker-compose.yml:9-11` and the `[A-Za-z0-9._~-]` constraint on `TASKS.md:26` are both accurate. |
+| Task ticks | `git show --stat HEAD`, read `TASKS.md` | No box flipped. `.env.example` line annotated only, still `- [ ]`. `docs/` and `migrations/` untouched. Honest. |
+| Secrets | read the diff | No literal token, password, or key. Every value still `${VAR:?see .env.example}`. |
+| Spec surface | diff against `docs/DECISIONS.md` | No `float`, no SQL, no category literal, no prompt, no ORM/Celery/Redis/charting dependency, no conversation state. §8 same-image still guarded; §10's `TZ` still present on `cron` only, which §10 wants. |
+| Tree restored after every mutation | `git status --porcelain` after each | Empty each time. Final: `14 passed`. |
+
+---
+
+### Finding 1 — the new loopback guard passes on three ordinary ways to reintroduce the exposure, one of them publishing Postgres
+
+`tests/test_compose.py:42-49`
+
+```python
+for published in re.findall(r"^\s+- \"([^\"]+)\"$", service("web"), re.M):
+    assert published.startswith("127.0.0.1:"), published
+```
+
+The guard is right about today's file — I confirmed it goes red on
+`- "8000:8000"`, non-vacuously. But it recognises exactly one spelling of a
+published port, in exactly one service, and `re.findall` returning nothing is
+indistinguishable from a pass. Three edits, all of them things a person writes
+without thinking, walk straight past it. Each verified, not argued:
+
+| Edit | What the stack does | Guard |
+|---|---|---|
+| `- 8000:8000` (quotes dropped) | publishes `0.0.0.0:8000` | `6 passed` |
+| `ports: - "5432:5432"` on `db` | publishes `0.0.0.0:5432` | `6 passed` |
+| `- target: 8000` / `published: 8000` | publishes `0.0.0.0:8000` | `6 passed` |
+
+The quote-dropping one is the likely one: quoting compose ports is a habit
+people have *because* of the `- 22:22` sexagesimal trap, and `8000:8000` is
+above 59, so YAML hands back the string either way and nothing complains. The
+`db` one is the expensive one. The guard is scoped to `web` because that is
+where the last finding was, but the risk is host-wide, and the natural debugging
+move — publish 5432 for a minute to run `psql` against the deployed stack — puts
+Postgres on a team-owned box's public interface with the credentials from
+`.env`, forgets the line, and this suite says the stack is fine. That is
+strictly worse than the `/telegram/webhook` exposure the guard was written for.
+
+Failure scenario, concretely: Phase 3 or a debugging pass adds
+`ports: - 5432:5432` under `db`. `uv run pytest` → `14 passed`. The file is
+pasted into Dokploy on `doc-panel` (49.12.44.133). Postgres answers on
+`0.0.0.0:5432` behind a Hetzner firewall whose documented posture is 80/443
+public and SSH restricted — so possibly closed at the edge, but the host's other
+tenants are inside it. Nothing errors, and the one file that is supposed to
+notice is green.
+
+Fix — read the ports out of `ports:` rather than out of the whole block, accept
+both spellings, cover every service, and assert the walk was non-empty so a
+future syntax change fails loudly instead of silently. No new dependency:
+
+```python
+def test_no_service_publishes_beyond_loopback():
+    """This file is pasted into Dokploy on a shared host (DECISIONS §14).
+
+    Any 0.0.0.0 binding puts the service on a team-owned box's public
+    interface. Nothing about it looks wrong, so it has to be asserted.
+    """
+    found = 0
+    for name in ("web", "db", "cron"):
+        block = re.search(r"^    ports:\n((?:      [-\s].*\n)+)", service(name), re.M)
+        if not block:
+            continue
+        for published in re.findall(r"^      - \"?([^\"\n]+)\"?$", block.group(1), re.M):
+            found += 1
+            assert published.startswith("127.0.0.1:"), f"{name}: {published}"
+        # long syntax has no bare list items — fail rather than skip it
+        assert "target:" not in block.group(1), f"{name}: use short syntax with 127.0.0.1"
+    assert found, "no published port found — the guard stopped reading the file"
+```
+
+The `assert found` is the part that matters most: it is what turns the next
+silent bypass into a red test.
+
+I ran that replacement against all five files rather than proposing it untested
+(`/tmp/check_suggestion.py`, not committed):
+
+```
+  PASS  current file (must PASS)
+  FAIL  unquoted 8000:8000        -> web: 8000:8000
+  FAIL  db publishes 5432         -> db: 5432:5432
+  FAIL  long syntax no host_ip    -> web: target: 8000
+  FAIL  ports block deleted       -> no published port found — the guard stopped reading the file
+```
+
+Green on the tree as it stands, red on every bypass above and on the guard
+losing its footing. Take it or improve on it — the requirement is that all four
+of those go red, not this particular regex.
+
+---
+
+### Notes — verified facts, not findings, so nobody re-opens them
+
+- **`python:3.12-slim` already ships `tzdata`.** The last review left this
+  `UNVERIFIED` and this commit says it "no longer matters either way". It does
+  resolve, and in the reassuring direction: `docker-library/python`'s
+  `3.12/slim-bookworm/Dockerfile` and `3.12/slim-trixie/Dockerfile` both run
+  `apt-get install -y --no-install-recommends ca-certificates netbase tzdata` in
+  the base layer. So `Dockerfile:5-7`'s "tzdata is not optional" is belt-and-
+  braces against the base image changing, not the repair of a live defect — keep
+  it, the reasoning is sound, but the sidecar was never on UTC for this reason.
+  It also means there is no `DEBIAN_FRONTEND` hazard here: `tzdata` is already at
+  the newest version, so the apt call cannot reach the debconf geographic-area
+  prompt that hangs builds.
+- **The commit's load-bearing Traefik claim holds.** Dokploy's Docker Compose
+  domain docs: *"At runtime, during the deployment phase, Dokploy automatically
+  adds Traefik labels internally to your Docker Compose file"* and attaches the
+  service to `dokploy-network`; the manual route is to declare
+  `networks: dokploy-network: external: true` yourself. `DEPLOYMENT.md` step 4
+  uses `domain.create`, i.e. the automatic path. So Traefik really does reach the
+  container over the docker network and never over the published port — the
+  loopback binding is safe, and the **absence of a `networks:` block in
+  `docker-compose.yml` is correct, not an oversight.** Don't "fix" it.
+- The Phase 3 notes from the last review all still stand and are all still
+  unchecked work: cron not passing its environment to spawned jobs, `PATH` not
+  reaching them, the `db` container running UTC, and whether the Debian `cron`
+  daemon honours `TZ` at all versus `CRON_TZ=`. `docker build` is still refused
+  here, so that last one stays `UNVERIFIED`.
+
+---
+
 ## 2026-08-05 — `4341744` — compose stack (web, db, cron) + Dockerfile
 
 **Scope:** Phase 0 task 5. New `Dockerfile`, `.dockerignore`,

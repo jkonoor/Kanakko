@@ -12,6 +12,195 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `4341744` — compose stack (web, db, cron) + Dockerfile
+
+**Scope:** Phase 0 task 5. New `Dockerfile`, `.dockerignore`,
+`docker-compose.yml`, `tests/test_compose.py`; `TASKS.md` line 25 ticked.
+
+**Status: ⚠️ CHANGES REQUESTED** — three findings, none of them a stub and none
+of them the tick being false. The task is genuinely done: three services exist,
+`cron` really shares the image and really carries `TZ=Asia/Kolkata`, and I
+reproduced every mutation the commit message claims to have run. The findings
+are about the *deployed artifact*, and their timing is why they block: the next
+two queue items are `.env.example` (finding 2 lives there) and the human Dokploy
+deploy (finding 1's blast radius). All three fixes together are about four
+lines, and they get an order of magnitude more expensive after a human has
+deployed this file.
+
+The commit message is unusually honest — it flags the unbuilt image itself. I
+confirmed that block independently rather than taking its word for it.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite passes | `uv run pytest -q` | `12 passed, 1 warning in 1.08s`. Matches the commit's claim. |
+| **Docker really is blocked here** | `docker ps` · `docker images` · `docker info --format '{{.ServerVersion}}'` · `docker compose -f docker-compose.yml config -q` · `docker pull python:3.12-slim` | The daemon **is** up and reachable (`docker ps` returned a running `mongo:6.0`), but every write/inspect verb is refused: `This command requires approval`. So the commit's "docker is UNKNOWN on this host" is understated in one direction and correct in the other — docker exists, and `compose config` is still not runnable. **I could not build the image either.** |
+| Compose file is valid YAML and the anchor merges | `uv run --with pyyaml --no-project python -c "yaml.safe_load(...)"` from `/tmp` (no change to `pyproject.toml` or `uv.lock`) | `services: ['cron','db','web']`; `web` → `build=.`, env has `DATABASE_URL` only, `ports=['8000:8000']`; `cron` → `build=.`, env has **both** `DATABASE_URL` and `TZ: Asia/Kolkata` (the `<<: *app-env` merge works); `db` → no `build`, no `ports`; `volumes: {'pgdata': None}`. |
+| **Commit's claim: TZ removed/UTC → red** | edited `docker-compose.yml:49` to `TZ: UTC`, `uv run pytest tests/test_compose.py -q` | `1 failed, 3 passed` — `test_cron_runs_in_asia_kolkata`, `assert None` at `tests/test_compose.py:27`. Verified. Restored with `git checkout --`, tree clean. |
+| **Commit's claim: migrate dropped from web's command → red** | replaced `web.command` with a bare `uvicorn …`, same run | `1 failed, 3 passed` — `test_web_migrates_before_it_serves` at `tests/test_compose.py:44`. Verified. Restored, clean. |
+| **Commit's claim: cron given its own image → red** | `cron.build: .` → `image: kanakko-cron:latest`, same run | `1 failed, 3 passed` — `test_web_and_cron_share_one_image` at `tests/test_compose.py:37`. Verified. Restored, clean. |
+| **The load-bearing packaging claim: `MIGRATIONS` resolves via the install, not `cwd`** | `ls .venv/lib/python3.12/site-packages \| grep pth` → `_editable_impl_kanakko.pth`; `cat` it → `/home/joshy/jk_projects/Kanakko`; then `cd /tmp && uv run --project … python` printing `kanakko.__file__` and `migrate.MIGRATIONS` | `cwd /tmp` · `file …/Kanakko/kanakko/__init__.py` · `MIGRATIONS …/Kanakko/migrations True`. The install really is editable and the path really comes from the package location, not the working directory. In the image that maps to `/app/kanakko` → `/app/migrations`, which `Dockerfile:15` COPYs. The claim holds. |
+| Nothing in the build needs a file the Dockerfile doesn't COPY | read `pyproject.toml` | No `readme =` key, `[tool.hatch.build.targets.wheel] packages = ["kanakko"]`. `pyproject.toml`, `uv.lock`, `kanakko/` are all COPYed before `uv sync`, so the hatchling build has what it needs. No missing-`README.md` build break. |
+| `postgres:16-alpine` can run the schema | read `migrations/001_init.sql` | `GENERATED ALWAYS AS IDENTITY` (PG10+), `NUMERIC(12,2)`, `TIMESTAMPTZ`, one view. No extension, no `CREATE EXTENSION`, nothing that needs the non-alpine image. Fine on 16. |
+| Secrets | read `Dockerfile`, `docker-compose.yml`, `tests/test_compose.py`, `.dockerignore` | No literal password, token, or key. Every value is `${VAR:?see .env.example}`. `.dockerignore` excludes `.env`; `.gitignore` already had `.env` and `*.env`. `db` publishes **no** port. Clean. |
+| Spec surface | read the diff against `docs/DECISIONS.md` | No `float`, no SQL, no category literal, no LLM prompt, no ORM/Celery/Redis/charting dependency, no conversation state. §8's "same image, different command" is implemented and now guarded. §9/§3/§6/§11 have no new surface in this commit. |
+| Task tick | `git show --stat HEAD` | Only `TASKS.md:25` flipped. `docs/` and `migrations/` untouched — no applied migration edited, no spec edited to match the code. |
+
+**On the tick:** honest. The task asked for `web`, `db`, `cron`, same image,
+cron command, `TZ=Asia/Kolkata`. All present, all real, no stub. Finding 3 is
+about whether that TZ *takes effect*, not about whether it was written.
+
+---
+
+### Finding 1 — `web` publishes port 8000 on every host interface (blocking)
+
+`docker-compose.yml:37-38`
+
+```yaml
+    ports:
+      - "8000:8000"
+```
+
+The `ponytail:` comment above it is right that Traefik reaches the container
+over the compose network — which is exactly why the published port is not
+needed in production. But the same file is what gets pasted into Dokploy, so
+the binding ships: `0.0.0.0:8000` on a **team-owned** host (DECISIONS §14 names
+that explicitly).
+
+Failure scenario: the human deploy task lands this file on `doc-panel`. Today
+the only route is `/healthz`, so the damage is a squatted host port on shared
+infra. One phase later, `POST http://<host-ip>:8000/telegram/webhook` reaches
+the update handler in plaintext, from anywhere, **bypassing the HTTPS path
+DECISIONS §14 chose the webhook for** and bypassing anything the domain gets in
+front of it. Phase 4's Mini App routes inherit the same door. Nothing errors —
+the app answers normally, just on a channel nobody meant to open.
+
+Fix — one line, and local `docker compose up` behaves identically
+(`http://localhost:8000/healthz` still works), because Traefik never used the
+published port:
+
+```yaml
+    ports:
+      - "127.0.0.1:8000:8000"
+```
+
+### Finding 2 — `DATABASE_URL` is string-interpolated, so a password with `@`, `/`, `%` or a space silently builds the wrong DSN (blocking)
+
+`docker-compose.yml:9`
+
+```yaml
+  DATABASE_URL: "postgresql://${POSTGRES_USER:?…}:${POSTGRES_PASSWORD:?…}@db:5432/${POSTGRES_DB:?…}"
+```
+
+Composing one credential set instead of a fourth secret is the right call. The
+gap is that the password goes into a URI without percent-encoding. I ran the
+project's own parser (`psycopg.conninfo.conninfo_to_dict`) over
+`postgresql://kanakko:<pw>@db:5432/kanakko`:
+
+| `POSTGRES_PASSWORD` | parsed as |
+|---|---|
+| `simple123` | `user=kanakko password=simple123 host=db port=5432 dbname=kanakko` ✅ |
+| `p@ssw0rd` | `password='p'`, **`host='ssw0rd@db'`** |
+| `a/b` | `user=None password=None`, **`port='a'`, `dbname='b@db:5432/kanakko'`** |
+| `pa%ss` | `ProgrammingError: invalid percent-encoded token: "pa%ss"` |
+| `has space` | `ProgrammingError: unexpected spaces found in "has space"` |
+| `x+y=z`, `k#1` | parsed correctly ✅ |
+
+Failure scenario: the operator pastes a generated password containing `@` into
+Dokploy. `db` receives it raw as `POSTGRES_USER`/`POSTGRES_PASSWORD` and comes
+up **healthy**, so `depends_on: service_healthy` is satisfied; `web` then dies
+in `python -m kanakko.migrate` on a host named `ssw0rd@db`. It fails loudly —
+but at the wrong thing. The error names DNS, the database is demonstrably fine,
+and the actual cause is one character in a secret that can't be read from the
+logs. `restart: unless-stopped` turns it into a crash loop.
+
+Fix — cheapest thing consistent with the one-credential-set decision, and
+`.env.example` is literally the next task: state the constraint where the value
+is chosen, plus a matching comment on line 9.
+
+```
+# Must be URL-safe — it is interpolated into DATABASE_URL unencoded.
+# Use [A-Za-z0-9._~-] only; @ / % and spaces break the DSN.
+POSTGRES_PASSWORD=
+```
+
+### Finding 3 — the TZ guard asserts the string, not the effect; `TZ` is a silent no-op if the image can't resolve the zone (blocking)
+
+`tests/test_compose.py:26-27`, `Dockerfile:6-8`
+
+`test_cron_runs_in_asia_kolkata` greps `TZ: Asia/Kolkata` out of the YAML. That
+catches the value being deleted or changed — I confirmed both. It cannot catch
+the value being *ignored*, which is the same 21:00→02:30 outcome the test's own
+docstring is written to prevent.
+
+glibc's fallback is silent. Measured on this host:
+
+```
+$ TZ=Asia/Kolkata date   → Wed Aug  5 06:15:16 PM IST 2026
+$ TZ=Asia/Nowhere  date  → Wed Aug  5 12:45:16 PM Asia 2026
+$ TZ=UTC           date  → Wed Aug  5 12:45:16 PM UTC 2026
+```
+
+An unresolvable zone name produces UTC wall-clock, exit 0, no warning — exactly
+the 5:30 shift DECISIONS §10 calls out, and `Asia/Nowhere` even reports itself
+as `Asia`.
+
+Two things that decide whether the setting bites, and I could verify **neither**
+here — `docker pull python:3.12-slim` and web access were both refused, so both
+are `UNVERIFIED`, not "broken":
+
+1. Whether `python:3.12-slim` ships `/usr/share/zoneinfo/Asia/Kolkata`. If it
+   doesn't, `TZ: Asia/Kolkata` is a no-op and the sidecar is on UTC with all
+   four guards green.
+2. Whether the Debian `cron` **daemon** honours the `TZ` environment variable at
+   all, as opposed to reading `/etc/localtime` or a `CRON_TZ=` line in the
+   crontab.
+
+Neither is worth another round of guessing, because one word closes the first
+and one line closes the second. `Dockerfile:6-8` already runs apt:
+
+```dockerfile
+    && apt-get install -y --no-install-recommends cron tzdata \
+```
+
+— no extra layer, and it stops the guarantee depending on what the base image
+happens to include. Then in the Phase 3 crontab task, open the file with
+`CRON_TZ=Asia/Kolkata` so the schedule states its own zone rather than
+inheriting one. Whoever picks up Phase 3 should confirm (1) and (2) against a
+built image and record the observed output, since by then `docker build` is
+reachable.
+
+---
+
+### Notes for Phase 3 — not findings, don't fix them now
+
+The crontab task is unchecked, so none of this counts against this commit. It
+is written down because the compose file makes two of them *look* handled.
+
+- **Cron does not hand its own environment to the jobs it spawns.** `cron -f`
+  has `DATABASE_URL` in its env because `docker-compose.yml:45` merges it in,
+  but a spawned job gets cron's minimal environment. `kanakko.jobs.*` will see
+  no `DATABASE_URL` and `migrate.main()`-style code will exit
+  `DATABASE_URL is not set`. Same for `PATH`: `Dockerfile:22` puts
+  `/app/.venv/bin` on the image `PATH`, and cron jobs won't have it, so a bare
+  `python` in a crontab line is the system interpreter without the deps.
+- **The `db` container runs UTC.** `AT TIME ZONE 'Asia/Kolkata'` is explicit and
+  unaffected, but a report query that reaches for `CURRENT_DATE` or `now()::date`
+  buckets on the UTC date and is wrong for 5.5 hours a day. Use
+  `(now() AT TIME ZONE 'Asia/Kolkata')::date`.
+- **`web` deliberately has no `TZ`, and that is correct** — leave it. DECISIONS
+  §10 wants the zone stated explicitly at each call site; a container-wide `TZ`
+  on `web` would paper over a naive `datetime.now()` instead of exposing it.
+
+**Tree state after this review:** `git status --porcelain` clean. Every mutation
+above was reverted with `git checkout -- docker-compose.yml` and `uv run pytest
+-q` returns `12 passed` on the restored tree. No image was built, no container
+started, no `pyproject.toml`/`uv.lock` change (the pyyaml parse ran through
+`uv run --with pyyaml --no-project`).
+
+---
+
 ## 2026-08-05 — `d7a97fd` — migrator refuses to succeed with no migrations
 
 **Scope:** fixes both open findings on `3f33abf` — adds an up-front empty-glob

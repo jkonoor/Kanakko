@@ -9,9 +9,12 @@ other assertions pin decisions these two files are the only record of.
 import re
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).parent.parent
 COMPOSE = (ROOT / "docker-compose.yml").read_text()
 DOCKERFILE = (ROOT / "Dockerfile").read_text()
+SERVICES = yaml.safe_load(COMPOSE)["services"]
 
 
 def service(name: str) -> str:
@@ -47,18 +50,20 @@ def test_no_service_publishes_beyond_loopback():
     Every service, not just web: publishing 5432 to debug against the deployed
     database is a one-line edit that puts Postgres on the host's public
     interface with the credentials from .env.
+
+    Read through the YAML parser, not a regex over the text. Two rounds of QA
+    went on spellings a regex missed while the file really did publish the
+    port — quotes, a trailing `# debug`, four-space list items, long syntax,
+    a service the guard's hardcoded list had never heard of. The parser sees
+    what Docker sees, so all of those collapse into one comparison.
     """
     found = 0
-    for name in ("web", "db", "cron"):
-        block = re.search(r"^    ports:\n((?:      \S.*\n)+)", service(name), re.M)
-        if not block:
-            continue
-        # Long syntax has no bare list items, so the loop below would see none.
-        assert "target:" not in block.group(1), f"{name}: use short syntax with 127.0.0.1"
-        for published in re.findall(r"^      - \"?([^\"\n]+)\"?$", block.group(1), re.M):
+    for name, svc in SERVICES.items():
+        for published in svc.get("ports") or []:
             found += 1
-            assert published.startswith("127.0.0.1:"), f"{name}: {published}"
-    assert found, "no published port found — the guard stopped reading the file"
+            # str(): long syntax parses to a dict, a bare port to an int.
+            assert str(published).startswith("127.0.0.1:"), f"{name}: {published}"
+    assert found, "no published port found — web's ports: block is gone"
 
 
 def test_web_and_cron_share_one_image():

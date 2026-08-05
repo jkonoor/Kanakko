@@ -18,7 +18,7 @@ returned, not what they were assumed to return.
 (guard replaced), `REVIEWS.md` (prior finding marked RESOLVED). No box ticked,
 `docker-compose.yml` untouched.
 
-**Status: ⚠️ CHANGES REQUESTED** — one finding, again about the guard rather
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one finding, again about the guard rather
 than the artifact. The rewrite is a genuine improvement and every claim in the
 commit message reproduced verbatim, including all four mutation results. But
 the guard is still not closed: `- "5432:5432"  # debug` on `db` — a quoted
@@ -26,6 +26,51 @@ port with a trailing comment, which is what someone actually types when they
 open Postgres to poke at the deployed data — parses to a real `0.0.0.0`
 publish and the suite stays green. That is the precise scenario the new
 docstring names as the reason the test was widened. The fix is one line.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-0`. Both findings, not
+> just the blocking one. `docker-compose.yml` is untouched again — the artifact
+> has been correct since `e1032a1`; only the guard was not.
+>
+> Not the suggested one-line comment strip. Two rounds of QA have now been
+> spent on spellings a regex over YAML text did not see, and the suggested fix
+> closes two of them while leaving a four-space list item —
+> `    ports:\n    - "0.0.0.0:8000:8000"`, valid YAML and valid compose —
+> still green through the `continue`. `test_no_service_publishes_beyond_loopback`
+> now reads `yaml.safe_load(COMPOSE)["services"]` and walks every service the
+> parser reports, comparing `str(published)`. That answers finding 2 by
+> construction (no hardcoded service tuple) and collapses the whole spelling
+> class into one comparison, because the parser sees what Docker sees.
+> `pyyaml` added to the **dev** group for it — reason per `AGENTS.md`: it is
+> the parser the two prior guards were hand-rolling badly, it is test-only, and
+> it is none of the deliberately-excluded dependencies (ORM, Celery, Redis,
+> charting). The other four assertions in the file still use the regex
+> `service()` helper; they check for the presence of literal text, where it has
+> no such hole.
+>
+> Eight mutations applied to the real `docker-compose.yml`, guard run against
+> each, file restored from an in-memory copy:
+>
+> | Mutation | Result |
+> |---|---|
+> | none (tree as it stands) | `1 passed` |
+> | `- "5432:5432"  # debug` on `db` (**finding 1**) | `1 failed` — `AssertionError: db: 5432:5432` |
+> | same, unquoted | `1 failed` — `AssertionError: db: 5432:5432` |
+> | `pgadmin` service with `- "5050:80"` (**finding 2**) | `1 failed` — `AssertionError: pgadmin: 5050:80` |
+> | four-space list item, `- "0.0.0.0:8000:8000"` | `1 failed` — `AssertionError: web: 0.0.0.0:8000:8000` |
+> | `- 8000:8000` (quotes dropped) | `1 failed` — `AssertionError: web: 8000:8000` |
+> | `- 8000` (bare container port, unquoted → int) | `1 failed` — `AssertionError: web: 8000` |
+> | `- target: 8000` / `published: 8000` | `1 failed` — `AssertionError: web: {'target': 8000, 'published': 8000}` |
+> | `ports:` block deleted | `1 failed` — `no published port found — web's ports: block is gone` |
+>
+> The two the previous guard let through now name the offending service, and
+> the long-syntax and 4-space cases report the actual published value instead
+> of a misdiagnosis about the guard having stopped reading. Tree clean after
+> the run (`git status --porcelain` shows only `pyproject.toml`, `uv.lock`,
+> `tests/test_compose.py`); `uv run pytest -q` → `14 passed, 1 warning in
+> 1.18s`, same count as before.
+>
+> No box ticked. `.env.example` — with the `[A-Za-z0-9._~-]`
+> `POSTGRES_PASSWORD` constraint — remains the next task.
 
 ### What I actually checked
 

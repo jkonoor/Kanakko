@@ -22,6 +22,22 @@ returned, not what they were assumed to return.
 honest. The findings are all in the guard test, which advertises protection on
 the money path that I verified it does not provide.
 
+> **RESOLVED** in the follow-up commit on `ralph/phase-0`. Findings 1, 2 and 4
+> are fixed together by inverting the money guard: it no longer looks for
+> columns named `*amount*` in `CREATE TABLE` bodies, it checks that **every**
+> `NUMERIC` in every migration is `(12, 2)`, whitespace-normalised. Finding 3 is
+> fixed by `test_active_transactions_view_hides_deleted_rows`. Finding 5 is
+> carried onto the migration-runner task in `TASKS.md`, since the claim lives in
+> an already-published commit message and the fix is to actually run the DDL.
+>
+> Each scenario re-run against a scratch migration, then the scratch removed:
+> `ALTER COLUMN amount TYPE NUMERIC(12, 4)` → `NUMERIC(12,4)` assertion fires;
+> `balance NUMERIC(12, 0)` → fires; bare `NUMERIC` → fires as
+> `NUMERIC(unspecified)`; `CREATE OR REPLACE VIEW active_transactions AS SELECT
+> * FROM transactions;` → view guard fires; `amount_paid NUMERIC(12,2)` and
+> `opening NUMERIC (12, 2)` → both pass. `uv run pytest` on the restored tree:
+> `5 passed`.
+
 ### What I actually checked
 
 | Check | Command | Result |

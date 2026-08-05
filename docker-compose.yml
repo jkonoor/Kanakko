@@ -1,0 +1,56 @@
+# The whole stack: web, db, and the cron sidecar (DECISIONS §8).
+#
+# Locally: `docker compose up --build` with the keys from .env.example set.
+# On Dokploy this file is pasted in as a raw compose file and the environment
+# comes from `compose.saveEnvironment` — no secret ever lives in here, and the
+# `:?` defaults make a missing one fail at `up` rather than at the first query.
+
+x-app-env: &app-env
+  DATABASE_URL: "postgresql://${POSTGRES_USER:?see .env.example}:${POSTGRES_PASSWORD:?see .env.example}@db:5432/${POSTGRES_DB:?see .env.example}"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?see .env.example}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?see .env.example}"
+      POSTGRES_DB: "${POSTGRES_DB:?see .env.example}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # web migrates on start, so "container exists" is not good enough.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: sh -c "python -m kanakko.migrate && exec uvicorn kanakko.app:app --host 0.0.0.0 --port 8000"
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+    # ponytail: published for local use; on Dokploy, Traefik reaches the
+    # container over the docker network once a domain is attached.
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  cron:
+    build: .
+    command: cron -f
+    environment:
+      <<: *app-env
+      # Not cosmetic: the crontab's wall-clock times are IST (DECISIONS §10,
+      # PLAN Phase 3). Without this the 21:00 summary fires at 02:30 IST and
+      # nothing errors. The three entries themselves land with Phase 3.
+      TZ: Asia/Kolkata
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

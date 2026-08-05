@@ -22,7 +22,7 @@ the plan's order and it matters.
 - [x] Add `kanakko/app.py` with a `/healthz` endpoint returning 200 and the app version
 - [x] Write `migrations/001_init.sql` — `users`, `transactions`, `pending_transactions`, `reminder_log`, and the `active_transactions` view, per the data model in `docs/PLAN.md`
 - [x] Add a migration runner that applies `migrations/*.sql` in order and records which have run — while doing it, actually attempt to execute `001_init.sql` against Postgres (`psql -f`, or `docker compose up db`) and record the command and its real output; that DDL has never been parsed by a server (`REVIEWS.md` finding 5 on `4b92212`)
-- [ ] Add `docker-compose.yml` with `web`, `db` (postgres), and `cron` services; `cron` uses the same image with a cron command and `TZ=Asia/Kolkata`
+- [x] Add `docker-compose.yml` with `web`, `db` (postgres), and `cron` services; `cron` uses the same image with a cron command and `TZ=Asia/Kolkata`
 - [ ] Add `.env.example` with every required key and empty values
 - [ ] `[human]` Create the Dokploy project, deploy, attach domain, verify `/healthz` over HTTPS — see `docs/DEPLOYMENT.md`
 

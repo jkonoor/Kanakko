@@ -12,6 +12,125 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `c214544` — loopback guard widened to every service and spelling
+
+**Scope:** finding 1 from the review of `e1032a1`. `tests/test_compose.py`
+(guard replaced), `REVIEWS.md` (prior finding marked RESOLVED). No box ticked,
+`docker-compose.yml` untouched.
+
+**Status: ⚠️ CHANGES REQUESTED** — one finding, again about the guard rather
+than the artifact. The rewrite is a genuine improvement and every claim in the
+commit message reproduced verbatim, including all four mutation results. But
+the guard is still not closed: `- "5432:5432"  # debug` on `db` — a quoted
+port with a trailing comment, which is what someone actually types when they
+open Postgres to poke at the deployed data — parses to a real `0.0.0.0`
+publish and the suite stays green. That is the precise scenario the new
+docstring names as the reason the test was widened. The fix is one line.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite passes | `uv run pytest -q` | `14 passed, 1 warning in 1.03s`. Matches the commit's claim exactly. |
+| Diff is only what's claimed | `git show HEAD --stat` | `REVIEWS.md` +34/−2, `tests/test_compose.py` +18/−3. No `TASKS.md`, no `docker-compose.yml`. "No box ticked" verified. |
+| **Claim: `- 8000:8000` unquoted → red** | mutation applied to the real file, `pytest -k loopback` | `1 failed` — `AssertionError: web: 8000:8000`. Verified. |
+| **Claim: `- "5432:5432"` on `db` → red** | same | `1 failed` — `AssertionError: db: 5432:5432`. Verified — the loop really does visit `db`. |
+| **Claim: long syntax → red** | `- target: 8000` / `published: 8000` | `1 failed` — `web: use short syntax with 127.0.0.1`. Verified. |
+| **Claim: `ports:` deleted → red** | block removed | `1 failed` — `no published port found`. Verified, the `assert found` backstop works. |
+| Single-quoted `'0.0.0.0:8000:8000'` | mutation | `1 failed` — `AssertionError: web: '0.0.0.0:8000:8000'`. Caught. |
+| Bare container port `- "8000"` (ephemeral publish on all interfaces) | mutation | `1 failed` — `AssertionError: web: 8000`. Caught. |
+| **Quoted port + trailing comment on `db`, `web` left correct** | `- "5432:5432"  # debug` | **`1 passed`** — finding 1 below. |
+| Same, unquoted | `- 5432:5432  # debug` | `1 failed` — `AssertionError: db: 5432:5432  # debug`. Only the *quoted* form slips. |
+| That the slipping line is a real publish, not a YAML error | `yaml.safe_load` on it | `{'ports': ['5432:5432']}` — a genuine all-interfaces publish of Postgres. |
+| Fourth service with a published port | added `pgadmin` with `- "5050:80"` | **`1 passed`** — finding 2 below. |
+| YAML-legal 4-space list items under `ports:` | `    - "0.0.0.0:8000:8000"` | `1 failed`, but via the backstop message `no published port found — the guard stopped reading the file`. Red, so not blocking; the message misdiagnoses it. |
+| Tree restored after every mutation | `diff` against a pre-run copy, `git status --porcelain` | Identical, clean. `uv run pytest -q` → `14 passed` again. |
+
+Mutations were driven by a throwaway script in `/tmp` that wrote the real
+`docker-compose.yml`, ran the guard, and restored the original from an
+in-memory copy; `pyyaml` was installed into the venv for the parse check and
+uninstalled afterwards (`git status --porcelain` empty at the end).
+
+### Findings
+
+**1. `tests/test_compose.py:59` — a quoted published port with a trailing
+comment is skipped silently, so `db` can publish 5432 on `0.0.0.0` and the
+suite stays green.** *(blocking)*
+
+The item regex is `^      - \"?([^\"\n]+)\"?$`. Anchored on `$` with `"`
+excluded from the character class, it cannot match a line that has anything
+after the closing quote. Given:
+
+```yaml
+  db:
+    ports:
+      - "5432:5432"  # debug against the deployed db
+```
+
+`re.findall` returns `[]` for `db`, the loop body never runs, and `found` is
+still `1` from `web`'s correct line, so the `assert found` backstop does not
+fire either. Confirmed: `1 passed, 5 deselected`. `yaml.safe_load` on that
+line returns `['5432:5432']`, so Docker publishes Postgres on every interface
+of a shared Dokploy host with the credentials from `.env` — the exact outcome
+the docstring two lines above says the test was widened to prevent. The
+unquoted spelling of the same edit is caught (`AssertionError: db:
+5432:5432  # debug`), which makes this inconsistency easy to trust past.
+
+Same defect makes the `web` case report the wrong reason rather than pass:
+`- "0.0.0.0:8000:8000"  # debugging` fails with `no published port found — the
+guard stopped reading the file`, sending the reader after a broken regex when
+the file is fine and the port is open.
+
+*Fix:* strip inline comments before matching, which fixes both spellings and
+the 4-space-indent message at once — one line ahead of the existing loop:
+
+```python
+items = re.sub(r"\s+#.*$", "", block.group(1), flags=re.M)
+for published in re.findall(r"^      - \"?([^\"\n]+)\"?$", items, re.M):
+```
+
+**2. `tests/test_compose.py:50` — the service list is hardcoded to
+`("web", "db", "cron")`, so a service added later is unguarded.** *(minor)*
+
+Adding `pgadmin` (or `adminer`, or a second `web`) with `ports: - "5050:80"`
+passes: `1 passed`. Lower severity than finding 1 — adding a service is a
+deliberate multi-line edit, not the one-line debugging edit the test exists to
+stop — but the guard advertises "no service publishes beyond loopback" and
+does not check that.
+
+*Fix:* derive the names from the file instead of listing them, so new services
+are covered by construction:
+
+```python
+SERVICES = re.findall(
+    r"^  (\w+):$",
+    re.search(r"^services:\n(.*?)(?=^\S|\Z)", COMPOSE, re.M | re.S).group(1),
+    re.M,
+)
+```
+
+`test_stack_has_web_db_and_cron` already pins that `web`, `db` and `cron` are
+present, so the explicit triple is not load-bearing here.
+
+### Notes — verified, not findings
+
+- The `RESOLVED` block appended to the `e1032a1` review is accurate on every
+  line I checked; its four-row mutation table reproduces exactly. It overstates
+  only in calling the prior finding closed — three of the four spellings are
+  now caught, and the `db`-publishes-5432 scenario it names as "the load-bearing
+  one" is still reachable through finding 1.
+- `docker-compose.yml` is byte-identical to `e1032a1` (`git show HEAD --stat`),
+  as claimed. The artifact remains correct: `127.0.0.1:8000:8000`, `TZ:
+  Asia/Kolkata` on `cron`, `tzdata` on the apt line, shared `build: .`, migrate
+  before uvicorn — the other five checks in the file all still pass.
+- No `TASKS.md` box moved, and none should have: `.env.example` is still open,
+  still carrying the `[A-Za-z0-9._~-]` `POSTGRES_PASSWORD` constraint.
+- Nothing in this commit touches money, timezone bucketing, `active_transactions`,
+  prompts, or `initData` — those decisions are unaffected and their tasks are
+  still unchecked.
+
+---
+
 ## 2026-08-05 — `e1032a1` — loopback binding, tzdata, DSN password constraint
 
 **Scope:** the three findings from the review of `4341744`. `Dockerfile`,

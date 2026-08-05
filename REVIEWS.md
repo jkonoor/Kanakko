@@ -12,6 +12,129 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `d7a97fd` — migrator refuses to succeed with no migrations
+
+**Scope:** fixes both open findings on `3f33abf` — adds an up-front empty-glob
+guard to `migrate()` (`kanakko/migrate.py:28-33`) and deletes the
+`TEST_DATABASE_URL` branch from the test fixture, plus a new check
+`test_migrate_refuses_to_succeed_with_no_migrations`. `TASKS.md` untouched, no
+queue movement.
+
+**Status: ✅ DONE** — no blocking issues. Both findings are genuinely fixed, and
+I reproduced the *original* defect scenario end to end rather than trusting the
+commit message: an unpacked wheel with no `migrations/`, pointed at a live
+throwaway cluster from `cwd=/tmp`, previously exited **0** printing `nothing to
+apply`; it now exits **1** with `RuntimeError: no migrations found at
+/tmp/qa_e2e3/site/migrations` and leaves no `schema_migrations` table behind.
+The guard is also precise — the same layout *with* `migrations/` present applies
+and then no-ops, exit 0 both runs. Two non-blocking findings recorded below; the
+compose task is not blocked on either.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite passes | `uv run pytest -v` | `8 passed, 1 warning in 1.02s`. The two Postgres-backed tests **PASSED**, not skipped — the server path really ran on this machine. |
+| **Commit's claim: the new check catches the defect** | deleted the 6-line guard block from `kanakko/migrate.py`, `uv run pytest -q` | `1 failed, 7 passed` — the failure is exactly `test_migrate_refuses_to_succeed_with_no_migrations`. Note the *mode*: `AttributeError: 'NoneType' object has no attribute 'transaction'` at `kanakko/migrate.py:30`, not a missing-raise. That still fails the `pytest.raises(RuntimeError)`, and because the test passes `conn=None` it also pins the guard's *position* — moving it below `with conn.transaction()` would fail the same way. Claim verified. |
+| Tree restored after that mutation | `cp` back, `uv run pytest -q`, `git status --short` | `8 passed`, clean. |
+| **Commit's claim: the new check needs no server** | `uv run pytest tests/test_migrate.py::test_migrate_refuses_to_succeed_with_no_migrations -v` | `1 passed in 0.08s` vs `1.02s` for the full suite — no cluster booted. It does not take the `conn` fixture, so it cannot be skipped on a Postgres-less machine. Verified. |
+| Wheel contents | `uv build --wheel -o /tmp/qa_wheel`, list the zip via `zipfile` | `kanakko/__init__.py`, `kanakko/app.py`, `kanakko/migrate.py`, dist-info. **Still no `migrations/`** — deferred to the compose task, as the finding suggested. |
+| **The finding-1 scenario, end to end** | unpacked that wheel to `/tmp/qa_e2e3/site`, `PYTHONPATH` so only the wheel's `kanakko` imports, real throwaway cluster, `python -m kanakko.migrate` from `cwd=/tmp` | `kanakko : /tmp/qa_e2e3/site/kanakko/__init__.py`, `MIGRATIONS: /tmp/qa_e2e3/site/migrations \| exists: False`, then **`EXIT CODE: 1`**, `stdout: ''`, `RuntimeError: no migrations found at /tmp/qa_e2e3/site/migrations`. Schema after: `(transactions, schema_migrations) = (None, None)` — the guard fires before the bookkeeping table is created, so it leaves nothing behind. Observed, not inferred. |
+| **The guard does not false-positive** | same layout, `migrations/` copied next to the package, migrator run twice | `run 1: exit=0 stdout='applied 001_init.sql'` · `run 2: exit=0 stdout='nothing to apply'` · `objects = ('transactions', 'active_transactions', 'schema_migrations')` · `recorded = [('001_init.sql',)]`. Either fix the compose task picks (`force-include` or `COPY`) will work; only the broken packaging crashes. |
+| **What the suite reports with no server binaries** | pytest plugin stubbing `pg_bin` to `None`, `uv run pytest -p qa_noserver -q -rs` | `6 passed, 2 skipped`, **exit code 0**. The skipped pair is `test_migrations_apply_and_are_recorded` and `test_schema_stores_money_exactly`. See finding 1. Scratch plugin removed; `git status --short` clean. |
+| Docstring's stated reason is factually true | `assert migrate(conn) == []` on the second call, plus `run 2` above | A persistent DSN really would pass once and fail after. The claim in `tests/test_migrate.py:5-7` holds. |
+| Task ticks | `git diff HEAD~1 HEAD --stat -- TASKS.md AGENTS.md docs/ migrations/` | empty. Nothing ticked, no spec edited, no applied migration touched. Consistent with the commit message. |
+| Secrets | `grep -cE "password\|secret\|token\|api[_-]?key\|float"` over the diff | `0`. No credential, no `float`. |
+| Tree and processes restored | `git status --short`, `pgrep -af "postgres.*qa_e2e"` | clean, `(none)`. Scratch clusters stopped, `/tmp/qa_*` removed. |
+
+**Spec conformance:** this commit touches packaging and a test fixture. It adds
+no dependency, no ORM, no float, no SQL, no timestamp handling, no category
+literal and no LLM prompt, so §9/§10/§11/§3/§6 have no new surface. §7's "plain
+SQL, numbered `.sql`" is untouched. The one spec-adjacent effect is positive:
+the §9 money round-trip (`test_schema_stores_money_exactly`) can no longer pass
+vacuously against a schema that was never created, because the migrator now
+refuses to report success on an empty set.
+
+**Not a stub:** the guard is four real lines with a real failure path, and I
+executed that path from an installed artifact against a live server, not from
+the test suite.
+
+### Findings
+
+**1 — Low/medium, non-blocking. With `TEST_DATABASE_URL` gone there is now no
+way to run the two server-backed tests on a machine without `initdb`/`pg_ctl`,
+and their absence is a green build.** `tests/test_migrate.py:28-30`
+
+Removing the branch was one of the two fixes the prior review offered, so this
+is not a wrong call. But the docstring's justification is narrower than the case
+it removes. `tests/test_migrate.py:5-7` argues that a persistent DSN "would pass
+once and then fail on every later run" — true for a developer's own database,
+and I confirmed the underlying property. It is not true for the case such an env
+var normally exists to serve: an ephemeral CI service container, which is
+*virgin on every run* and where the assertion would hold every time.
+
+*Failure scenario:* CI (there is no `.github/` yet, so this is the moment before
+it exists) runs the suite in a python image with `psycopg` but no Postgres
+*server* binaries — the normal shape, since the server lives in a `db` service
+container. Observed with `pg_bin` stubbed to `None`: `6 passed, 2 skipped`,
+**exit code 0**. The two that vanish are the only checks that execute DDL, and
+one of them, `test_schema_stores_money_exactly:76`, is the sole server-enforced
+guarantee that `amount` is really `NUMERIC(12,2)` and that
+`active_transactions` really hides soft-deleted rows. `AGENTS.md:37` calls money
+the one area where "it's probably fine" is not acceptable; here it goes missing
+without turning the build red.
+
+*Why not blocking:* nothing consumes this today — no CI exists, and on this
+machine and any Debian box with `postgresql-16` installed the tests run for
+real. It costs nothing to leave until CI or a container test run appears.
+
+*Suggested fix (whenever CI lands, not now):* rather than restoring the env var
+as it was, make the skip loud in the environment that matters — e.g. honour
+`TEST_DATABASE_URL` again but have that branch `CREATE DATABASE` a
+uniquely-named scratch DB and drop it (the prior review's second option, which
+survives repeated runs), or set a `--strict-markers`-style opt-in such as
+`KANAKKO_REQUIRE_PG=1` that turns the skip into a failure. Either way the rule
+worth encoding is: a run that silently omits the money round-trip should not
+exit 0.
+
+**2 — Low. The new check exercises an empty directory; production's failure is a
+missing one.** `tests/test_migrate.py:55`
+
+`monkeypatch.setattr(..., tmp_path)` points `MIGRATIONS` at a directory that
+exists and is empty. The scenario the guard is written for — the docstring at
+`:49-50` says so — is `site-packages/migrations`, which does not exist at all.
+Those are the same code path only because `Path.glob` on a missing directory
+returns empty rather than raising.
+
+*Failure scenario:* it is thin, which is why this is Low — if a future Python or
+a `Path` subclass made `glob` raise `FileNotFoundError` on a missing directory,
+the guard's `RuntimeError` would never be reached, the test would still pass on
+its empty-but-present directory, and the deploy would fail with a different
+error than the one the guard was written to produce. I checked the real case
+rather than assuming it: the e2e run above hit a genuinely absent
+`/tmp/qa_e2e3/site/migrations` and did raise the `RuntimeError`, so the guard is
+correct today.
+
+*Suggested fix:* one word — `tmp_path / "absent"` instead of `tmp_path`, which
+tests the shape production actually has. The empty-directory case is then also
+still covered, since both reach the same `if not files`.
+
+### Noted, not findings
+
+- **The wheel still ships no `migrations/`** (verified above). The commit defers
+  the `force-include`-vs-`COPY` choice to the compose task and the prior review
+  suggested exactly that. The deferral is now safe rather than silent, and I
+  confirmed both halves: broken packaging → exit 1, correct packaging → applies
+  cleanly. Worth carrying into the compose task as a checklist item, not a
+  finding here.
+- The skip message at `tests/test_migrate.py:30` names only
+  `/usr/lib/postgresql`, but `pg_bin` also searches `/usr/local/pgsql/bin`. Only
+  matters to whoever reads that message while debugging a skip.
+- The one-transaction property is still unpinned by any test — carried forward
+  from the `3f33abf` review, unchanged by this commit and not made worse by it.
+
+---
+
 ## 2026-08-05 — `3f33abf` — migration runner + `001_init.sql` executed on Postgres
 
 **Scope:** adds `kanakko/migrate.py` (applies `migrations/*.sql` in filename

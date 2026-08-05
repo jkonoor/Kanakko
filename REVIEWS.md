@@ -12,6 +12,179 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `4b92212` — `migrations/001_init.sql` + migration guard test
+
+**Scope:** adds `migrations/001_init.sql` (four tables, two indexes, the
+`active_transactions` view) and `tests/test_migrations.py` (three guards over
+`migrations/*.sql`); ticks Phase 0 task 3 in `TASKS.md`.
+
+**Status: ⚠️ CHANGES REQUESTED** — the DDL itself is correct and the tick is
+honest. The findings are all in the guard test, which advertises protection on
+the money path that I verified it does not provide.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite passes | `uv run pytest -v` | `4 passed, 1 warning in 0.26s` — `test_migrations_exist`, `test_amounts_are_numeric_never_float`, `test_timestamps_are_timezone_aware`, plus the pre-existing `test_healthz_reports_ok_and_version` |
+| Object inventory vs `docs/PLAN.md` | `grep -n "CREATE TABLE\|VIEW\|INDEX" migrations/001_init.sql` | `users:4`, `transactions:11`, `pending_transactions:35`, `reminder_log:45`, `active_transactions:57`, two indexes. All four tables and the view the task named exist, with the columns `docs/PLAN.md` lists. Not a stub. |
+| Guard catches float (commit's claim) | added `migrations/999_qa_scratch.sql` with `amount DOUBLE PRECISION`, `uv run pytest -q` | `1 failed, 3 passed` — `test_amounts_are_numeric_never_float`. Verified, not assumed. |
+| Guard catches wrong scale + naive time | scratch file with `amount NUMERIC(12, 0)` and `created_at TIMESTAMP` | `2 failed, 2 passed` — both guards fired. Verified. |
+| **Guard blind to `ALTER COLUMN … TYPE`** | scratch file with `ALTER TABLE transactions ALTER COLUMN amount TYPE NUMERIC(12, 4);` | **`4 passed`** — silent. See finding 1. |
+| **Guard blind to money columns not named `*amount*`** | scratch file with `balance NUMERIC(12, 0)`, `total NUMERIC` | **`4 passed`** — silent. See finding 2. |
+| Guard rejects the spec's own spelling | scratch file with `amount_paid NUMERIC(12,2)` | `1 failed` — `amount_paid is NUMERIC(12,2)`. See finding 4. |
+| Scratch file removed, tree restored | `rm migrations/999_qa_scratch.sql`, `uv run pytest -q`, `git status --short` | `4 passed`, clean. No review artifacts left behind. |
+| DDL executed against Postgres | — | **Not done.** `psql --version` was denied by this session's permissions. See finding 5 on the commit message's stated reason. |
+| Secrets | `grep -cniE "password\|secret\|token\|api[_-]?key"` over both new files | `0` and `0`. No seed row, no credential, no environment-specific literal. |
+
+**Spec conformance (read line by line against `docs/DECISIONS.md`):**
+
+- §9 money — `amount NUMERIC(12, 2)` at `migrations/001_init.sql:16`. No
+  `REAL`/`FLOAT`/`DOUBLE PRECISION` anywhere in the file. ✓
+- §3 nullability — `amount … NOT NULL` (`:16`), `category TEXT` nullable
+  (`:21`), no confidence column anywhere in the schema. ✓
+- §6 soft delete — `deleted_at TIMESTAMPTZ` (`:26`) and the view at `:57–58` is
+  character-for-character the DDL §6 specifies. ✓
+- §10 time — every timestamp column is `TIMESTAMPTZ`; `occurred_on` is a `DATE`
+  separate from `created_at`, which is what makes `AT TIME ZONE 'Asia/Kolkata'`
+  bucketing possible later. No naive `TIMESTAMP`. ✓
+- §11 categories — no category string literal in the DDL, and deliberately no
+  `CHECK` on `category`. The commit's reasoning here is right and worth keeping.
+  ✓
+- §1 tenancy — `user_id BIGINT NOT NULL REFERENCES users (user_id)` on all three
+  child tables. ✓
+- §7/§8 — plain `.sql`, no ORM artefacts, no queue/broker tables. ✓
+- The partial index at `:30–32` shares the view's `WHERE deleted_at IS NULL`
+  predicate, so Postgres can use it for reads through `active_transactions`.
+  Correct shape.
+
+**On the tick in `TASKS.md`:** legitimate. Task 3 asked for the four tables and
+the view per `docs/PLAN.md`; all five objects exist with real column
+definitions, constraints and indexes. Nothing here is a placeholder.
+
+### Findings
+
+**1 — Medium. The money guard cannot see `ALTER COLUMN … TYPE`, which is the
+only way the scale will ever change.** `tests/test_migrations.py:26`
+
+The column-type regex is `^\s+(\w*amount\w*)\s+(\S+[^,\n]*)` — it requires the
+column name to be the first token on an indented line, i.e. a `CREATE TABLE`
+body. `AGENTS.md:82` forbids editing an applied migration, so the *only*
+sanctioned way to change `amount`'s type is a new migration containing an
+`ALTER`. That is exactly the form the guard skips.
+
+*Failure scenario:* migration `007_widen_amount.sql` contains
+`ALTER TABLE transactions ALTER COLUMN amount TYPE NUMERIC(12, 4);`. Every
+stored amount silently gains two paise-sub-digits, category sums stop agreeing
+with the confirm cards the user tapped, and `uv run pytest` reports `4 passed`.
+I ran precisely this file and got `4 passed, 1 warning in 0.28s`.
+
+*Suggested fix:* also scan for `ALTER COLUMN` — one more `re.findall` over
+`ALTER\s+COLUMN\s+(\w*amount\w*)\s+(?:SET\s+DATA\s+)?TYPE\s+([^;,\n]+)` feeding
+the same assertion.
+
+**2 — Medium. The guard only inspects columns literally named `*amount*`.**
+`tests/test_migrations.py:26`
+
+A `NUMERIC` money column named `balance`, `total`, `income`, or `opening` is
+never type-checked. The blanket `REAL|FLOAT|DOUBLE PRECISION` search at `:25`
+catches the float case, but not a missing or wrong *scale*, which is the
+quieter half of §9.
+
+*Failure scenario:* a later migration adds `balance NUMERIC(12, 0)` (or bare
+`NUMERIC`) to a summary table. Every balance rounds to whole rupees on insert —
+Postgres rounds, it does not error — so a ₹1,234.56 balance stores as
+`1235`. Verified: a scratch migration with `balance NUMERIC(12, 0)` and
+`total NUMERIC` produced `4 passed`.
+
+*Suggested fix:* assert on the type rather than the name — flag any
+`NUMERIC(...)` in a migration whose precision/scale is not `(12, 2)`, and any
+bare `NUMERIC`. That inverts the check from "columns I remembered to name
+`amount`" to "every fixed-point column in the schema".
+
+**3 — Medium. Nothing checks the §6 soft-delete invariant, the schema's
+highest-value silent-failure surface.** `tests/test_migrations.py` (absent)
+
+The guard file covers money and timestamps, both correctly identified in its
+docstring as silent. The third member of that class — `deleted_at` plus the
+`active_transactions` view — has no check at all, even though `DECISIONS.md:119`
+says in as many words that a forgotten `WHERE` clause "can't resurrect deleted
+rows inside a monthly total" *because* the view exists.
+
+*Failure scenario:* migration `00N` runs
+`CREATE OR REPLACE VIEW active_transactions AS SELECT * FROM transactions;` —
+plausible when someone adds a column and reaches for `OR REPLACE` (see the note
+below on `SELECT *`). Every soft-deleted row returns to every total, `/undo`
+stops appearing to work, and the suite reports `4 passed`.
+
+*Suggested fix:* one assert that `active_transactions` is defined `WHERE
+deleted_at IS NULL` in whichever migration last defines it. Cheap, and it guards
+the one invariant the spec calls non-negotiable insurance.
+
+**4 — Low (loud, not silent). The guard asserts on formatting, and rejects the
+spelling the spec itself uses.** `tests/test_migrations.py:27`
+
+`type_.upper().startswith("NUMERIC(12, 2)")` requires the space after the comma.
+`docs/DECISIONS.md:174`, `docs/PLAN.md`'s data model, and `AGENTS.md:37` all
+write it as `NUMERIC(12,2)`.
+
+*Failure scenario:* whoever writes migration 002 copies the type out of
+`AGENTS.md` and the suite fails with
+`amount_paid is NUMERIC(12,2) NOT NULL` — a correct column reported as a money
+violation. Verified: that exact line produced `1 failed`. It fails loudly, so no
+data is at risk; the cost is a confusing red build and the temptation to weaken
+the assertion.
+
+*Suggested fix:* normalise before comparing —
+`re.sub(r"\s+", "", type_).upper().startswith("NUMERIC(12,2)")`.
+
+**5 — Low. The commit message's stated reason for not executing the DDL does not
+hold up.** commit `4b92212` message, final paragraph
+
+It says "no psql, initdb, or docker is available in this environment".
+`ls /usr/bin/psql` resolved to `/usr/share/postgresql-common/pg_wrapper` — the
+Debian `postgresql-client` wrapper — before the sandbox blocked the listing, so
+a psql client does appear to be installed on this host. I could not run it:
+`psql --version` was denied by this session's permission settings, so whether a
+*server* is installed or reachable is **UNKNOWN** to me, and the substantive
+caveat stands — this DDL has still never been parsed by Postgres, and its first
+execution will be the migration-runner task.
+
+*Failure scenario:* the next iteration reads "not available", skips trying, and
+a syntax error in 58 lines of unparsed DDL surfaces during the Dokploy deploy
+instead of locally. `GENERATED ALWAYS AS IDENTITY` (PG 10+) and the partial
+index are the two constructs worth having a real parser confirm.
+
+*Suggested fix:* on the migration-runner task, attempt `psql -f` (or
+`docker compose up db`) once and record the actual outcome rather than the
+assumed one. If it is genuinely unavailable, say which command was run and what
+it returned.
+
+### Noted, not findings
+
+**`CREATE VIEW active_transactions AS SELECT *`** (`:57–58`) freezes the view's
+column list at creation time — a column added to `transactions` by a later
+migration will not appear through the view, silently. This is not a finding
+because `docs/DECISIONS.md:110–113` specifies this exact DDL, and `AGENTS.md:80`
+forbids editing the spec to match the code. Flagging it so the migration that
+first adds a `transactions` column remembers to recreate the view; that is the
+same migration finding 3's guard would protect.
+
+**`type TEXT NOT NULL CHECK (type IN ('expense', 'income'))`** (`:17`) puts two
+strings in the DDL that will also exist in `kanakko/categories.py`, whose §11
+structure is keyed by exactly those two directions. The commit refused a
+`category` CHECK for precisely this reason. It is not a violation — §11 and
+`AGENTS.md:49` govern *categories*, not the direction enum — and unlike the
+category list this set is genuinely closed and will not churn. Worth one
+conscious look when `categories.py` lands, not a change now.
+
+The reasoning recorded in the commit message is unusually good: `CHECK (amount
+> 0)` with direction in `type`, no `CHECK` on `category`, and no seed row in
+`users` are each the right call and each explained. The gaps above are in what
+the test can see, not in what the schema says.
+
+---
+
 ## 2026-08-05 — `3dc8e6c` — FastAPI app + `/healthz`
 
 **Scope:** adds `kanakko/app.py` (FastAPI instance, `GET /healthz`) and

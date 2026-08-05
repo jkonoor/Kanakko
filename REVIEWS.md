@@ -12,6 +12,131 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `3f33abf` — migration runner + `001_init.sql` executed on Postgres
+
+**Scope:** adds `kanakko/migrate.py` (applies `migrations/*.sql` in filename
+order in one transaction, records each in `schema_migrations`, advisory-locked)
+and `tests/test_migrate.py` (boots a throwaway PG cluster, applies the
+migration, round-trips money through it); ticks Phase 0 task 4 in `TASKS.md` and
+swaps the `psql -f` line in `AGENTS.md` for the runner.
+
+**Status: ⚠️ CHANGES REQUESTED** — the runner is correct, the tick is honest,
+and every claim in the commit message that I re-tested held up. One open
+finding, and it is worth fixing *before* the next task rather than after: the
+runner exits 0 reporting success when it finds no migration files, and the
+built wheel does not contain `migrations/`. The next task is the compose file
+that runs this on web start.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite passes | `uv run pytest -v` | `7 passed, 1 warning in 1.00s`. The two new tests **PASSED**, not skipped — so the Postgres path really ran here. |
+| A real server really boots | `uv run pytest tests/test_migrate.py -v -s` | `initdb` output, then `LOG: starting PostgreSQL 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)`, `listening on Unix socket "/tmp/pytest-of-joshy/pytest-8/pgsock0/.s.PGSQL.5432"`. No TCP line — the `-h ''` claim is true, a developer's own Postgres cannot be hit. |
+| Not silently skipping | `pg_bin('initdb')` / `pg_bin('pg_ctl')` / `TEST_DATABASE_URL` via python | `/usr/lib/postgresql/16/bin/initdb`, `/usr/lib/postgresql/16/bin/pg_ctl`, `None`. Binaries present, no env override — the skip branch was not taken. |
+| **Applied schema, read from the server** (not from the `.sql` text) | own throwaway cluster + `information_schema.columns` | `('transactions','amount','numeric',12,2,'NO')` · `('transactions','category','text',None,None,'YES')` · every `*_at` column `timestamp with time zone`. §9, §3 and §10 enforced by a server, not by a regex. |
+| View definition, as the server stored it | `pg_get_viewdef('active_transactions', true)` | `SELECT txn_id, … FROM transactions WHERE deleted_at IS NULL;` ✓ §6 |
+| `NUMERIC(12,2)` actually rounds | `INSERT … amount = Decimal("10.005")` | stored as `Decimal('10.01')`; `SELECT sum(amount), pg_typeof(sum(amount))` → `(Decimal('10.01'), 'numeric')`. The sum stays `numeric` → `Decimal`, no float in the middle. |
+| **Commit's claim: a syntax error rolls the whole run back** | scratch `999_bad.sql` with `PRIMRY KEY`, then `to_regclass` on a fresh connection | `SyntaxError: syntax error at or near "PRIMRY"` — the *real* error, not "current transaction is aborted" — and `(None, None)`: neither `users` nor `schema_migrations` survived. Verified, not assumed. Scratch file removed. |
+| **Commit's claim: the advisory lock prevents a boot collision** | two threads, two connections, `migrate()` concurrently on a virgin DB | `{0: ['001_init.sql'], 1: []}`. One applies, the other no-ops. No duplicate-key error. Verified. |
+| **Commit's claim: the test catches an unrecorded migration** | deleted the `INSERT INTO schema_migrations` line, `uv run pytest tests/test_migrate.py -q` | `2 failed` — `test_migrations_apply_and_are_recorded` and `test_schema_stores_money_exactly`. Restored; `git status --short` clean. Verified. |
+| **Silent-success path** | `MIGRATIONS` repointed at a nonexistent dir, `migrate(conn)` | returned `[]` — no error. See finding 1. |
+| **Wheel contents** | `uv build --wheel`, list the zip | `kanakko/__init__.py`, `kanakko/app.py`, `kanakko/migrate.py`, dist-info. **No `migrations/`.** See finding 1. |
+| **Silent-success end to end** | installed that wheel non-editable into a scratch 3.12 venv, `DATABASE_URL=… python -m kanakko.migrate` against a fresh cluster, `cwd=/tmp` | **`exit code: 0`, `stdout: nothing to apply`**, empty schema. Observed, not inferred. See finding 1. |
+| Local install is editable (so this does not bite today) | `uv run python -c "import kanakko; print(kanakko.__file__)"` | `/home/joshy/jk_projects/Kanakko/kanakko/__init__.py` — `_editable_impl_kanakko.pth`. The repo path resolves correctly right now. |
+| Secrets | `grep -cniE "password\|secret\|token\|api[_-]?key"` on both new files | `0` and `0`. `--auth=trust` in the test is a throwaway cluster on a tmp-dir unix socket with TCP disabled — not a credential. |
+| Tree restored | `git status --short`, `git diff --stat` | clean, empty. No review artifacts, no stray postmasters (`pgrep -af "postgres.*kanakko_probe"` → none). |
+
+**Spec conformance:** §7 plain SQL, `psycopg`, numbered `.sql` — no ORM, no
+Alembic, no new dependency. §9/§3/§10/§6 are now *server-enforced*, per the
+table above. Nothing in this commit touches an LLM prompt, a category, or a
+day/month boundary, so §10 bucketing and §11 are not yet in play.
+
+**On the tick in `TASKS.md`:** legitimate, and it discharges finding 5 on
+`4b92212` for real. That finding was "this DDL has never been parsed by a
+server." It has now been parsed and executed by PostgreSQL 16.14, and a
+permanent test keeps it that way rather than relying on a one-off command
+someone once ran. `GENERATED ALWAYS AS IDENTITY` and the partial index both
+survive a real parser. Not a stub: the runner orders, records, skips,
+transacts and locks, and I exercised each of those.
+
+### Findings
+
+**1. `kanakko/migrate.py:12` — the runner reports success when it finds no
+migrations, and the wheel does not ship them.** *(open, blocking the next task)*
+
+`MIGRATIONS = Path(__file__).parent.parent / "migrations"` resolves relative to
+the *installed* module. Editable installs put that at the repo root, which is
+why everything works today. `[tool.hatch.build.targets.wheel] packages =
+["kanakko"]` in `pyproject.toml:24-25` means a built wheel carries no
+`migrations/` directory — confirmed by listing the zip. `MIGRATIONS.glob("*.sql")`
+then yields nothing, the loop body never runs, `migrate()` returns `[]`, and
+`main()` prints `nothing to apply` and exits **0**.
+
+Failure scenario, observed rather than reasoned: install the wheel
+non-editable, point `DATABASE_URL` at an empty database, run `python -m
+kanakko.migrate` → `exit code: 0`, `stdout: nothing to apply`, and the database
+still has no tables. In the compose stack the commit message describes next —
+`web` running the migrator before uvicorn — that is a green deploy on an empty
+schema. The first webhook then dies on `relation "transactions" does not exist`,
+far from the cause. "Applied nothing" and "nothing left to apply" are currently
+the same output, and only one of them is good news.
+
+Suggested fix: refuse to succeed on an empty set. In `migrate()`, before the
+loop:
+
+```python
+files = sorted(MIGRATIONS.glob("*.sql"))
+if not files:
+    raise RuntimeError(f"no migrations found at {MIGRATIONS}")
+```
+
+That one guard converts a green deploy on an empty schema into a startup crash
+naming the path it looked in. Whether `migrations/` should also ship inside the
+wheel (`[tool.hatch.build.targets.wheel.force-include]`) or be `COPY`ed by the
+Dockerfile is a call best made with the compose file in hand — the guard is
+what stops either choice from failing quietly.
+
+**2. `tests/test_migrate.py:22` — the `$TEST_DATABASE_URL` escape hatch works
+exactly once per database.** *(open, minor)*
+
+The module docstring offers `TEST_DATABASE_URL` as a supported alternative to
+the throwaway cluster. But `test_migrations_apply_and_are_recorded:60` asserts
+`migrate(conn) == names`, which only holds against a *virgin* database. Point it
+at any database the suite has already run against and the first assertion fails
+with `[] != ['001_init.sql']` — the tests are not usable twice on a persistent
+DSN. This fails loudly, so nothing silent rides on it; it is listed because the
+docstring advertises a path that does not survive its second use.
+
+Worth noting alongside it: `migrate()` **commits**, so running the suite against
+a real DSN applies the migrations there for keeps. The test's own rows are
+rolled back at `tests/test_migrate.py:89`; the schema change is not.
+
+Suggested fix: either drop the `TEST_DATABASE_URL` branch (the throwaway cluster
+is the path that actually runs), or have that branch create and drop a
+uniquely-named scratch database.
+
+### Notes, not findings
+
+- Nothing pins the one-transaction property. Both tests still pass if
+  `conn.transaction()` at `kanakko/migrate.py:31` were replaced by a commit per
+  file. I confirmed the property holds today by hand (the `PRIMRY KEY` run
+  above), and a regression would surface loudly on the next re-run rather than
+  as a wrong number, so this is not a blocking gap — but the commit message
+  spends a paragraph defending the behaviour, and no check defends it.
+- `applied_at` defaults to `now()`, which is transaction start time, so every
+  file in a single run shares one timestamp. `ORDER BY applied_at, filename` at
+  `tests/test_migrate.py:71` therefore orders by filename alone. Harmless —
+  apply order is genuinely covered by the `migrate(conn) == names` assertion,
+  since that list is built in apply order.
+- `active_transactions` was created as `SELECT *`, which Postgres froze into an
+  explicit nine-column list at creation (visible in the `pg_get_viewdef` output
+  above). A later `ALTER TABLE transactions ADD COLUMN` will not appear in the
+  view until it is recreated. That belongs to `001_init.sql` (`4b92212`), not to
+  this commit, and is recorded here only so it is written down somewhere.
+
+---
+
 ## 2026-08-05 — `4b92212` — `migrations/001_init.sql` + migration guard test
 
 **Scope:** adds `migrations/001_init.sql` (four tables, two indexes, the

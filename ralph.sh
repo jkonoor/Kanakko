@@ -1,61 +1,63 @@
 #!/usr/bin/env bash
 #
-# Ralph loop for Kanakko.
+# ralph.sh — drive Kanakko forward one task per iteration.
 #
-#   ./ralph.sh            auto — dev until the queue drains, then QA, repeat
-#   ./ralph.sh dev [N]    implement up to N tasks   (default $RALPH_DEV_MAX)
-#   ./ralph.sh qa  [N]    run N review passes       (default $RALPH_QA_PASSES)
+# Each iteration runs two passes:
+#   1. implementer (prompts/dev.md) — fixes open QA findings, else does the
+#      next task in TASKS.md
+#   2. QA          (prompts/qa.md)  — reviews that commit into REVIEWS.md
 #
-# docs/DECISIONS.md is the spec. TASKS.md is the queue. Each iteration is a
-# fresh context — the repository is the memory. See prompts/dev.md, prompts/qa.md.
+# QA runs after EVERY implementer pass, not after a batch, so a defect survives
+# at most one iteration before it becomes the next iteration's first job. The
+# implementer is handed the branch and recent commits and stays on that branch —
+# it never creates one. Stops when the implementer emits COMPLETE.
 #
-# Overridable: RALPH_DEV_MODEL RALPH_QA_MODEL RALPH_DEV_MAX RALPH_QA_PASSES
-#              RALPH_CYCLES
+#   ./ralph.sh [N]        paired loop, N iterations   (default 10)
+#   ./ralph.sh dev [N]    implementer passes only
+#   ./ralph.sh qa  [N]    review passes only
 #
-# Setting RALPH_QA_MODEL to a different model than RALPH_DEV_MODEL is
-# worthwhile: a review is more useful from a different vantage point than the
-# one that wrote the code.
+# docs/DECISIONS.md is the spec. TASKS.md is the queue. REVIEWS.md is the
+# review log. Each pass is a fresh context — the repo is the memory.
+#
+# Overridable: RALPH_DEV_MODEL RALPH_QA_MODEL RALPH_ALLOWED_TOOLS
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-MODE="${1:-auto}"
-N="${2:-}"
+MODE="loop"
+case "${1:-}" in
+  dev|qa|loop) MODE="$1"; shift ;;
+  -h|--help)   sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+MAX="${1:-10}"
 
 DEV_MODEL="${RALPH_DEV_MODEL:-opus}"
 QA_MODEL="${RALPH_QA_MODEL:-opus}"
 
 # Least privilege. The loop runs unattended, so anything not listed here stalls
-# rather than prompting — widen it deliberately when a task genuinely needs
+# rather than prompting. Widen it deliberately when a task genuinely needs
 # something, rather than reaching for --dangerously-skip-permissions.
-# Note `gh` is absent on purpose: its credentials live in the keyring, not the
-# environment, so the scrub below cannot revoke them. The loop has no business
-# pushing anywhere.
+# `gh` is absent on purpose: its credentials live in the keyring, not the
+# environment, so the scrub below cannot revoke them.
 ALLOWED_TOOLS="${RALPH_ALLOWED_TOOLS:-Edit Write Read Grep Glob Bash(git *) Bash(uv *) Bash(python *) Bash(pytest *) Bash(mkdir *) Bash(ls *) Bash(cat *) Bash(rg *)}"
-DEV_MAX="${RALPH_DEV_MAX:-20}"
-QA_PASSES="${RALPH_QA_PASSES:-1}"
-CYCLES="${RALPH_CYCLES:-5}"
-DRY_LIMIT=2          # consecutive clean QA passes that mean "converged"
 
 log() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------- preflight --
 
-[[ "$MODE" == "-h" || "$MODE" == "--help" ]] && { sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
-
 command -v claude >/dev/null || { echo "claude CLI not found on PATH" >&2; exit 1; }
-[[ -f TASKS.md ]]        || { echo "TASKS.md not found — run from the repo root" >&2; exit 1; }
-[[ -f prompts/dev.md ]]  || { echo "prompts/dev.md not found" >&2; exit 1; }
-[[ -f prompts/qa.md ]]   || { echo "prompts/qa.md not found" >&2; exit 1; }
+[[ "$MAX" =~ ^[0-9]+$ ]]     || { echo "iterations must be a number" >&2; exit 1; }
+for f in TASKS.md REVIEWS.md prompts/dev.md prompts/qa.md; do
+  [[ -f "$f" ]] || { echo "$f not found — run from the repo root" >&2; exit 1; }
+done
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
   cat >&2 <<'EOF'
 Refusing to run on the deploy branch.
 
-Ralph produces broken intermediate states by design — it converges over many
-iterations rather than being correct at each one. That belongs on a branch you
-can throw away:
+Ralph converges over many iterations rather than being correct at each one, so
+it belongs on a branch you can throw away:
 
     git switch -c ralph/phase-0
 
@@ -64,19 +66,18 @@ EOF
 fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Working tree is dirty. Commit or stash first — one iteration must be one clean commit." >&2
+  echo "Working tree is dirty. Commit or stash first — one pass must be one clean commit." >&2
   exit 1
 fi
 
 # ------------------------------------------------------- the security boundary
 
-# Defined ONCE, used by every mode. An unattended agent must not hold
+# Defined ONCE, used by every pass. An unattended agent must not hold
 # deployment or admin credentials: this repo deploys to a company Dokploy
 # instance and $GITEA_ADMIN_TOKEN is admin-scoped.
 #
-# Add any new secret to THIS list. There is deliberately no second copy to
-# forget about.
-run() {  # $1 = prompt file, $2 = model
+# Add any new secret to THIS list. There is deliberately no second copy.
+run() {  # $1 = prompt text (not a path), $2 = model
   env -u DOKPLOY_OPS_PANEL_TOKEN \
       -u DOKPLOY_DOC_PANEL_TOKEN \
       -u DOKPLOY_SARON_TOKEN \
@@ -86,83 +87,47 @@ run() {  # $1 = prompt file, $2 = model
       -u GITEA_LFS_S3_SECRET_KEY \
       -u GH_TOKEN \
       -u GITHUB_TOKEN \
-      claude -p "$(cat "$1")" \
+      claude -p "$1" \
              --model "$2" \
              --permission-mode acceptEdits \
              --allowedTools "$ALLOWED_TOOLS"
 }
 
-# ------------------------------------------------------------------ helpers --
+# ------------------------------------------------------------------- passes --
 
-# True when at least one unchecked task is not marked [human].
-#
-# Counts rather than relying on grep's exit code on purpose: /usr/bin/grep is
-# ugrep on some machines (including this one), and its exit status for -v
-# reflects whether the *pattern* matched rather than whether inverted output
-# was produced — so `grep -qv` returns 1 even when non-matching lines exist.
-# Comparing a count is correct under both GNU grep and ugrep.
-open_tasks() {
-  local n
-  n="$( grep -E '^[[:space:]]*- \[ \]' TASKS.md | grep -vc '\[human\]' || true )"
-  [[ "${n:-0}" -gt 0 ]]
+# Hands the implementer its branch and recent history so it doesn't re-derive
+# them, and so it knows not to branch.
+dev_pass() {  # echoes the agent's output; caller checks for the sentinel
+  local prompt
+  prompt="Current branch (do NOT create another): $(git rev-parse --abbrev-ref HEAD)
+Recent commits:
+$(git log --oneline -n 15 2>/dev/null || echo none)
+
+$(cat prompts/dev.md)"
+  run "$prompt" "$DEV_MODEL" 2>&1 | tee /dev/stderr
 }
 
-# TASKS.md is the QA loop's only output, so its hash is the convergence signal.
-fingerprint() { md5sum TASKS.md | cut -d' ' -f1; }
+qa_pass() {
+  run "$(cat prompts/qa.md)" "$QA_MODEL" 2>&1 || log "[qa] pass exited non-zero — continuing"
+}
 
 # -------------------------------------------------------------------- loops --
 
-dev_loop() {
-  local max="$1" i=0
-  while (( i < max )); do
-    if ! open_tasks; then log "[dev] queue empty"; return 0; fi
-    i=$(( i + 1 ))
-    log "[dev] iteration $i/$max   model=$DEV_MODEL"
-    run prompts/dev.md "$DEV_MODEL" || log "[dev] iteration exited non-zero — continuing"
-  done
-  log "[dev] hit the iteration cap ($max) with tasks still open"
-}
-
-# Returns 0 if the pass added findings, 1 if it found nothing.
-qa_pass() {
-  local before after
-  before="$(fingerprint)"
-  log "[qa] review pass   model=$QA_MODEL"
-  run prompts/qa.md "$QA_MODEL" || log "[qa] pass exited non-zero — continuing"
-  after="$(fingerprint)"
-  [[ "$before" != "$after" ]]
-}
-
-auto_loop() {
-  local cycle=0 dry=0
-  while (( cycle < CYCLES && dry < DRY_LIMIT )); do
-    cycle=$(( cycle + 1 ))
-    log "══════ cycle $cycle/$CYCLES ══════"
-    dev_loop "$DEV_MAX"
-    if qa_pass; then
-      dry=0
-      log "[auto] QA added findings — back to dev"
-    else
-      dry=$(( dry + 1 ))
-      log "[auto] QA found nothing ($dry/$DRY_LIMIT clean passes)"
+for (( i = 1; i <= MAX; i++ )); do
+  if [[ "$MODE" != "qa" ]]; then
+    log "══ iteration $i/$MAX — implementer   model=$DEV_MODEL"
+    output="$(dev_pass)" || log "[dev] pass exited non-zero — continuing"
+    if grep -qF '<promise>COMPLETE</promise>' <<<"$output"; then
+      log "COMPLETE emitted — every task done and no open findings. Stopping at iteration $i."
+      exit 0
     fi
-  done
-  if (( dry >= DRY_LIMIT )); then
-    log "[auto] converged — $DRY_LIMIT consecutive clean QA passes"
-  else
-    log "[auto] stopped at the cycle cap ($CYCLES); NOT converged — tasks remain"
   fi
-}
 
-# ----------------------------------------------------------------- dispatch --
+  if [[ "$MODE" != "dev" ]]; then
+    log "══ iteration $i/$MAX — QA            model=$QA_MODEL"
+    qa_pass
+  fi
+done
 
-case "$MODE" in
-  dev)  dev_loop "${N:-$DEV_MAX}" ;;
-  qa)   for (( p = 1; p <= ${N:-$QA_PASSES}; p++ )); do
-          qa_pass || log "[qa] no findings"
-        done ;;
-  auto) auto_loop ;;
-  *)    echo "usage: $0 [dev|qa|auto] [N]   (try --help)" >&2; exit 1 ;;
-esac
-
-log "done — review with:  git log --oneline  &&  git diff main..HEAD"
+log "reached the iteration cap ($MAX) without COMPLETE — work remains"
+log "review with:  git log --oneline  &&  cat REVIEWS.md"

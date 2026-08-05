@@ -9,8 +9,8 @@ the plan's order and it matters.
   the change.
 - `[human]` tasks are **skipped by the loop** — they touch credentials,
   deployment, or an external account and are done attended.
-- The QA loop appends to *Found by QA* at the bottom. It never edits anything
-  above it and never ticks a box.
+- QA findings do **not** live here. They go in `REVIEWS.md`, and the implementer
+  fixes open ones before touching this queue again.
 - One task is one iteration. If a task turns out to be two things, split it and
   do the first.
 
@@ -78,10 +78,4 @@ the plan's order and it matters.
 
 ---
 
-## Found by QA
-
-The QA loop appends here. Each entry states what is wrong and where, not how to
-fix it. Nothing below this line has been triaged.
-
-<!-- qa:begin -->
-<!-- qa:end -->
+QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

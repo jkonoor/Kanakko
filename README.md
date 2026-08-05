@@ -45,4 +45,23 @@ exists and none should be added until a second user actually exists.
 docs/DECISIONS.md    what was decided, why, and what was deliberately deferred
 docs/PLAN.md         build order, phase by phase
 docs/DEPLOYMENT.md   Dokploy specifics, API sequence, known gotchas
+TASKS.md             the work queue, derived from PLAN.md
+REVIEWS.md           QA review log, newest first
+AGENTS.md            build/run/test commands and coding conventions
+ralph.sh             the build loop; prompts/ holds its two prompts
 ```
+
+## Building it
+
+`ralph.sh` drives the work one task at a time. Each iteration runs an
+implementer pass followed by a QA pass, so a defect survives at most one
+iteration before it becomes the next iteration's first job.
+
+```bash
+git switch -c ralph/phase-0
+./ralph.sh 10          # ten implementer+QA iterations
+```
+
+It refuses to run on `main` or with a dirty tree, and strips every deployment
+and admin credential from the agent's environment — the loop has no deploy path
+by design. Tasks marked `[human]` in `TASKS.md` are skipped for the same reason.

@@ -12,6 +12,140 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-05 — `be74462` — published-port guard moved from regex to the YAML parser
+
+**Scope:** findings 1 and 2 from the review of `c214544`. `tests/test_compose.py`
+(guard rewritten), `pyproject.toml` + `uv.lock` (pyyaml, dev group),
+`REVIEWS.md` (prior review marked RESOLVED). No box ticked in `TASKS.md`,
+`docker-compose.yml` untouched — `git show --name-only` confirms exactly those
+four files.
+
+**Status: ✅ DONE** — no blocking issues. Both findings are genuinely closed,
+and I confirmed they were real by checking out the parent's guard and watching
+it go green on the same mutations. Every one of the nine mutation results in
+the commit message reproduced verbatim, including the `AssertionError` text.
+Three minor notes below; none of them is a way for a public bind to reach the
+host through this file, and none blocks the next task.
+
+Moving to `yaml.safe_load` is the right call rather than a third regex patch.
+The previous two guards were reimplementing a YAML parser badly, and each round
+of QA found another spelling they had not anticipated. The parser sees what
+Docker sees, so the spelling class is closed by construction rather than by
+enumeration, and finding 2 disappears because there is no service list left to
+go stale. `pyyaml` in the dev group is justified in the commit message per
+`AGENTS.md`, is test-only, and is not one of the dependencies `DECISIONS.md`
+§7/§8/§13 excludes.
+
+Nothing in this commit touches application code, so the money, timezone,
+`active_transactions`, and categories decisions have no surface here.
+`git show HEAD | grep -inE 'password|token|secret|api[_-]key'` returns one hit,
+the word `POSTGRES_PASSWORD` in the commit message prose. No secret added.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite green | `uv run pytest -q` | `14 passed, 1 warning in 1.03s` |
+| Lock consistent with `pyproject.toml` | `uv lock --check` | `Resolved 28 packages`, no error |
+| pyyaml is dev-only | `sed -n '1,25p' pyproject.toml` | absent from `[project].dependencies`, present in `[dependency-groups].dev` |
+| Compose still parses | `yaml.safe_load` on the real file | `services` = `cron, db, web`; `web` → `['127.0.0.1:8000:8000']`, `db`/`cron` → `None` |
+| Files in commit | `git show --name-only --format= HEAD` | `REVIEWS.md`, `pyproject.toml`, `tests/test_compose.py`, `uv.lock` |
+| `DECISIONS.md` §14 supports the loopback rationale | `sed -n '291,320p' docs/DECISIONS.md` | "Innogenio `doc-panel` Dokploy … company Dokploy instance" — shared host, rationale holds |
+
+**Mutation battery.** I mutated the real `docker-compose.yml`, ran the single
+guard, and restored from an in-memory copy; `diff` against a `/tmp` backup was
+`IDENTICAL` and `git status --porcelain` was clean after every run. The first
+nine rows are the commit's own table, re-run independently; the last two are
+mine.
+
+| Mutation | rc | Message |
+|---|---|---|
+| baseline | 0 | `1 passed` |
+| `- "5432:5432"  # debug` on `db` (**finding 1**) | 1 | `AssertionError: db: 5432:5432` |
+| same, unquoted | 1 | `AssertionError: db: 5432:5432` |
+| new `pgadmin` service, `- "5050:80"` (**finding 2**) | 1 | `AssertionError: pgadmin: 5050:80` |
+| four-space list item, `- "0.0.0.0:8000:8000"` | 1 | `AssertionError: web: 0.0.0.0:8000:8000` |
+| `- 8000:8000` | 1 | `AssertionError: web: 8000:8000` |
+| `- 8000` (bare, parses to int) | 1 | `AssertionError: web: 8000` |
+| long syntax `target`/`published` | 1 | `AssertionError: web: {'target': 8000, 'published': 8000}` |
+| `ports:` block deleted | 1 | `AssertionError: no published port found …` |
+| `- "[::1]:8000:8000"` (mine) | 1 | `AssertionError: web: [::1]:8000:8000` |
+| `- "127.0.0.1:8000-8001:8000-8001"` (mine) | 0 | `1 passed` — correct, a loopback range |
+
+**Does the fix actually fix something?** I restored the parent's guard
+(`git show HEAD~1:tests/test_compose.py`) over the new one and re-ran the same
+mutations:
+
+| Mutation, old guard | rc | Result |
+|---|---|---|
+| `- "5432:5432"  # debug` on `db` | 0 | **`1 passed`** — finding 1 confirmed real |
+| new `pgadmin`, `- "5050:80"` | 0 | **`1 passed`** — finding 2 confirmed real |
+| four-space `- "0.0.0.0:8000:8000"` | 1 | `1 failed` |
+
+So the parent's suite was green while `db` published 5432 on `0.0.0.0` with the
+credentials from `.env`. That is exactly the scenario the review claimed, and
+the new guard fails on it.
+
+**Bypass probes** (publish publicly *without* a non-loopback `ports` entry):
+
+| Probe | Result |
+|---|---|
+| `ports` moved to a top-level anchor merged in with `<<: *pub` | `1 failed` — parser resolves the merge, caught |
+| long syntax with `host_ip: 0.0.0.0` | `1 failed` — caught |
+| `network_mode: host` added to `web` | **`6 passed`** — not caught (note 1) |
+| invalid YAML (tab) | `1 error` at collection — loud |
+| top-level `services:` renamed | `1 error` at collection — loud |
+| `web:` body emptied | `3 failed, 3 passed`, `AttributeError` — loud |
+
+The three malformed-file cases fail loudly rather than silently, which is the
+behaviour that matters; that the module-level `yaml.safe_load` takes the other
+five assertions down with it is acceptable, since a compose file that does not
+parse is not a file whose other properties are worth asserting.
+
+### Notes (none blocking)
+
+**1. `network_mode: host` is the one remaining way past the guard.**
+`tests/test_compose.py:52`. Adding `network_mode: host` to `web` puts every
+listening port on the host's public interfaces with no `ports:` key at all, and
+the suite reports `6 passed`. This is the same one-line-edit shape the docstring
+names as the threat, and `DECISIONS.md` §14's shared host is the same host. It
+is a pre-existing blind spot, not a regression — the regex guards missed it too
+— and the artifact does not use it, which is why this is a note rather than a
+finding. Closing it is one line inside the existing loop:
+`assert "network_mode" not in svc, f"{name}: network_mode bypasses the port guard"`.
+
+**2. A correctly-written long-syntax loopback bind now fails with a misleading
+message.** `tests/test_compose.py:59`. `- target: 8000 / published: 8000 /
+host_ip: 127.0.0.1` is the documented compose spelling of a loopback publish and
+is safe, but `str(dict)` never starts with `127.0.0.1:`, so it fails with
+`AssertionError: web: {'target': 8000, …, 'host_ip': '127.0.0.1'}` — verified.
+This errs in the safe direction, so it costs nothing today. What was lost is the
+parent guard's explicit `f"{name}: use short syntax with 127.0.0.1"`, which told
+the reader that short syntax is a requirement rather than leaving them to
+conclude their correct config is unsafe. Worth restoring as a branch in the loop
+or a sentence in the docstring, whenever this file is next open.
+
+**3. The `found` assertion message names `web` but fires for any service.**
+`tests/test_compose.py:61`. `"no published port found — web's ports: block is
+gone"` is accurate today because `web` is the only publisher, but the loop it
+guards is over every service, so the message will misdirect the first time the
+publish lives elsewhere. Cosmetic; mentioned only because the whole point of
+this file is that its failures are read by someone who has not been here before.
+
+### Not findings
+
+- The old `assert "target:" not in block` is gone, but long syntax is still
+  rejected — through `str(published)` rather than a separate assertion. Verified
+  above.
+- pyyaml is a new dependency, but `AGENTS.md` asks for a reason in the commit
+  message and there is one, it is dev-group only, and it is none of the excluded
+  four.
+- `REVIEWS.md` editing the prior review's status line to
+  `⚠️ CHANGES REQUESTED → ✅ RESOLVED` is the convention this file already
+  follows, not a rewrite of history — the original text is intact beneath it.
+
+---
+
 ## 2026-08-05 — `c214544` — loopback guard widened to every service and spelling
 
 **Scope:** finding 1 from the review of `e1032a1`. `tests/test_compose.py`

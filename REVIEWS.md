@@ -12,6 +12,49 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `8ee86b9` — rewrite `test_today_reads_the_kolkata_clock` to verify the zone, not the format
+
+**Scope:** test-only follow-up. Rewrites the one guard flagged ⚠️ on `b21aa45`
+so it asserts the *behaviour* (the clock resolves in `Asia/Kolkata`) instead of a
+surface form (the date *format*). Diff touches two files (+31/-10):
+`tests/test_parse.py` (test rewritten, `+datetime/timezone`, `+from kanakko import
+parse`) and `REVIEWS.md` (prior finding marked RESOLVED). No production code
+changed.
+
+**Status: ✅ DONE** — no blocking issues. The rewritten guard earns its place: I
+reproduced the exact defect it exists to catch and confirmed it goes red, then
+green on restore.
+
+### What I checked (and what it returned)
+
+- **`git show HEAD`** — confirmed the commit is test + REVIEWS only; `kanakko/`
+  production code is untouched.
+- **`uv run pytest -q`** → `44 passed, 1 warning`. Matches the commit message.
+- **The guard fails for the reason it exists.** The claim to verify is "mutating
+  `KOLKATA` to UTC reddens exactly this test." I edited
+  `kanakko/parse.py:30` `ZoneInfo("Asia/Kolkata")` → `ZoneInfo("UTC")` and ran
+  `pytest tests/test_parse.py::test_today_reads_the_kolkata_clock` →
+  **1 failed**: `AssertionError: assert '2026-08-06' == '2026-08-07'`. Restored
+  via `git checkout kanakko/parse.py` → **1 passed**. The guard genuinely
+  reddens when the zone breaks; the prior finding is closed.
+- **Why the format assertion no longer hides the bug.** The old test asserted
+  `re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())` (any zone's date matches) and
+  `today() in build_request(...)` (both sides call `today()`, self-consistent).
+  The new test freezes an instant — `2026-08-06 20:00 UTC`, already `2026-08-07`
+  in IST — and asserts `today() == "2026-08-07"`, an exact value only the
+  correct zone produces. Traced the monkeypatch: `FrozenDatetime.now(tz)` returns
+  `fixed.astimezone(tz)`, `today()` calls `datetime.now(KOLKATA)`, so the pinned
+  instant flows through the real `KOLKATA` constant — the thing under test.
+
+### Findings
+
+None. The commit does exactly what its message claims and the fix is verified by
+reproduction, not assertion. The retained format regex on line 75 is now
+redundant with the exact-value assert above it, but it is harmless and the commit
+deliberately kept it — not a finding.
+
+---
+
 ## 2026-08-06 — `b21aa45` — inject current `Asia/Kolkata` date into the parse prompt (§10)
 
 **Scope:** `build_request` now prepends today's `Asia/Kolkata` date to the

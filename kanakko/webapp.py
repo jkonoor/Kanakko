@@ -105,6 +105,20 @@ def current_month_ist(now: datetime | None = None) -> tuple[date, date]:
     return this_first, next_first
 
 
+def current_week_ist(now: datetime | None = None) -> tuple[date, date]:
+    """`(monday_of_this_week, next_monday)` in `Asia/Kolkata` (§10, §13).
+
+    The half-open range the dashboard's this-week figures bucket on. Weeks start
+    Monday (`date.weekday()`: Mon=0). Computed in IST for the same reason as
+    `current_month_ist`: just after IST midnight a UTC-date computation would
+    slide the boundary 5.5 hours and, on a Monday, drop the week's opening entries
+    into last week. `now` defaults to the current instant.
+    """
+    now = (now or datetime.now(IST)).astimezone(IST)
+    monday = now.date() - timedelta(days=now.date().weekday())
+    return monday, monday + timedelta(days=7)
+
+
 def _stat(label: str, amount: Decimal) -> str:
     """One label/value pair. `amount` goes through `format_amount`, never float (§9)."""
     return (
@@ -147,19 +161,23 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
 def dashboard_html(
     income: Decimal,
     expenses: Decimal,
+    week_income: Decimal,
+    week_expenses: Decimal,
     month_label: str,
     month_income: Decimal,
     month_expenses: Decimal,
     top: list[tuple[str, Decimal]],
 ) -> str:
-    """The dashboard fragment: all-time totals + balance, this month, category bars (§13).
+    """The dashboard fragment: all-time totals + balance, this week, this month, bars (§13).
 
     Balance is `income - expenses` — exact `Decimal` subtraction, can be negative.
-    Server-rendered so every section (category bars, recent list) stays Python +
-    CSS with no charting library (§13). `top` is the month's expense categories
-    biggest-first, rendered as percentage-of-month-expenses bars. Only formatted
-    amounts, a strftime month label, and escaped category names are interpolated,
-    so no user-controlled string reaches the markup unescaped.
+    Server-rendered so every section (week/month figures, category bars, recent
+    list) stays Python + CSS with no charting library (§13). The week and month
+    summaries carry each period's income, expenses, and balance; `top` is the
+    month's expense categories biggest-first, rendered as
+    percentage-of-month-expenses bars. Only formatted amounts, a strftime month
+    label, and escaped category names are interpolated, so no user-controlled
+    string reaches the markup unescaped.
     """
     return (
         "<h1>Kanakko</h1>"
@@ -167,6 +185,11 @@ def dashboard_html(
         + _stat("Balance", income - expenses)
         + _stat("Income", income)
         + _stat("Expenses", expenses)
+        + "</section>"
+        '<section class="week"><h2>This week</h2>'
+        + _stat("Balance", week_income - week_expenses)
+        + _stat("Income", week_income)
+        + _stat("Expenses", week_expenses)
         + "</section>"
         f'<section class="month"><h2>{month_label}</h2>'
         + _stat("Balance", month_income - month_expenses)

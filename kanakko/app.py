@@ -31,6 +31,7 @@ from kanakko.tg import answer_callback_query, edit_message_text, send_message
 from kanakko.webapp import (
     InitDataError,
     current_month_ist,
+    current_week_ist,
     dashboard_html,
     validate_init_data,
     user_id_from_init_data,
@@ -77,7 +78,7 @@ TMA_PREFIX = "tma "
 @app.get("/app/data", response_class=HTMLResponse)
 def mini_app_data(request: Request) -> str:
     """The dashboard fragment for the authenticated user (§13): totals, balance,
-    current-month figures.
+    this-week and current-month figures.
 
     The bootstrap sends `initData` in the `Authorization: tma <initData>` header
     (Telegram's documented scheme). Validation *is* the authentication — a valid
@@ -101,8 +102,13 @@ def mini_app_data(request: Request) -> str:
         income, expenses = totals(conn, user_id)
         first, next_first = current_month_ist()
         m_income, m_expenses, top = month_summary(conn, user_id, first, next_first)
+        w_first, w_next = current_week_ist()
+        # month_summary is a generic date-range summary; its top categories are
+        # the month's, so the week's are discarded — the week section is figures only.
+        w_income, w_expenses, _ = month_summary(conn, user_id, w_first, w_next)
     return dashboard_html(
-        income, expenses, first.strftime("%B %Y"), m_income, m_expenses, top
+        income, expenses, w_income, w_expenses,
+        first.strftime("%B %Y"), m_income, m_expenses, top,
     )
 
 

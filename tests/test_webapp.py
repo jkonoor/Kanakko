@@ -18,10 +18,12 @@ from fastapi.testclient import TestClient
 from kanakko import app as app_module
 from kanakko.app import app
 from kanakko.migrate import migrate
+from kanakko.jobs.evening import IST
 from kanakko.webapp import (
     InitDataError,
     category_bars,
     current_month_ist,
+    current_week_ist,
     dashboard_html,
     user_id_from_init_data,
     validate_init_data,
@@ -128,14 +130,30 @@ def test_user_id_from_init_data_rejects_a_missing_or_malformed_user(fields):
 def test_dashboard_html_shows_rupee_amounts_and_exact_balance():
     """Balance is exact `Decimal` subtraction — the money invariant (§9)."""
     html = dashboard_html(
-        Decimal("20000.00"), Decimal("500.50"), "August 2026",
+        Decimal("20000.00"), Decimal("500.50"),
+        Decimal("0.70"), Decimal("0.50"),
+        "August 2026",
         Decimal("0.30"), Decimal("0.10"), [],
     )
     assert "₹20,000.00" in html  # all-time income
     assert "₹500.50" in html  # all-time expenses
     assert "₹19,499.50" in html  # all-time balance, to the paise
-    assert "₹0.20" in html  # this month's balance: 0.30 - 0.10, no float drift
+    assert "₹0.20" in html  # this week's balance: 0.70 - 0.50, no float drift
+    assert "This week" in html
     assert "August 2026" in html
+
+
+def test_dashboard_html_week_and_month_balances_are_distinct():
+    """The week and month summaries render their own balances, not a shared one (§13)."""
+    html = dashboard_html(
+        Decimal("100"), Decimal("40"),
+        Decimal("30"), Decimal("10"),  # week: balance 20
+        "August 2026",
+        Decimal("80"), Decimal("25"), [],  # month: balance 55
+    )
+    assert "This week" in html
+    assert "₹20.00" in html  # week balance: 30 - 10
+    assert "₹55.00" in html  # month balance: 80 - 25
 
 
 def test_category_bars_are_sorted_shares_of_month_expenses():
@@ -160,7 +178,9 @@ def test_category_bars_empty_when_no_expenses():
 def test_dashboard_html_renders_the_category_breakdown():
     """The breakdown section reaches the fragment `dashboard_html` builds (§13)."""
     html = dashboard_html(
-        Decimal("1000"), Decimal("400"), "August 2026",
+        Decimal("1000"), Decimal("400"),
+        Decimal("500"), Decimal("200"),
+        "August 2026",
         Decimal("1000"), Decimal("400"),
         [("Food", Decimal("400.00"))],
     )
@@ -174,6 +194,24 @@ def test_current_month_ist_buckets_in_kolkata():
     first, next_first = current_month_ist(now)
     assert first == date(2026, 8, 1)
     assert next_first == date(2026, 9, 1)
+
+
+def test_current_week_ist_buckets_in_kolkata():
+    """00:30 IST on Mon Aug 10 (= 19:00 UTC Sun Aug 9) is the week starting that
+    Monday, not the previous one (§10).
+
+    A UTC-date computation would still read Sunday Aug 9 and open the week on
+    Mon Aug 3 — sliding Monday's opening entries into last week. The IST
+    computation opens it on Aug 10.
+    """
+    now = datetime(2026, 8, 9, 19, 0, tzinfo=timezone.utc)  # Sun 19:00 UTC
+    start, next_start = current_week_ist(now)
+    assert start == date(2026, 8, 10)  # Monday, in IST
+    assert next_start == date(2026, 8, 17)
+    assert start.weekday() == 0
+    # The UTC-date week would open a week earlier — that's the slide this guards.
+    utc_date = now.date()
+    assert start != utc_date - timedelta(days=utc_date.weekday())
 
 
 def _insert_txn(conn, user_id, amount, type_, category, occurred_on):
@@ -232,6 +270,7 @@ def test_dashboard_route_renders_totals_and_current_month(conn, monkeypatch):
     assert "₹800.00" in body  # all-time expenses
     assert "₹19,500.00" in body  # this month's balance: 20000 - 500
     assert "₹500.00" in body  # this month's expenses (the 300 is last month)
+    assert "This week" in body  # the weekly summary section (task 99)
     assert "Spending by category" in body  # the category breakdown (task 98)
     assert "width:100.0%" in body  # Food is this month's only expense category
 

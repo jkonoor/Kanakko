@@ -97,8 +97,28 @@ the plan's order and it matters.
 - [x] Add the dashboard route rendering totals, balance, and current-month figures
 - [ ] Add the category breakdown as a sorted list with CSS percentage bars — no charting library
 - [ ] Add the weekly and monthly summary sections
-- [ ] Add the recent-transactions list with per-row soft delete
-- [ ] Add per-row category change from the dashboard
+- [ ] Add the recent-transactions list with per-row soft delete — **two constraints
+      that arrive with this task, both noted attended on `62f5708`:**
+      **(a) escape the `note`.** This is the first task to render a user-typed
+      string into server-rendered markup. `webapp.py` currently says "no
+      user-controlled string reaches the markup here, so there is nothing to
+      escape yet" — that stops being true here. §11 keeps the note's original
+      wording deliberately, so `note` is arbitrary text that arrived through the
+      bot. Unescaped, `<img src=x onerror=...>` in a logged expense is stored XSS
+      in the dashboard. Use `html.escape`, and add a check that a note containing
+      `<script>` renders inert — assert the *escaped* bytes, not that the page
+      "looks fine".
+      **(b) add the `auth_date` freshness check.** Until now the Mini App has been
+      read-only, which is why `validate_init_data` deliberately skips it (see the
+      `ponytail:` note and the `e6775fc` review resolution in `REVIEWS.md`). A
+      per-row delete makes it state-mutating, and a captured `initData` is
+      otherwise a replay token valid forever. Telegram's docs: "To prevent the use
+      of outdated data, you can additionally check the `auth_date` field"; the
+      official SDK defaults to `expiresIn = 86400`. Add a `max_age` guard with a
+      check that a stale `auth_date` is rejected while a fresh one passes.
+- [ ] Add per-row category change from the dashboard — same two constraints as the
+      task above if they haven't landed yet; category itself is a closed set from
+      `categories.py`, so the escaping risk here is the note, not the category
 - [ ] Make the dashboard render correctly in both light and dark themes
 - [ ] `[human]` Register the Mini App menu button with BotFather
 

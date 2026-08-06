@@ -12,6 +12,86 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `62f5708` — Mini App dashboard route: totals, balance, current-month figures (§13, task 97)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `GET /app` (static bootstrap) and `GET /app/data` (auth'd dashboard
+fragment) in `kanakko/app.py`; `db.totals`; `webapp.user_id_from_init_data`,
+`webapp.current_month_ist`, `webapp.dashboard_html`, `webapp.SHELL_HTML`; the
+task-97 tick in `TASKS.md`; new tests in `tests/test_webapp.py`.
+
+### What I actually ran
+
+- `uv run pytest -q` → **144 passed, 1 warning** (matches the commit claim; was
+  130). The warning is Starlette's `httpx`/testclient deprecation, unrelated.
+- **Balance guard, revert-and-red (verified myself):** flipped
+  `income - expenses` → `income + expenses` in `dashboard_html`
+  (`kanakko/webapp.py:133`) and ran `pytest -k dashboard` →
+  `test_dashboard_html_shows_rupee_amounts_and_exact_balance` **and**
+  `test_dashboard_route_renders_totals_and_current_month` both FAILED (2 failed,
+  2 passed). Restored; tree clean. The money guard is real on both the pure and
+  the integration path.
+- **Timezone guard, revert-and-red (verified myself):** dropped
+  `.astimezone(IST)` from `current_month_ist` (`kanakko/webapp.py:100`) and ran
+  `pytest -k current_month` → `test_current_month_ist_buckets_in_kolkata`
+  FAILED. With the UTC-date path, 00:30 IST on Aug 1 (19:00 UTC Jul 31) buckets
+  as July, sliding this month's opening entries into last month. The guard fails
+  for the reason it exists. Restored.
+
+### Spec / convention checks
+
+- **Money is `Decimal`, never float.** `db.totals` sums `NUMERIC` via
+  `coalesce(sum(...), 0)` → `Decimal`; balance is exact `Decimal` subtraction in
+  `dashboard_html`; amounts render through `format_amount`. The pure test pins
+  `0.30 - 0.10 → ₹0.20` (no float drift). ✅
+- **Reads through `active_transactions`.** `db.totals` selects
+  `FROM active_transactions` — a soft-deleted row can't re-enter the headline
+  totals (§6). ✅
+- **Month boundary in `Asia/Kolkata`.** `current_month_ist` is the correct
+  mirror of `jobs.monthly.previous_month_ist` (day-1 in IST, +32d→day-1 for the
+  next first). Buckets on the `occurred_on` date, consistent with
+  `month_summary`'s half-open `[first, next_first)`. ✅
+- **`initData` validation is the auth.** `/app/data` requires the `tma ` prefix,
+  re-verifies the HMAC via `validate_init_data`, and only then resolves the user;
+  `user_id_from_init_data` reads the id from the *signed* `user` object, not from
+  any client-supplied field. Forged (`test_dashboard_route_rejects_a_forged_payload`)
+  and absent-header (`test_dashboard_route_needs_the_authorization_header`)
+  payloads are 401, checked before DB work. Unset `TELEGRAM_BOT_TOKEN` lets the
+  `RuntimeError` propagate → 500 (fails closed, no bypass). ✅
+- **`user_id_from_init_data` input handling.** Parametrized test covers no user
+  field, empty, non-JSON, JSON-but-not-an-object, object-without-id, and a
+  string id — all → `InitDataError`. The `isinstance(uid, bool)` exclusion
+  correctly rejects a JSON `true` masquerading as an int `1`. ✅
+- **No new dependency, no charting library, no ORM.** Fragment is
+  string-concatenated HTML + `format_amount`; `SHELL_HTML` pulls Telegram's own
+  `telegram-web-app.js` from `telegram.org` (required by the platform, §13). ✅
+- **No secret in the served page.** `test_shell_serves_the_bootstrap_without_a_secret`
+  asserts the token isn't in `/app`'s body; the shell carries no data and no
+  auth, matching §13's "no secret in the URL/page." ✅
+
+### Non-blocking observations (not findings; do not action now)
+
+- `dashboard_html` writes its fragment into the shell via `innerHTML`. Safe
+  today — only `format_amount` output and a `strftime` month label are
+  interpolated, none user-controlled — and the docstring says as much. When
+  task 98/101 add category names / notes / the recent list, those *are*
+  user-controlled and must be escaped before they reach the fragment. Flagging so
+  it isn't forgotten; nothing to change for task 97.
+- `/app/data` calls `get_or_create_user` on a GET, so a first-ever open commits a
+  user row. Harmless and consistent with the existing bot path; noted only
+  because it's a write on a nominally read-only route.
+- No route-level test asserts the 500-on-unset-token path. It's covered by the
+  `validate_init_data` unit test plus TestClient's default re-raise of server
+  exceptions, and the behaviour is correct (fail-closed, not bypass), so this is
+  a gap-of-convenience, not a missing money/tz/auth-rejection guard.
+
+The `auth_date` freshness deferral is explicitly documented, read-only, and
+consistent with §13 (HMAC-only); the replay concern legitimately belongs with
+the task 100/101 mutations. Not an issue for this commit.
+
+---
+
 ## 2026-08-06 — `e6775fc` — validate Mini App initData HMAC (§13, Phase 4 tasks 95-96)
 
 **Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED — finding 1 was WRONG, do not apply

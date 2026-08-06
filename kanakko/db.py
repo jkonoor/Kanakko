@@ -12,6 +12,8 @@ Reads elsewhere go through `active_transactions` (§6).
 """
 
 import os
+from datetime import date
+from decimal import Decimal
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -199,6 +201,41 @@ def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
             (update_id,),
         )
         return cur.fetchone() is not None
+
+
+def all_users(conn: psycopg.Connection) -> list[tuple[int, int]]:
+    """Every user as `(user_id, telegram_user_id)` — the scheduled jobs' fan-out.
+
+    The jobs read a user's ledger by internal `user_id` (§1) but send to the
+    Telegram id; a private chat's `chat_id` is that Telegram id. Not a ledger
+    read, so it goes straight to `users`.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id, telegram_user_id FROM users ORDER BY user_id")
+        return cur.fetchall()
+
+
+def day_summary(
+    conn: psycopg.Connection, user_id: int, day: date
+) -> tuple[int, Decimal, Decimal]:
+    """`(entry_count, spent, received)` for `user_id`'s live rows on `day` (§6, §9, §12).
+
+    Buckets on `occurred_on` — when the money moved, not when it was logged — and
+    reads `active_transactions` so a soft-deleted row never re-enters a total. The
+    two sums come back as `NUMERIC` → `Decimal` (never float, §9); an empty day
+    yields `(0, 0.00, 0.00)`. `day` is a plain date the caller computes in
+    `Asia/Kolkata` (§10), keeping the timezone boundary in one testable place.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0)"
+            " FROM active_transactions WHERE user_id = %s AND occurred_on = %s",
+            (user_id, day),
+        )
+        count, spent, received = cur.fetchone()
+    return count, spent, received
 
 
 def cancel_pending(

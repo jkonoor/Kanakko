@@ -52,7 +52,7 @@ def test_no_production_read_bypasses_active_transactions():
     only the bare base ledger table trips this.
     """
     offenders = []
-    for module in sorted(KANAKKO.glob("*.py")):
+    for module in sorted(KANAKKO.rglob("*.py")):
         for value, lineno in sql_literals(module.read_text()):
             if BYPASS.search(value):
                 offenders.append(f"{module.name}:{lineno}")

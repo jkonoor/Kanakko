@@ -12,6 +12,63 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `2c6f27c` — render the confirm card (§4, §5, task 55)
+
+**Scope:** New `kanakko/confirm.py` with `confirm_card(txn)` — a pure renderer
+turning a validated `Transaction` into the card text (type · amount · category ·
+date · note) plus a Confirm/Cancel inline keyboard. New `tests/test_confirm.py`
+(4 checks). `TASKS.md` task 55 ticked. No rows written, no network, no schema —
+sending, the pending row, and the button handlers are tasks 56/57/59.
+
+**Status: ✅ DONE** — no blocking issues. One low-severity note below.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **61 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). Matches the commit's claim (was 57).
+- **§9 money guard actually reddens — verified by breaking it.** I edited
+  `confirm.py:32` to interpolate `{txn.amount}` instead of
+  `{format_amount(txn.amount)}` and ran `pytest tests/test_confirm.py`:
+  `test_amount_is_formatted_not_a_bare_number` **failed** with
+  `'₹1,234.50' not in 'Expense — 1234.50\n…'`. Restored the line; full suite back
+  to 61 passed; `git status` clean. So the guard fails for the reason it exists —
+  a bare amount on the card is caught, not just asserted about.
+- **callback_data contract holds end-to-end.** `CONFIRM`/`CANCEL` = `"confirm"`/
+  `"cancel"`. `dispatch()` (`kanakko/app.py:56-65`) copies `callback_query.data`
+  verbatim into `ButtonPress.data`, so the string round-trips to the handlers
+  (tasks 56/57) unchanged. Neither collides with the category buttons'
+  `cat:<name>` prefix (`kanakko/categories.py:49`).
+- **Exercised the function directly** (not just via the tests): a normal expense
+  renders `'Expense — ₹1,234.50\nCategory: Food\nDate: 2026-08-06\nNote: lunch'`
+  with buttons `['confirm', 'cancel']`. Amount is grouped, ₹-prefixed, two
+  decimals — the §9 display form. `type.capitalize()` is safe because
+  `Transaction.type` is `Literal["expense","income"]`, always lowercase.
+- **Plain text, no `parse_mode` — a correct safety choice.** The note is the
+  user's own wording; rendering it as plain text means a note containing `_`,
+  `*`, `[`, or `<` needs no Markdown/HTML escaping and can't inject formatting.
+- **Spec fit.** §4 (a confirm card on every transaction) and the Phase-1 build
+  order are honoured: the card carries only Confirm/Cancel here. §5's "category
+  buttons directly on the confirm card" is task 63 (Phase 2), correctly deferred,
+  not a Phase-1 omission. Nothing falsely ticked — task 55 asked for exactly this
+  render, and the tests are real, not a value-returning stub.
+
+### Low-severity note (non-blocking)
+
+- **`kanakko/confirm.py:26` — a null `category` renders `Category: None`.** The
+  docstring says a null category "routes to the category buttons instead (§3,
+  task 59), so a card always has a category to name," but the function has no
+  precondition guard. Exercised directly, a `category=None` transaction renders
+  `'Income — ₹50,000.00\nCategory: None\nDate: …'`. This is not wrong *today* —
+  task 59 (the routing that keeps null-category txns away from this renderer) is
+  still unchecked, so "missing is not wrong." But the failure mode is silent: if
+  task 59's routing is later buggy or a new caller forgets it, the user sees the
+  literal string `None` rather than the function refusing. A one-line
+  `assert txn.category is not None, "null category must route to buttons (§3, task 59)"`
+  would make the stated precondition fail loud instead of leaking `None` to the
+  card. Optional; the real fix lives in task 59.
+
+---
+
 ## 2026-08-06 — `811391f` — reclassify webhook-origin task to `[human]` (§14, task 42)
 
 **Scope:** Docs-only. `TASKS.md` reclassifies the open "Verify the webhook's

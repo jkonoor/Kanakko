@@ -31,16 +31,43 @@ the plan's order and it matters.
 
 ## Phase 1 — The core loop
 
-- [ ] Add `kanakko/categories.py` — the expense and income lists from `docs/DECISIONS.md` §11, plus helpers that emit the JSON-schema enum and the Telegram keyboard from the same constant
-- [ ] Add `kanakko/money.py` — Decimal parsing/formatting for ₹ amounts, rejecting float anywhere
-- [ ] Add a check covering parse → store → sum-by-category using `Decimal`
-- [ ] Add `kanakko/parse.py` — OpenRouter call with `response_format` JSON schema and `require_parameters: true`, per `docs/DECISIONS.md` §2
-- [ ] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
-- [ ] Add Pydantic validation of the parse result plus exactly one retry on schema failure
-- [ ] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
-- [ ] Add the Telegram webhook endpoint and update dispatch
-- [ ] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
-- [ ] Handle Confirm — write to `transactions`, clear the pending row
+- [x] Add `kanakko/categories.py` — the expense and income lists from `docs/DECISIONS.md` §11, plus helpers that emit the JSON-schema enum and the Telegram keyboard from the same constant
+- [x] Add `kanakko/money.py` — Decimal parsing/formatting for ₹ amounts, rejecting float anywhere
+- [x] Add a check covering parse → store → sum-by-category using `Decimal`
+- [x] Add `kanakko/parse.py` — OpenRouter call with `response_format` JSON schema and `require_parameters: true`, per `docs/DECISIONS.md` §2
+- [x] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
+- [x] Add Pydantic validation of the parse result plus exactly one retry on schema failure
+- [x] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
+- [x] Add the Telegram webhook endpoint and update dispatch
+- [ ] `[human]` Verify the webhook's origin — `docs/DECISIONS.md` decides
+      user-facing auth (§1 "no auth", §13 Mini App `initData`) but is silent on the
+      webhook itself (confirmed: §14 decides webhook-over-polling only; no
+      `secret_token`/origin decision exists). `/webhook` is public, so once handlers
+      write rows a forged update forges a transaction. Telegram's `secret_token` →
+      `X-Telegram-Bot-Api-Secret-Token` header is the fix, but its first step is a
+      **new DECISIONS §line** (env key name, whether the secret is required in
+      Phase 1) — spec authorship the loop must not do — plus a `setWebhook`
+      reconfiguration carrying the secret, a credentials/deployment action.
+      Marked `[human]`: a person decides it in DECISIONS and sets the secret;
+      the loop then wires the header check + guard that a wrong/absent secret is
+      rejected. Safe to defer past task 48 (render confirm card writes no rows);
+      must land before task 49 (Handle Confirm), the first handler that writes.
+- [x] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
+- [x] Add `kanakko/db.py` — connection + the confirm-flow persistence: `save_pending`
+      (parsed row keyed by the card's message id) and `confirm_pending` (read →
+      insert into `transactions` → delete the pending row, atomically). Carved off
+      task 56 below: this is its DB logic, tested against Postgres. The amount
+      travels as a JSON string and returns through the §9 door (`parse_amount`),
+      so a float can't reach the ledger; `confirm_pending` returns `None` on a
+      redelivered tap so a confirm never double-writes.
+- [ ] Handle Confirm — wire the `ButtonPress(data=CONFIRM)` handler in `app.py`:
+      call `db.confirm_pending`, then acknowledge over Telegram. **Blocked on a
+      Telegram-send client** (`answerCallbackQuery` + edit/send message) that does
+      not exist yet — no send code anywhere in `kanakko/`. The DB write itself is
+      done (`kanakko/db.py`, task above). Reaching this handler also needs the
+      not-yet-built message handler that parses a text message and calls
+      `db.save_pending` to create the pending row. Split out the Telegram-send
+      client as its own task before wiring these handlers.
 - [ ] Handle Cancel — discard the pending row, acknowledge
 - [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing
 - [ ] Show category buttons instead of the confirm card when `category` came back null

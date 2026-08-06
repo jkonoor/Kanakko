@@ -17,8 +17,34 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text()
 ENV_EXAMPLE = (ROOT / ".env.example").read_text()
 SERVICES = yaml.safe_load(COMPOSE)["services"]
 
-# key=value lines only — commented keys are documentation, not requirements.
-ENV_KEYS = dict(re.findall(r"^(\w+)=(.*)$", ENV_EXAMPLE, re.M))
+def _env_pairs(text):
+    """Every `key=value` in a .env, as (key, value) — a list, not a dict.
+
+    Parsed, not pattern-matched: an anchored `^(\\w+)=(.*)$` regex passed on
+    four ordinary spellings that put a real token in the committed file —
+    `export KEY=…`, a leading indent, spaces around `=`, and a duplicate key
+    whose valued line is shadowed by an empty one (`dict()` kept the empty).
+    A list keeps the shadowed pair so a value hiding above a blank still fails.
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        yield key.strip(), value.strip()
+
+
+ENV_PAIRS = list(_env_pairs(ENV_EXAMPLE))
+ENV_KEYS = {k for k, _ in ENV_PAIRS}
+
+# Vars compose interpolates from the environment: `${VAR...}` or bare `$VAR`,
+# but not `$$VAR` (compose's escape for a literal `$` handed to the shell).
+COMPOSE_VARS = set(re.findall(r"(?<!\$)\$\{?(\w+)", COMPOSE))
+
+# Keys compose builds or consumes without interpolating them: DATABASE_URL is
+# assembled from the POSTGRES_* keys and can also be set directly to run outside
+# compose (.env.example documents that). Everything else must reach a service.
+COMPOSE_DERIVED = {"DATABASE_URL"}
 
 
 def service(name: str) -> str:
@@ -77,8 +103,23 @@ def test_env_example_lists_every_key_compose_interpolates():
     `compose.saveEnvironment` is filled in from this file and the deploy dies
     on `:?see .env.example` — a message pointing at a file that never had it.
     """
-    for name in set(re.findall(r"\$\{(\w+)", COMPOSE)):
+    for name in COMPOSE_VARS:
         assert name in ENV_KEYS, f"{name} is interpolated by compose but absent"
+
+
+def test_env_example_lists_no_key_no_service_consumes():
+    """The reverse: a key the operator is told to set that no service reads.
+
+    The gap is silent — `up` succeeds because the keys that are wired are the
+    only ones checked, the operator sees all six set correctly on Dokploy, and
+    the KeyError surfaces phases later inside the container (parse.py reads
+    OPENROUTER_API_KEY, the webhook reads TELEGRAM_BOT_TOKEN). The evidence
+    points at the app; the cause is a compose file that never asked for it.
+    """
+    for name in ENV_KEYS:
+        assert name in COMPOSE_VARS or name in COMPOSE_DERIVED, (
+            f"{name} is in .env.example but no service consumes it"
+        )
 
 
 def test_env_example_holds_no_values():
@@ -87,9 +128,9 @@ def test_env_example_holds_no_values():
     Filling a value in during local debugging commits the secret, and nothing
     about the diff looks different from the placeholder it replaced.
     """
-    assert ENV_KEYS, ".env.example has no keys — the guard would pass vacuously"
-    for name, value in ENV_KEYS.items():
-        assert not value.strip(), f"{name} carries a value"
+    assert ENV_PAIRS, ".env.example has no keys — the guard would pass vacuously"
+    for name, value in ENV_PAIRS:
+        assert not value, f"{name} carries a value"
 
 
 def test_web_and_cron_share_one_image():

@@ -12,6 +12,890 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `1c979f4` — scope `confirm_pending` by `user_id` (§1, fixes `a22a437` Finding 1)
+
+**Scope:** Resolves the sole blocking finding from the `a22a437` review.
+`confirm_pending` now takes `user_id` and its `SELECT` is
+`WHERE user_id = %s AND telegram_message_id = %s`, mirroring `save_pending`'s
+scoping. Two existing db tests updated to pass `user_id`; one new guard,
+`test_confirm_is_scoped_to_the_user`. No production caller yet (task 63 wires
+the handler), so the signature change is safe.
+
+**Status: ✅ DONE** — the cross-tenant write is closed, the guard provably
+bites, and nothing else regressed.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **65 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation; was 64). Ran against a real
+  throwaway Postgres via `conftest.py`, not a mock.
+- **The guard fails for the reason it exists — verified by reverting.** I
+  temporarily dropped the `AND user_id = %s` clause (kept the signature) and
+  reran `tests/test_db.py`: `test_confirm_is_scoped_to_the_user` **failed** with
+  `AssertionError: (Decimal('999.99'), 3) == (Decimal('100.00'), 3)` — i.e. A's
+  Confirm wrote B's ₹999.99 to A's ledger, exactly the wrong-owner scenario §1
+  warns against. Restoring the clause → **4 passed**. The other three db tests
+  stayed green under the revert, so the new test is what pins the fix.
+- **§1 scoping matches `save_pending`.** `confirm_pending`'s `WHERE user_id = %s
+  AND telegram_message_id = %s` (`db.py:67-70`) reverses the `(user_id,
+  telegram_message_id)` `save_pending` stores. The test uses the returned
+  `a`/`b` user ids, not hardcoded integers, so it's robust to the identity
+  sequence.
+- **§9 money intact.** `_txn(amount)` still routes through
+  `Transaction.model_validate`; the scoped test asserts A gets exactly
+  `Decimal("100.00")`, not B's amount — a `Decimal`, not a float.
+- **§6 respected.** The verification read is on `active_transactions`
+  (`test_db.py:126`); `confirm_pending`'s own `SELECT` is on
+  `pending_transactions` (no soft-delete column, so §6 doesn't apply).
+- **No production caller.** `grep confirm_pending` outside tests → only the
+  definition and docstrings. Signature change breaks nothing; task 63 will call
+  it with the `user_id` from the callback query.
+- **Atomicity unchanged.** read → insert → delete still inside one
+  `conn.transaction()`. No new dependency, no ORM, no float.
+
+### Notes (non-blocking, carried forward)
+
+- The prior review's second note still stands: no `UNIQUE (user_id,
+  telegram_message_id)` on `pending_transactions`, so a double `save_pending`
+  for one card would leave `confirm_pending` confirming the newest and orphaning
+  the rest. Not reachable today (one card → one row); a migration-only
+  hardening for whoever wires task 63.
+
+---
+
+## 2026-08-06 — `a22a437` — add `kanakko/db.py`, confirm-flow persistence (§1, §6, §9, prereq of task 56)
+
+**Scope:** New `kanakko/db.py` with `connect()`, `save_pending()`, and
+`confirm_pending()` — the DB half of task 56 (confirm → write to `transactions`,
+clear the pending row), carved off ahead of the not-yet-built message handler and
+Telegram-send client. New `tests/test_db.py` (3 checks against a real Postgres),
+the `conn` fixture moved to `tests/conftest.py` (one definition, shared with
+`test_migrate`). `TASKS.md`: db.py ticked, task 56 left open with remaining work
+recorded.
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+latent cross-tenant defect in `confirm_pending`; everything else is sound and
+the money guard bites.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`. `confirm_pending` now
+> takes a `user_id` and its SELECT is `WHERE user_id = %s AND telegram_message_id
+> = %s`, matching `save_pending`'s scoping — a user's Confirm can no longer latch
+> onto another user's identically-numbered pending card. New guard
+> `test_confirm_is_scoped_to_the_user`: A (seeded first, so the *older* row) and B
+> both hold a pending card on message id 555 with different amounts; A confirms
+> and must get their own ₹100 with only A's pending row cleared. A is deliberately
+> the older row, so the fallback `ORDER BY created_at DESC, pending_id DESC` picks
+> B's newer row — the test only passes when the `user_id` clause resolves A's tap
+> to A's row. Verified it earns its place: dropping the clause back to
+> `WHERE telegram_message_id = %s` reddens exactly this test (A latches onto B's
+> ₹999.99 row); restoring greens it. `uv run pytest -q` → `65 passed` (was 64).
+> No production caller yet (task 63 wires it), so the signature change is safe.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **64 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation; was 61). The three new db tests ran
+  against a real throwaway Postgres, not a mock.
+- **§9 money guard verified live, not trusted.** `Transaction.model_dump(mode="json")`
+  serializes `amount` to the string `'1234.56'` (confirmed by running it), and
+  feeding a JSON *number* (`1234.56` float) back through `Transaction.model_validate`
+  raises `ValidationError` (confirmed). So a float in the stored JSON is refused at
+  the §9 door on the way back in, never rounded into the ledger. The round-trip test
+  asserts the amount returns as exact `Decimal("1234.56")`.
+- **§6 respected.** The verification read in `test_db.py:48` goes through
+  `active_transactions`, not `transactions`. `confirm_pending`'s own `SELECT` is on
+  `pending_transactions` (unfiltered by design — pending rows have no `deleted_at`),
+  so §6 doesn't apply there.
+- **Atomicity is real.** read → insert → delete run inside one
+  `conn.transaction()` (`db.py:59`), so a crash can't store a txn while leaving its
+  pending row live, nor clear the pending row with nothing stored.
+- **Idempotency holds within a user.** `test_confirm_is_idempotent_on_redelivery`
+  confirms a second tap returns `None` and the ledger still holds one row. Correct
+  for the current single-user deployment (per-chat message ids don't repeat).
+- **Column mapping correct.** `txn.date` → `occurred_on`, `type`/`category`/`note`
+  pass through; `created_at`/`deleted_at` take their defaults (now / NULL).
+- **No new dependency, no ORM, no float.** Plain psycopg + `Jsonb`. `connect()`
+  fails closed when `DATABASE_URL` is unset.
+- **Fixture move is a clean dedup.** `conftest.py`'s `conn` is the same
+  socket-only, `fsync=off` throwaway cluster `test_migrate` used; `test_migrate`
+  now imports it implicitly and still passes.
+
+### Finding 1 (blocking) — `confirm_pending` keys on `telegram_message_id` alone, single-tenant by accident (§1)
+
+`kanakko/db.py:49,60-63` — `confirm_pending(conn, telegram_message_id)` takes no
+`user_id` and selects `WHERE telegram_message_id = %s ORDER BY created_at DESC
+LIMIT 1`. Telegram message ids are unique *per chat*, not globally — every user's
+chat reuses the same small integers. `save_pending` correctly stores `user_id`;
+`confirm_pending` throws that scoping away.
+
+**Failure scenario (with a second user, which §1 says to build for now):** User A
+and User B each have a live pending confirm card that happened to land on message
+id `555`. B taps Confirm on *their* card. `confirm_pending(conn, 555)` selects the
+globally-most-recent pending row for `555` — A's — and writes **A's** transaction
+to A's ledger, deleting A's pending row. B's own row stays live and B's tap wrote
+nothing of theirs. A wrong-owner write plus a broken idempotency guarantee, and it
+raises nothing.
+
+This is exactly the §1 anti-pattern ("never single-tenant by accident"): the whole
+reason every table carries `user_id` from day one is so the multi-user change stays
+small and no query bakes in a single-tenant assumption. This one does, and it's the
+foundation the confirm handler (task 56) will call. It does **not** bite today's
+single-user, constant-`user_id` deployment — flagging it now because the fix is one
+parameter and one clause, and it gets more expensive once the handler is wired.
+
+**Suggested fix:** give `confirm_pending` a `user_id` parameter (the handler has it
+from the callback query) and add `AND user_id = %s` to the `SELECT`, matching
+`save_pending`'s scoping. `test_confirm_is_idempotent_on_redelivery` should grow a
+sibling: a second user with the same message id must not confirm the first user's row.
+
+### Notes (non-blocking)
+
+- **Multiple pending rows per `(user, message_id)` are silently tolerated.** The
+  `ORDER BY … LIMIT 1` means if `save_pending` were ever called twice for the same
+  card, `confirm_pending` confirms the newest and orphans the rest. Not reachable
+  today (one card → one pending row), but a `UNIQUE (user_id, telegram_message_id)`
+  on `pending_transactions` would make the key a real key rather than a convention.
+  Migration-only; note for whoever wires task 56, not required now.
+
+---
+
+## 2026-08-06 — `2c6f27c` — render the confirm card (§4, §5, task 55)
+
+**Scope:** New `kanakko/confirm.py` with `confirm_card(txn)` — a pure renderer
+turning a validated `Transaction` into the card text (type · amount · category ·
+date · note) plus a Confirm/Cancel inline keyboard. New `tests/test_confirm.py`
+(4 checks). `TASKS.md` task 55 ticked. No rows written, no network, no schema —
+sending, the pending row, and the button handlers are tasks 56/57/59.
+
+**Status: ✅ DONE** — no blocking issues. One low-severity note below.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **61 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). Matches the commit's claim (was 57).
+- **§9 money guard actually reddens — verified by breaking it.** I edited
+  `confirm.py:32` to interpolate `{txn.amount}` instead of
+  `{format_amount(txn.amount)}` and ran `pytest tests/test_confirm.py`:
+  `test_amount_is_formatted_not_a_bare_number` **failed** with
+  `'₹1,234.50' not in 'Expense — 1234.50\n…'`. Restored the line; full suite back
+  to 61 passed; `git status` clean. So the guard fails for the reason it exists —
+  a bare amount on the card is caught, not just asserted about.
+- **callback_data contract holds end-to-end.** `CONFIRM`/`CANCEL` = `"confirm"`/
+  `"cancel"`. `dispatch()` (`kanakko/app.py:56-65`) copies `callback_query.data`
+  verbatim into `ButtonPress.data`, so the string round-trips to the handlers
+  (tasks 56/57) unchanged. Neither collides with the category buttons'
+  `cat:<name>` prefix (`kanakko/categories.py:49`).
+- **Exercised the function directly** (not just via the tests): a normal expense
+  renders `'Expense — ₹1,234.50\nCategory: Food\nDate: 2026-08-06\nNote: lunch'`
+  with buttons `['confirm', 'cancel']`. Amount is grouped, ₹-prefixed, two
+  decimals — the §9 display form. `type.capitalize()` is safe because
+  `Transaction.type` is `Literal["expense","income"]`, always lowercase.
+- **Plain text, no `parse_mode` — a correct safety choice.** The note is the
+  user's own wording; rendering it as plain text means a note containing `_`,
+  `*`, `[`, or `<` needs no Markdown/HTML escaping and can't inject formatting.
+- **Spec fit.** §4 (a confirm card on every transaction) and the Phase-1 build
+  order are honoured: the card carries only Confirm/Cancel here. §5's "category
+  buttons directly on the confirm card" is task 63 (Phase 2), correctly deferred,
+  not a Phase-1 omission. Nothing falsely ticked — task 55 asked for exactly this
+  render, and the tests are real, not a value-returning stub.
+
+### Low-severity note (non-blocking)
+
+- **`kanakko/confirm.py:26` — a null `category` renders `Category: None`.** The
+  docstring says a null category "routes to the category buttons instead (§3,
+  task 59), so a card always has a category to name," but the function has no
+  precondition guard. Exercised directly, a `category=None` transaction renders
+  `'Income — ₹50,000.00\nCategory: None\nDate: …'`. This is not wrong *today* —
+  task 59 (the routing that keeps null-category txns away from this renderer) is
+  still unchecked, so "missing is not wrong." But the failure mode is silent: if
+  task 59's routing is later buggy or a new caller forgets it, the user sees the
+  literal string `None` rather than the function refusing. A one-line
+  `assert txn.category is not None, "null category must route to buttons (§3, task 59)"`
+  would make the stated precondition fail loud instead of leaking `None` to the
+  card. Optional; the real fix lives in task 59.
+
+---
+
+## 2026-08-06 — `811391f` — reclassify webhook-origin task to `[human]` (§14, task 42)
+
+**Scope:** Docs-only. `TASKS.md` reclassifies the open "Verify the webhook's
+origin" task to `[human]` and records a blocker: its first step is authoring a
+new `docs/DECISIONS.md` line (env key name, whether the secret is required in
+Phase 1) plus a `setWebhook` reconfiguration carrying a `secret_token`. No code,
+schema, or test changed.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **Diff is docs-only.** `git show HEAD --stat` → `TASKS.md | 19 +++---`, one
+  file. Nothing under `kanakko/`, `migrations/`, or `tests/` touched, so none of
+  the money / timezone / soft-delete / category silent-wrongness classes are in
+  scope.
+- **Suite still green.** `uv run pytest -q` → **57 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). A docs-only change shouldn't move
+  this, and it didn't.
+- **The spec really is silent on webhook origin.** `grep -ni
+  'secret_token|secret-token|X-Telegram|webhook|origin|no auth'
+  docs/DECISIONS.md` plus reading §1 (line 11, "No auth" — user-facing), §13
+  (lines 255–265, Mini App `initData`), §14 (lines 291–305, webhook-over-polling
+  only), and the deferred table (lines 320–345). No `secret_token`/origin
+  decision exists anywhere, and it is not on the deferred list. The commit's
+  central factual claim holds.
+- **The `[human]` classification is justified.** The queue's own convention
+  (TASKS.md lines 9–11): `[human]` = touches credentials, deployment, or an
+  external account. This task's first step is authoring a new DECISIONS decision
+  — `CLAUDE.md` forbids the loop from editing the spec — and its wiring requires
+  `setWebhook` with a secret (a credentials/deployment action). Both halves are
+  genuinely off-limits to the loop. Correctly left `- [ ]` (open), not ticked, so
+  this is a deliberate skip, not a false tick.
+- **The safety gate is sound.** Confirmed the current `/webhook`
+  (`kanakko/app.py:69–91`) only classifies via `dispatch()` and `log.info`s — it
+  writes **no rows** (verified by reading the handler and `grep -rn
+  'pending_transactions|INSERT INTO pending' kanakko/` → no matches; the
+  confirm-card and Handle-Confirm tasks are unimplemented). So "a forged update
+  can't forge anything yet" is true today, and gating origin auth ahead of the
+  first ledger write (Handle Confirm) is the right, conservative call.
+
+### Advisory (non-blocking)
+
+- **`TASKS.md:53` — "render confirm card writes no rows" is a claim about an
+  unimplemented task, not a verified fact.** In the intended flow (parse → store
+  a `pending_transactions` row → render the card), the pending row is created
+  *before* the card is shown — and lines 56/64 ("clear the pending row",
+  "update the pending row") confirm a pending row is expected to exist by then.
+  If whoever implements the confirm-card task persists the pending row there,
+  then a forged update could write `pending_transactions` rows before origin auth
+  lands. This is low-consequence — `pending_transactions` is a staging table, not
+  the `transactions` ledger, and the material forgery risk (a real transaction)
+  is still the Handle-Confirm write the gate correctly targets — but the
+  implementer of the confirm-card task should confirm whether it persists a
+  pending row and, if so, treat that as the true earliest write point rather than
+  trusting the "writes no rows" phrasing. No change required to this commit.
+
+---
+
+## 2026-08-06 — `4402e63` — `/webhook` endpoint + update dispatch (§14, task 41)
+
+**Scope:** `kanakko/app.py` gains `TextMessage`/`ButtonPress` frozen dataclasses,
+a `dispatch()` that classifies a Telegram update into one of those or `None`, and
+a `POST /webhook` that parses the body, routes via `dispatch()`, and returns
+`{"ok": true}` (200) unconditionally. New `tests/test_webhook.py` (6 checks).
+TASKS.md ticks task 41 and adds a webhook-origin-auth task.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **Full suite.** `uv run pytest -q` → **57 passed, 1 warning** (the warning is a
+  pre-existing Starlette/httpx deprecation, unrelated). Matches the commit
+  message's claim of 57.
+- **Webhook tests.** `uv run pytest tests/test_webhook.py -q` → **6 passed**.
+- **The load-bearing guard actually guards.** Claim: without the `try/except`
+  around `request.json()`, a malformed body would 500 and Telegram would
+  redeliver forever. I reproduced a copy of the endpoint *without* the guard and
+  posted `b"not json"` with a JSON content-type: it returned **500** (verified,
+  not assumed). With the guard in place the endpoint returns 200. So the guard
+  fails for the reason it exists — this is not a surface-form assertion.
+- **Spec fit (§14).** `docs/DECISIONS.md` §14 (lines 291–305) decides webhook over
+  long polling and is otherwise silent on dispatch shape; there is no routing
+  detail to contradict. Nothing in the diff touches money, timezones, categories,
+  soft-delete, or SQL, so none of the silent-wrongness classes apply here — no
+  `float`, no `transactions` read, no UTC bucketing.
+- **`dispatch()` classification.** Text → `TextMessage`; inline-button tap →
+  `ButtonPress`; photo (no `text`), `edited_message`, `channel_post`, and `{}` →
+  `None`. Confirmed by reading the code and the three-case ignore test. `message`
+  and `callback_query` are read with `or {}`, so a `null` value doesn't crash.
+- **Deferred webhook auth.** The endpoint is public and does no origin check. This
+  is deliberately deferred with a new TASKS.md line (Telegram `secret_token` →
+  `X-Telegram-Bot-Api-Secret-Token`), to be decided in DECISIONS before handlers
+  write rows. Correct call per CLAUDE.md ("Adding [a decision] is a decision"):
+  since `dispatch()` only logs and writes nothing, a forged update currently has
+  no effect, so there is no present data risk. Not a finding — it's sequenced
+  ahead of the handlers that would make it matter.
+
+### Findings
+
+None blocking.
+
+**Note (non-blocking, low):** `dispatch()` reads `chat.get("id")` and
+`message.get("message_id")` with `.get()`, so a text update missing its `chat`
+yields `TextMessage(chat_id=None, …)` rather than being ignored — the dataclass
+fields are typed `int` but can be `None`. Telegram always includes `chat` on a
+`message`, and no handler consumes these yet, so this is future-facing: the
+handler tasks (42–46) should reject an action with a `None` `chat_id` rather than
+try to reply to it. Recording it here so it isn't lost, not asking for a change now.
+
+---
+
+## 2026-08-06 — `7852921` — category nullable, amount non-nullable in parse schema (§3, task 40)
+
+**Scope:** `parse_schema()` makes `category` nullable (`type: ["string","null"]`,
+`enum: [*schema_enum(), None]`); `Transaction.category` becomes `str | None` and
+`_category_is_known` passes `None` through while still rejecting any non-null
+value outside the closed set. New test `test_null_category_validates_without_retry`.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **Spec fit (§3).** `docs/DECISIONS.md` §3 lines 56–70: uncertainty is a
+  nullable field, `category: null` → show buttons, `amount` **not** nullable, no
+  confidence score, and the nullability is enforced by the schema rather than
+  validation code. The diff matches all of it: null is added in `parse_schema()`
+  (not in `categories.py`), `amount` type stays `"string"` and required, and no
+  confidence field appears anywhere. `schema_enum()` still returns only real
+  categories (`kanakko/categories.py:35`), so null is not smuggled in as a
+  category (§11 preserved).
+- **Validator behaviour.** `parse.py:142-147` — `None` short-circuits before the
+  membership test, so a null category validates; any non-null string outside
+  `ALL_CATEGORIES` still raises. `amount` remains routed through
+  `parse_amount` (§9), untouched.
+- **`uv run pytest -q` → 51 passed** (matches the commit message).
+- **Revert-verified the new test guards the behaviour, not the spelling.** I
+  temporarily restored the old `if value not in ALL_CATEGORIES:` and re-ran
+  `tests/test_parse.py`: `test_null_category_validates_without_retry` went red
+  with `IndexError: tuple index out of range` (rejected null → unwanted retry →
+  the single-response `_feed` runs dry), exactly as the commit claims. Restored;
+  `git diff` clean. So the test fails for the reason it exists.
+- `TASKS.md` box for task 40 is now ticked and the work behind it is real, not a
+  stub.
+
+No `float` on the money path, no read-through-view concern (parse only), no
+timezone bucketing, no secret, no new dependency. Nothing to change.
+
+---
+
+## 2026-08-06 — `cbc3a9d` — validate parse result with Pydantic + one retry (§2, task 39)
+
+**Scope:** Adds a `Transaction` Pydantic model and `parse_message()` to
+`kanakko/parse.py`, which validates the model's JSON and retries exactly once on
+a schema failure. 6 new tests in `tests/test_parse.py`; `TASKS.md` line 39 ticked.
+Diff +162/-8 across three files, no production code beyond `parse.py`.
+
+**Status: ✅ DONE** — no blocking issues. The commit does what §2 asks (one
+Pydantic validation + one retry), keeps `amount` on the `Decimal` rail through
+the single §9 door, and correctly defers nullable-category to task 40. I
+reproduced both defects the new tests exist to catch and confirmed they go red.
+
+### What I checked (and what it returned)
+
+- **`git show HEAD`** — confirmed scope: `parse.py`, `test_parse.py`, `TASKS.md` only.
+- **`uv run pytest`** → `50 passed, 1 warning`. **`uv run pytest tests/test_parse.py -v`**
+  → all 12 pass (6 new).
+- **Float coercion probe** (`/tmp/probe.py`, direct `Transaction.model_validate`):
+  `amount: 500.5` (JSON float) → **rejected**; `amount: "500.50"` → `Decimal('500.50')`;
+  `amount: 500` (JSON int) → `Decimal('500.00')` (exact, no paise lost);
+  `date: "not-a-date"` → **rejected**. The §9 leak is closed: a provider that
+  ignores strict mode and returns a bare number can't launder a lost-precision
+  float into a `Decimal`.
+- **Revert-verified the two guards actually bite:**
+  - Replaced the retry's `except` body with `raise` → `test_schema_failure_is_retried_exactly_once`,
+    `test_two_failures_raise_and_do_not_loop`, `test_float_amount_is_refused_not_coerced`,
+    `test_non_json_content_is_retried` all **failed** (4 red). Restored → green.
+  - Made `_amount_is_exact` return `value` unchanged (bypassing `parse_amount`, letting
+    Pydantic coerce float→Decimal) → `test_float_amount_is_refused_not_coerced` and
+    `test_two_failures_raise_and_do_not_loop` **failed** (2 red). Restored → 12 green.
+  Both commit-message revert claims hold.
+- **Spec fit:** §2 caveat (strict mode best-effort per provider → one Pydantic
+  validation + single retry) is implemented literally. No confidence score
+  (§3) — `Transaction` has no such field. `category` stays required, matching the
+  commit's own note that nullability is task 40; not a finding since that task is
+  unchecked. `extra="forbid"` mirrors the schema's `additionalProperties: false`.
+- **Retry classification** matches the docstring: `ValidationError`/`json.JSONDecodeError`
+  retried; `httpx.HTTPError` and a missing key (`KeyError`/`IndexError` from
+  `response.json()["choices"][0]...`) propagate un-retried
+  (`test_http_error_is_not_retried` confirms the HTTP case, 1 call, no retry).
+
+### Findings
+
+None blocking. Two non-issues noted for the record:
+
+- **Int amount accepted despite the schema declaring `amount` a string.** A JSON
+  integer (`500`) decodes to `int`, which `parse_amount` accepts exactly →
+  `Decimal('500.00')`. No paise are lost (an int has no fractional part), so this
+  is harmless resilience, not a §9 violation. Only `float` loses precision, and
+  that path is rejected. No change needed.
+- **`response.json()` raising `JSONDecodeError` is treated as a schema failure.**
+  If OpenRouter's *outer* HTTP body (not just the model `content`) is malformed,
+  `call()` raises `JSONDecodeError` before reaching `json.loads(content)`, so it
+  gets retried once like a bad-content failure rather than propagating as a
+  transport error. Retrying once is harmless and rare; not worth a guard.
+
+---
+
+## 2026-08-06 — `8ee86b9` — rewrite `test_today_reads_the_kolkata_clock` to verify the zone, not the format
+
+**Scope:** test-only follow-up. Rewrites the one guard flagged ⚠️ on `b21aa45`
+so it asserts the *behaviour* (the clock resolves in `Asia/Kolkata`) instead of a
+surface form (the date *format*). Diff touches two files (+31/-10):
+`tests/test_parse.py` (test rewritten, `+datetime/timezone`, `+from kanakko import
+parse`) and `REVIEWS.md` (prior finding marked RESOLVED). No production code
+changed.
+
+**Status: ✅ DONE** — no blocking issues. The rewritten guard earns its place: I
+reproduced the exact defect it exists to catch and confirmed it goes red, then
+green on restore.
+
+### What I checked (and what it returned)
+
+- **`git show HEAD`** — confirmed the commit is test + REVIEWS only; `kanakko/`
+  production code is untouched.
+- **`uv run pytest -q`** → `44 passed, 1 warning`. Matches the commit message.
+- **The guard fails for the reason it exists.** The claim to verify is "mutating
+  `KOLKATA` to UTC reddens exactly this test." I edited
+  `kanakko/parse.py:30` `ZoneInfo("Asia/Kolkata")` → `ZoneInfo("UTC")` and ran
+  `pytest tests/test_parse.py::test_today_reads_the_kolkata_clock` →
+  **1 failed**: `AssertionError: assert '2026-08-06' == '2026-08-07'`. Restored
+  via `git checkout kanakko/parse.py` → **1 passed**. The guard genuinely
+  reddens when the zone breaks; the prior finding is closed.
+- **Why the format assertion no longer hides the bug.** The old test asserted
+  `re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())` (any zone's date matches) and
+  `today() in build_request(...)` (both sides call `today()`, self-consistent).
+  The new test freezes an instant — `2026-08-06 20:00 UTC`, already `2026-08-07`
+  in IST — and asserts `today() == "2026-08-07"`, an exact value only the
+  correct zone produces. Traced the monkeypatch: `FrozenDatetime.now(tz)` returns
+  `fixed.astimezone(tz)`, `today()` calls `datetime.now(KOLKATA)`, so the pinned
+  instant flows through the real `KOLKATA` constant — the thing under test.
+
+### Findings
+
+None. The commit does exactly what its message claims and the fix is verified by
+reproduction, not assertion. The retained format regex on line 75 is now
+redundant with the exact-value assert above it, but it is harmless and the commit
+deliberately kept it — not a finding.
+
+---
+
+## 2026-08-06 — `b21aa45` — inject current `Asia/Kolkata` date into the parse prompt (§10)
+
+**Scope:** `build_request` now prepends today's `Asia/Kolkata` date to the
+system prompt, `today()` reads that date from `zoneinfo` (§10's "one function"
+provision), `today_str` is injectable for tests; `tests/test_parse.py` gains two
+guards; `TASKS.md` line 38 ticked. `git show --stat HEAD` confirms exactly those
+three files (+47/-5). Judged against `docs/DECISIONS.md` §10 (current
+`Asia/Kolkata` date injected into **every** LLM prompt; timezone read through one
+function for the multi-user path) and the CLAUDE.md guard conventions.
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — the
+shipped code was already correct and matches §10, but one of the two new guards
+asserted a surface form (date *format*) while claiming to verify the behaviour
+that actually matters (the zone is `Asia/Kolkata`, not UTC). It stayed green
+when the zone was broken.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`.
+> `test_today_reads_the_kolkata_clock` now monkeypatches `parse.datetime` to a
+> frozen `FrozenDatetime` whose `now(tz)` returns `2026-08-06 20:00 UTC`
+> converted into `tz` — an instant where UTC (`2026-08-06`) and IST
+> (`2026-08-07`) fall on different calendar days — and asserts
+> `today() == "2026-08-07"`. The format regex is kept. Verified it earns its
+> place: mutating `KOLKATA = ZoneInfo("Asia/Kolkata")` → `ZoneInfo("UTC")` now
+> reddens exactly this test (`today()` returns `2026-08-06`, `AssertionError`);
+> restoring greens it. `uv run pytest -q` → `44 passed`.
+
+### What I checked (and what it returned)
+
+- **Whole suite green.** `uv run pytest -q` → `44 passed, 1 warning` (the lone
+  warning is the pre-existing Starlette/httpx deprecation, unrelated).
+- **Spec fit (§10).** The date reaches the system message verbatim, ahead of the
+  user message; wording tells the model to resolve "yesterday"/"last Friday"
+  against it. `today()` uses `ZoneInfo("Asia/Kolkata")` via stdlib `zoneinfo` —
+  no new dependency, no naive datetime. The single `today()` function satisfies
+  §10's "read the timezone through one function … later returns a per-user
+  column" provision. Matches §10.
+- **No money/`float`/`active_transactions`/SQL surface touched** by this diff —
+  nothing to check there.
+- **Guard #1 revert-verified.** Replacing the injected `system` with bare
+  `_SYSTEM_PROMPT` → `test_current_kolkata_date_is_injected_into_the_prompt`
+  and `test_today_reads_the_kolkata_clock` both **FAIL**
+  (`2 failed, 4 passed`). So the "date reaches the prompt" behaviour is genuinely
+  guarded.
+- **Guard #2 defeat test — it does NOT guard its stated purpose.** I mutated
+  `KOLKATA = ZoneInfo("Asia/Kolkata")` → `ZoneInfo("UTC")` and reran
+  `tests/test_parse.py` → **`6 passed`**, all green. The zone is broken and every
+  guard stays green.
+
+### Findings
+
+**1 — LOW — `tests/test_parse.py:60-63` `test_today_reads_the_kolkata_clock`
+does not verify Kolkata; its docstring overclaims.**
+
+The test's comment says today() "must be a real Kolkata date, not a naive UTC
+one," but the assertions are `re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())` plus
+`today() in _system_content(build_request("x"))`. The regex passes for *any*
+zone's date, and the second assertion is satisfied because both sides call the
+same `today()` — it can never disagree with itself. **Failure scenario:** a
+future edit sets `KOLKATA = ZoneInfo("UTC")` (or someone writes
+`datetime.now().strftime(...)` with no tz). Between 18:30–24:00 UTC that yields
+*yesterday's* IST date, so every "yesterday"/"today" the model resolves near IST
+midnight is silently off by a day — exactly the §10 failure. This guard stays
+green through all of it (verified above: UTC mutation → `6 passed`). The
+production code is correct **today**; the risk is that the test advertises
+protection it doesn't provide, so the next person trusts it.
+
+**Suggested fix:** pin an instant that differs across the two zones and assert
+the IST answer. e.g. monkeypatch `parse.datetime` (or inject a clock) to
+`2026-08-06 20:00:00+00:00` — UTC date `2026-08-06`, IST date `2026-08-07` — and
+assert `today() == "2026-08-07"`. That reddens the moment the zone is wrong.
+Keep the existing format/injection assertions.
+
+### Not findings
+
+- Absence of Pydantic validation + retry (task 39) and the nullable-category
+  refinement (task 40) — both boxes still unchecked, out of scope.
+- `today_str` injectability is a test seam, not dead flexibility — it's the
+  §10 "one function" seam and how guard #1 stays deterministic.
+
+---
+
+## 2026-08-06 — `262fc0d` — add `kanakko/parse.py` (OpenRouter call + schema)
+
+**Scope:** New `kanakko/parse.py` (parse schema, request body, thin httpx call)
+and `tests/test_parse.py` (4 body/schema checks, no network); `TASKS.md` line 37
+ticked. Judged against `docs/DECISIONS.md` §2 (OpenRouter, `response_format`
+json_schema, `require_parameters: true`, default `claude-opus-5`), §9 (money is
+`Decimal`/`NUMERIC`, no float), §11 (categories from one source), and the
+CLAUDE.md conventions. `git show --stat HEAD` confirms exactly those three files
+(+142/-1). The commit explicitly defers date injection (task 38), Pydantic
+validation + retry (task 39), and the nullable-category refinement (task 40) —
+all three boxes remain unchecked, so their absence is out of scope, not a
+finding.
+
+**Status: ✅ DONE** — the module does what task 37 asked and matches §2; the
+guards fail for the reasons they exist. No blocking findings.
+
+### What I checked (and what it returned)
+
+- **Whole suite green.** `uv run pytest -q` → `42 passed, 1 warning`. The lone
+  warning is the pre-existing Starlette/httpx deprecation, unrelated to this diff.
+- **Every §2/§9/§11 lever exercised directly** (script driving the real code):
+  - `require_parameters` → `True`; `response_format.json_schema.strict` → `True`;
+    `response_format.type` → `json_schema`. Matches §2.
+  - `amount` schema type → `string` (§9: a JSON number would decode to `float`
+    and lose paise; a string survives to `money.parse_amount`).
+  - `category` enum → `schema_enum()` exactly (`== True`), so the model cannot
+    invent a category (§11); no literal category strings in `parse.py`.
+  - `required` → `['type','amount','category','date','note']`,
+    `additionalProperties` → `False`. Consistent with the current pre-task-40
+    schema (category still required; §3's nullable refinement is task 40).
+  - No confidence score anywhere in the schema (§3). Confirmed.
+- **The empty-env model-default guard genuinely guards (the revert-verified
+  one).** With `OPENROUTER_MODEL=""`, `build_request()['model']` → `claude-opus-5`;
+  the naive `os.environ.get("OPENROUTER_MODEL", MODEL_DEFAULT)` returns `''` for
+  the same input — so the guard reddens on the exact bug it names. Unset → default;
+  `anthropic/claude-sonnet-5` → passes through. `model or env or MODEL_DEFAULT` is
+  correct.
+- **`call()` fails closed without a key.** With `OPENROUTER_API_KEY` unset,
+  `call('x')` raises `RuntimeError("OPENROUTER_API_KEY is not set")` before any
+  network I/O. Key is read from env and sent as a `Bearer` header — no secret in
+  the repo, fixture, or compose.
+
+### Notes (non-blocking, for the tasks that own them)
+
+- The schema requires `date` (YYYY-MM-DD) but no current date is injected yet, so
+  `call()` today would ask the model to date a transaction with no clock — this is
+  precisely task 38, deferred and unwired (no caller invokes `call()` until the
+  webhook, task 41). Not a finding; flagged so task 38 isn't lost.
+- `call()`'s POST/parse path has no test (no network by design). Its only logic is
+  the key-missing raise (verified above) and a standard OpenRouter response
+  unwrap; validation of the returned body is task 39. Acceptable for this scope.
+
+---
+
+## 2026-08-06 — `1271d4a` — cover parse → store → sum-by-category with `Decimal`
+
+**Scope:** Test-only commit. Adds `test_parse_store_sum_by_category_stays_exact`
+to `tests/test_migrate.py`, ticks the matching box in `TASKS.md` (line 36,
+"Add a check covering parse → store → sum-by-category using `Decimal`"). Judged
+against `docs/DECISIONS.md` §6 (reads through `active_transactions`) and §9
+(money is `Decimal`/`NUMERIC(12,2)`), and the CLAUDE.md money/soft-delete rules.
+`git show --stat HEAD` confirms exactly `TASKS.md` (+1/-1) and
+`tests/test_migrate.py` (+53). No production code touched.
+
+**Status: ✅ DONE** — the test is real, non-vacuous, and its guards fail for the
+reasons they exist. No findings.
+
+### What I checked (and what it returned)
+
+- **Whole suite green.** `uv run pytest -q` → `38 passed, 1 warning`. The lone
+  warning is a pre-existing Starlette/httpx deprecation, unrelated to this diff.
+- **The new test actually runs, not skipped.**
+  `uv run pytest tests/test_migrate.py::test_parse_store_sum_by_category_stays_exact -v`
+  → `PASSED` (a real Postgres cluster booted; the `conn` fixture's skip did not
+  fire on this machine).
+- **The drift claim is true, so the equality is non-vacuous.**
+  `0.10+0.20+0.30` → `0.6000000000000001`, `10.10+20.20+0.05` →
+  `30.349999999999998`; both `!= Decimal("0.60")` / `Decimal("30.35")`. A `float`
+  column or a Python-side float sum would therefore redden the `==` assertion,
+  and separately `isinstance(0.6, Decimal)` is `False`, so the type assertion
+  catches a float SUM return even if the value happened to land exact.
+- **The soft-delete guard genuinely guards (mutation check).** I temporarily
+  changed the `SELECT … FROM active_transactions` to `FROM transactions` and
+  re-ran the one test → `1 failed`: the soft-deleted ₹999.99 Food row leaks in
+  and Food becomes `1000.59 != 0.60`. Restored the file; `git status` clean.
+  This confirms the §6 read-through-the-view rule is exercised, not just recited.
+- **Sources of truth respected.** Categories come from
+  `EXPENSE_CATEGORIES` in `kanakko/categories.py` (indices 0/1 = Food/Groceries),
+  not string literals; amounts enter through `parse_amount`; the sum runs in
+  Postgres over `NUMERIC(12,2)`.
+
+### Notes (non-blocking, not findings)
+
+- The test binds Food/Groceries to `EXPENSE_CATEGORIES[0]`/`[1]` by position. If
+  someone reorders the tuple in `categories.py` the test still passes (it reads
+  whatever names sit at 0/1), so it won't spuriously break — acceptable, and the
+  category-ordering contract isn't this test's job.
+- Coverage of the money path is now: single-row round-trip
+  (`test_schema_stores_money_exactly`) + multi-row SUM/GROUP BY with soft-delete
+  exclusion (this commit). Month/day bucketing `AT TIME ZONE 'Asia/Kolkata'` is
+  still unwritten — but its task is unchecked, so that's not-yet-done, not a
+  finding here.
+
+---
+
+## 2026-08-06 — `44b3096` — reject non-finite Decimals in `parse_amount`
+
+**Scope:** Fix for finding 1 of the `9d7046b` review — `Decimal("nan")` slipped
+past `parse_amount`'s `InvalidOperation` net and surfaced as an uncaught
+`decimal.InvalidOperation` at the `amount <= 0` line instead of the documented
+`ValueError`. Three files: `kanakko/money.py` (the `is_finite` guard + two
+`demo()` nan cases), `tests/test_money.py` (nan/NaN/-nan added to the garbage
+parametrize), `REVIEWS.md` (marked RESOLVED). `git show --stat HEAD` confirms
+exactly those three. Judged against `docs/DECISIONS.md` §9 and the CLAUDE.md
+money rule.
+
+**Status: ✅ DONE** — the input-validation hole is closed; the guard fails for
+the reason it exists; the §9 `Decimal`/`NUMERIC(12,2)` precision guarantee is
+untouched. No new findings.
+
+### What I checked (and what it returned)
+
+- `git show HEAD` — the change is a single 5-line guard
+  (`if not amount.is_finite(): raise ValueError`) inserted *after* `quantize`
+  and *before* `amount <= 0` (`money.py:46-47`), plus two test/demo additions.
+  Placement is correct: it sits on the one path every amount passes through,
+  ahead of the comparison that was raising.
+- `uv run pytest -q` → **37 passed** (was 34; +3, matching the three new nan
+  parametrize cases). `uv run python -m kanakko.money` → `money demo ok`.
+- **Guard earns its place (revert test).** Removed the two guard lines and ran
+  `uv run pytest tests/test_money.py -q` → `3 failed, 13 passed`; the three
+  failures are exactly `[nan]`, `[NaN]`, `[-nan]`, each
+  `decimal.InvalidOperation` at `money.py:46` (the `<= 0` line after removal).
+  Restored the guard → clean (`git diff --stat` empty), tests green again. The
+  check fails for precisely the breakage it prevents.
+- **Semantics spot-check.** Confirmed `Decimal("nan").quantize(...)` succeeds
+  but `nan <= 0` raises `InvalidOperation` (an `ArithmeticError`, *not* a
+  `ValueError`) — so pre-fix the documented `ValueError` contract in the
+  docstring was violated. `Decimal.is_finite()` returns `False` for
+  `nan/-nan/inf/-inf/Infinity`, so the guard also defensively covers infinities
+  (though `Decimal("inf").quantize(...)` already raises `InvalidOperation` and
+  is caught upstream, so infinities never reach the new line — no behaviour
+  change there, just belt-and-braces). No `float` is introduced; amounts remain
+  `Decimal` throughout.
+
+### Findings
+
+None. The fix is minimal, correct, and lands on the shared entry point rather
+than a caller. Both the new test cases and the two `demo()` additions
+(`"nan"`, `"NaN"`) are real guards, not surface-form assertions — verified by
+watching them go red on revert.
+
+---
+
+## 2026-08-06 — `9d7046b` — add `kanakko/money.py` (₹ amounts as `Decimal`, float refused)
+
+**Scope:** New `kanakko/money.py` (`parse_amount`, `format_amount`, `demo`),
+new `tests/test_money.py`, one ticked box in `TASKS.md`. `git show --stat HEAD`
+confirms exactly those three files. Judged against `docs/DECISIONS.md` §9.
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+input-validation hole in the money entry point (a documented `ValueError` path
+actually raised an uncaught `decimal.InvalidOperation`). The §9 precision
+guarantee itself was intact.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`. `parse_amount` now
+> rejects non-finite Decimals — `if not amount.is_finite(): raise ValueError`
+> — after quantize and before the `<= 0` comparison that was signalling the
+> uncaught `InvalidOperation`. So `"nan"`/`"NaN"`/`"-nan"` now surface as the
+> documented `ValueError` through the single door, not as an `ArithmeticError`.
+> `test_rejects_non_positive_and_garbage` gained the three `nan` spellings and
+> `demo()` gained `"nan"`/`"NaN"`; both fail for the reason they exist —
+> reverting the `is_finite` guard reddens exactly the three `nan` cases
+> (`3 failed, 13 passed`, each `decimal.InvalidOperation` at the `<= 0` line),
+> restoring greens them. `uv run pytest -q` → `37 passed` (was 34; +3).
+
+### What I checked (and what it returned)
+
+- `uv run pytest -q` → **34 passed** (was 21). Real, not a claim.
+- **Guard earns its place:** removed the `isinstance(value, bool) or
+  isinstance(value, float)` block and re-ran `tests/test_money.py` →
+  `test_float_is_refused_at_the_door` failed with `DID NOT RAISE TypeError`
+  (12 passed, 1 failed). Restored → 13 passed. The float/bool guard is load-
+  bearing.
+- `uv run python -m kanakko.money` → `money demo ok`.
+- **§9 exactness:** confirmed `parse_amount("0.1") + parse_amount("0.2") ==
+  Decimal("0.30")` and the sum-by-category path returns a `Decimal`. No `float`
+  anywhere in the module. `bool` (int subclass) is correctly excluded.
+- **Boundary:** `parse_amount("9999999999.99")` == `MAX_AMOUNT`;
+  `"10000000000"` and `"1e12"` rejected as over-`NUMERIC(12,2)`. Correct.
+- **False-tick check:** the `money.py` box is ticked and the code delivers it;
+  the *separate* "parse → store → sum-by-category" box is correctly left
+  unticked (store path not built). No false tick.
+- Adversarial inputs: `"inf"`, `"+inf"`, `"Infinity"`, `"snan"`, `"1e-5"`,
+  empty/whitespace, `"-5"`, `"abc"` all → `ValueError` (good). **But see below.**
+
+### Findings
+
+**1. (medium) `parse_amount("nan"/"NaN"/"-nan")` raises an uncaught
+`decimal.InvalidOperation`, not the documented `ValueError`.**
+`kanakko/money.py:39-43`.
+
+- Scenario: `parse_amount("nan")`. `Decimal("nan")` is a *valid* Decimal (a
+  quiet NaN), and `Decimal("nan").quantize(_PAISE, ...)` returns `NaN`
+  **without raising**, so it slips past the `except InvalidOperation → ValueError`
+  net on line 40-41. Execution reaches `if amount <= 0:` (line 43), and a
+  `<=` comparison against a NaN `Decimal` *signals* `InvalidOperation`, which
+  is uncaught and propagates out of the function.
+- Why it matters: the docstring promises "Raises `ValueError` if the value is
+  not a number," and `parse_amount` is billed as the single door every amount
+  passes through. A caller doing `try: parse_amount(x) except ValueError:` to
+  reject bad input will **not** catch this — it surfaces as an unhandled
+  `decimal.InvalidOperation` (an `ArithmeticError`, not `ValueError`), i.e. a
+  crashed handler / 500 instead of a clean "invalid amount." The garbage-
+  rejection test (`test_rejects_non_positive_and_garbage`) claims to cover
+  garbage but omits `"nan"`, so the hole is green.
+- Verified live: `parse_amount("nan")` / `"NaN"` / `"-nan"` →
+  `decimal.InvalidOperation`; `"snan"`, `"+inf"`, `"Infinity"` → `ValueError`
+  (those fail loudly in `quantize`, NaN does not).
+- Suggested fix: after quantize, reject non-finite explicitly, e.g.
+  `if not amount.is_finite(): raise ValueError(f"not a valid amount: {value!r}")`,
+  and add `"nan"`, `"NaN"` to the garbage parametrize so the guard fails for
+  the reason it exists.
+
+### Non-findings (checked, deliberately not flagged)
+
+- `format_amount` uses Western thousands grouping (`₹1,000,000.00`) while
+  `parse_amount` accepts Indian grouping on input. `docs/DECISIONS.md` gives no
+  display-grouping requirement and its only example (`₹1,234.50`) is identical
+  in both systems — cosmetic, not a finding.
+- `parse_amount(Decimal(0.1))` (a Decimal built from a float elsewhere) is
+  accepted but quantized to `0.10` — the float itself is refused at the door;
+  a Decimal input is rounded to paise as designed. No precision leak.
+
+---
+
+## 2026-08-06 — `b948736` — add `kanakko/categories.py`, the closed category set defined once
+
+**Scope:** New `kanakko/categories.py` (the §11 expense/income lists as one
+constant, plus `schema_enum()` and `keyboard(txn_type)` derived from it), new
+`tests/test_categories.py`, and one ticked box in `TASKS.md`. `git show --stat
+HEAD` confirms exactly those three files. Pure constants + two derivation
+helpers — no money, no timestamps, no SQL, no LLM prompt, no `active_transactions`
+read — so the `Decimal`/`NUMERIC`, `AT TIME ZONE 'Asia/Kolkata'`, and soft-delete
+decisions have no surface here.
+
+**Status: ✅ DONE** — the constant matches the spec verbatim, both helpers derive
+from it, and the guard fails for the reason it exists. No blocking issues.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Categories match spec | `grep -A40 '## 11' docs/DECISIONS.md` vs the module | verbatim match — `Food · Groceries · Transport · Shopping · Bills & Utilities · Health · Entertainment · Other`; income `Salary · Freelance · Refund · Other` |
+| Suite green | `uv run pytest -q` | `21 passed, 1 warning in 1.08s` (was 18) |
+| Guard fails for its reason | renamed `Groceries`→`groceries` in the source, ran `pytest tests/test_categories.py` | `3 failed` (`_match_the_spec_verbatim`, `_deduped_union`, `_keyboard_mirrors`); restored → green |
+| `schema_enum()` dedupes `Other` | `uv run python -c` calling `schema_enum()` | 11 entries, `Other` appears once — the two lists' shared `Other` collapses via `dict.fromkeys` |
+| Keyboard derivation | `keyboard('expense')`/`keyboard('income')` live | two buttons per row, `callback_data` = `cat:<name>`, labels mirror the constant in order |
+| Dependency already declared | `grep telegram pyproject.toml` | `python-telegram-bot>=21.10` already a project dep — the `telegram` import adds nothing new |
+
+Note on method: after the sed-revert of the `Groceries` typo, a same-second
+`git checkout` left a stale `__pycache__` `.pyc`, so an intermediate live probe
+printed `groceries` against a source that already read `Groceries`. Touching the
+source forced a recompile and the enum came back correct — flagging it only so the
+transcript isn't misread as a real defect. The file on disk is clean (`grep`
+confirms `Groceries`, `git status` clean).
+
+### Findings
+
+None blocking. Two non-blocking observations for whoever wires this up next:
+
+1. **`keyboard('bogus')` raises `KeyError`, not a domain error.** `categories.py:44`
+   — `CATEGORIES_BY_TYPE[txn_type]` bare-indexes. Acceptable now: `txn_type` will
+   come from the parse schema's own `type` enum (`expense`/`income`), so an invalid
+   value can't reach here from validated LLM output. Worth a guard only if a
+   future caller passes an unvalidated string; not a fix for this commit.
+
+2. **`ALL_CATEGORIES` order is expense-first.** The `enum` handed to the model is
+   `[…expenses…, Salary, Freelance, Refund]`. §2/§3 don't constrain order and the
+   model matches on value not position, so this is fine — noting only that the
+   income-only categories sit at the tail, which is what the test asserts.
+
+The ticked box in `TASKS.md` is honest: the file exists, both helpers do real
+work, and the test transcribes §11 by hand rather than importing it — so a drift
+between spec and constant goes red instead of silently agreeing with itself.
+
+---
+
+## 2026-08-06 — `55db09f` — wire the three app keys into compose, parse `.env` instead of regexing it
+
+**Scope:** Resolves the two open findings from the `a69544e` review.
+`docker-compose.yml` (+3 keys in `x-app-env`), `tests/test_compose.py` (parser
+`_env_pairs`, `COMPOSE_VARS`, reverse guard), `REVIEWS.md` (marked RESOLVED).
+`git show --stat HEAD` confirms exactly those three files. No application code, no
+migration, no ticked box moved — so money/`Decimal`, `AT TIME ZONE
+'Asia/Kolkata'`, `active_transactions`, and the no-ORM/Celery/Redis decisions have
+no surface here.
+
+**Status: ✅ DONE** — both findings genuinely closed; the guards fail for the
+reasons they exist. One non-blocking note for whoever writes the Phase 2 reader.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite green | `uv run pytest -q` | `18 passed, 1 warning in 1.07s` (was 17) |
+| Parser catches all four bypass spellings | `_env_pairs` over `export KEY=…`, indent, spaces-around-`=`, and the shadowed-empty duplicate | all four → `CAUGHT` (the shadow case yields both `('SECRET','realtoken')` and `('SECRET','')`, so the valued line still asserts) |
+| Reverse guard non-vacuous | Removed the three added lines from a copy of compose and recomputed | `unconsumed after revert: ['OPENROUTER_API_KEY','OPENROUTER_MODEL','TELEGRAM_BOT_TOKEN']` — goes red, as claimed |
+| `$$VAR` escape excluded from `COMPOSE_VARS` | `re.findall(r'(?<!\$)\$\{?(\w+)', 'test $$POSTGRES_USER end')` | `[]` — the healthcheck's escaped literal is correctly not counted as a consumer |
+| Both directions balance | `COMPOSE_VARS` vs `ENV_KEYS` | identical set of six; `web` and `cron` both inherit `*app-env`, so all three new keys reach a container |
+
+### Findings from the prior review — both closed
+
+1. **Three keys wired.** `x-app-env` now carries `TELEGRAM_BOT_TOKEN` and
+   `OPENROUTER_API_KEY` as `:?see .env.example` (a missing one stops `up`) and
+   `OPENROUTER_MODEL` as `:-` (`docker-compose.yml:18-21`). Both `web` and `cron`
+   inherit the anchor, so the operator-set keys reach a running container instead
+   of surfacing as a `KeyError` in Phase 1. The new
+   `test_env_example_lists_no_key_no_service_consumes` closes the reverse
+   direction the old suite never checked, and it is non-vacuous (verified above).
+
+2. **`.env` parsed, not regexed.** `_env_pairs()` replaces the anchored
+   `dict(re.findall(...))`; it strips lines, drops an optional `export `, splits
+   on the first `=`, and yields a **list** so a shadowed value still fails. All
+   four bypass spellings from the prior review's table are now caught (verified
+   above). This matches the CLAUDE.md rule "parse structured formats; never regex
+   them."
+
+### Non-blocking note (for the Phase 2 implementer, not this commit)
+
+- **`OPENROUTER_MODEL: "${OPENROUTER_MODEL:-}"` makes the key always present as
+  the empty string** (`docker-compose.yml:21`). Compose interpolation always sets
+  the key; `:-` only substitutes an empty default, it does not leave the variable
+  unset. So inside the container `OPENROUTER_MODEL=""`, never absent. DECISIONS §2
+  says unset ⇒ `claude-opus-5`. A reader written as
+  `os.environ.get("OPENROUTER_MODEL", "claude-opus-5")` would return `""` and the
+  default would never fire — a silent wrong model. The fix belongs in the reader
+  when it lands: `os.environ.get("OPENROUTER_MODEL") or "claude-opus-5"`. Nothing
+  reads it yet (grep found the name only in `.env.example`, `docker-compose.yml`,
+  and the tests), so this is a caveat, not a finding against `55db09f`.
+- **`COMPOSE_VARS` matches `$VAR` inside compose comments too.** A future
+  `.env.example` key mentioned only in a compose *comment* with a `$` prefix would
+  satisfy the reverse guard without any service actually consuming it. No such
+  comment exists today, so the guard is sound now; worth knowing before someone
+  adds a `# uses $FOO` comment. Low severity.
+
+---
+
 ## 2026-08-05 — `a69544e` — `.env.example` with every required key, plus two guards over it
 
 **Scope:** Phase 0 task 6. `.env.example` (new, 27 lines), `tests/test_compose.py`
@@ -19,8 +903,38 @@ returned, not what they were assumed to return.
 `git show --stat HEAD` confirms exactly those three files; `docker-compose.yml` is
 untouched.
 
-**Status: ⚠️ CHANGES REQUESTED** — one blocking finding and one that matters
-before a real secret gets pasted into this file.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+blocking finding and one that matters before a real secret gets pasted into
+this file.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`. Both findings.
+>
+> Finding 1: `x-app-env` now carries `TELEGRAM_BOT_TOKEN` and
+> `OPENROUTER_API_KEY` (`:?see .env.example`, required — a missing one stops
+> `up`) and `OPENROUTER_MODEL` (`:-`, since §2 defaults it). So `web` and `cron`
+> both get all three, and the operator-set keys reach a container instead of
+> surfacing as a `KeyError` in Phase 1. A new guard,
+> `test_env_example_lists_no_key_no_service_consumes`, checks the reverse
+> direction the old suite never did: every key in `.env.example` is interpolated
+> by some service (`COMPOSE_VARS`) or is compose-derived (`DATABASE_URL`).
+> `COMPOSE_VARS` matches `${VAR}` and bare `$VAR` but not `$$VAR` (the
+> healthcheck's escaped literal), closing the note about the bare-`$` blind spot.
+> Confirmed non-vacuous: stripping the three keys back out reddened it with
+> `OPENROUTER_API_KEY is in .env.example but no service consumes it`.
+>
+> Finding 2: the anchored `dict(re.findall(...))` is gone. `_env_pairs()` strips
+> each line, skips blanks/comments, drops an optional `export `, splits on the
+> first `=`, strips both sides, and yields a **list** of pairs (`ENV_PAIRS`) so a
+> value shadowed by a later empty duplicate is still asserted on.
+> `test_env_example_holds_no_values` iterates `ENV_PAIRS`; the vacuity assertion
+> now guards `ENV_PAIRS`. All four bypass spellings from the review's table —
+> `export KEY=…`, a leading indent, spaces around `=`, and the shadowed
+> duplicate — go red (`1 failed` each), verified by mutating the real file and
+> restoring it. `git status --porcelain` clean after.
+>
+> No box moved — Phase 0's `.env.example` task was already ticked; only the
+> compose contract and the guards were incomplete. `uv run pytest -q` →
+> `18 passed, 1 warning` (was 17; +1 for the reverse guard).
 
 The file itself is good and the commit message is honest about the three
 mutations it claims: I re-ran all three against the real file and got the same

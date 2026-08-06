@@ -12,6 +12,58 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `c217c8d` — configure logging at startup so `kanakko` `log.info` emits (Phase 3, task 84)
+
+**Status: ✅ DONE** — no blocking issues. Adds `kanakko.configure_logging()`
+(stderr handler on the `kanakko` package logger at INFO, idempotent), calls it
+once at `app.py` import, and logs one INFO line per handled webhook update. The
+guard fails for the reason it exists.
+
+**Scope reviewed.** `git show HEAD` only — `kanakko/__init__.py`
+(`configure_logging`), `kanakko/app.py` (call + `log.info`), `tests/test_logging.py`
+(new), `TASKS.md` (box ticked). No production behaviour outside logging changed;
+nothing touches money, timezones, `active_transactions`, categories, or secrets,
+and no new dependency (`logging` is stdlib).
+
+**What I ran.**
+
+- `uv run pytest -q` → **102 passed**, 1 warning. Matches the commit claim (was 101).
+- **Verified the guard reddens** — temporarily replaced the `configure_logging`
+  body with `return` (a no-op) and ran `uv run pytest tests/test_logging.py -q`
+  → **1 failed**: `AssertionError: assert 'after config' in ''` at
+  `test_logging.py:24`. Restored the fix; working tree confirmed clean
+  (`git status --short` empty). So the test is not asserting a spelling — with
+  the fix gone, the INFO record genuinely never reaches a handler and the check
+  goes red. This is the exact failure the task exists to prevent.
+- Confirmed the config premise: `getLogger("kanakko")` gets `setLevel(INFO)` +
+  a `StreamHandler`; `app.py`'s `log = getLogger("kanakko.app")` is a child, so
+  it inherits both level and handler. `grep -rn "logging" kanakko/` shows this
+  is the only logging config — no competing `basicConfig` to fight with.
+
+**Correctness notes (non-blocking).**
+
+- `configure_logging` is genuinely idempotent: `if logger.handlers: return`
+  guards the handler add, so repeat calls from the web app and the future cron
+  jobs won't stack duplicate handlers. `setLevel(INFO)` runs before the guard
+  but is itself idempotent.
+- `app.py:297` `log.info(... type(action).__name__)` is only reached when
+  `action is not None` (early returns at 270/272/276) and fires after the
+  handler block, so it does *not* log on a deduped redelivery (early return at
+  285). That is the right call — it logs genuinely-handled updates, and the line
+  exercises the config on the happy path rather than asserting it. It logs only
+  `update_id` and the action class name, no message content — no PII leak.
+- The `kanakko` logger keeps `propagate=True`, so records also reach root. Under
+  the uvicorn setup the docstring describes (root has no app handler), this is
+  harmless — the last-resort handler only fires for WARNING+, so a propagated
+  INFO with no root handler emits nothing extra. No double-logging in production.
+  Left as a note only.
+
+**Findings.** None blocking. The task box is ticked for real work, not a stub:
+the function does what it claims, the app exercises it, and the test fails
+without it.
+
+---
+
 ## 2026-08-06 — `13d1d00` — scan string literals via `ast` so the read-path guard catches triple-quoted SQL and `JOIN` (§6, task 80)
 
 **Status: ✅ DONE** — no blocking issues. This is a test-only change

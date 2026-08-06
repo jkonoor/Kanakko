@@ -12,6 +12,57 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `1271d4a` — cover parse → store → sum-by-category with `Decimal`
+
+**Scope:** Test-only commit. Adds `test_parse_store_sum_by_category_stays_exact`
+to `tests/test_migrate.py`, ticks the matching box in `TASKS.md` (line 36,
+"Add a check covering parse → store → sum-by-category using `Decimal`"). Judged
+against `docs/DECISIONS.md` §6 (reads through `active_transactions`) and §9
+(money is `Decimal`/`NUMERIC(12,2)`), and the CLAUDE.md money/soft-delete rules.
+`git show --stat HEAD` confirms exactly `TASKS.md` (+1/-1) and
+`tests/test_migrate.py` (+53). No production code touched.
+
+**Status: ✅ DONE** — the test is real, non-vacuous, and its guards fail for the
+reasons they exist. No findings.
+
+### What I checked (and what it returned)
+
+- **Whole suite green.** `uv run pytest -q` → `38 passed, 1 warning`. The lone
+  warning is a pre-existing Starlette/httpx deprecation, unrelated to this diff.
+- **The new test actually runs, not skipped.**
+  `uv run pytest tests/test_migrate.py::test_parse_store_sum_by_category_stays_exact -v`
+  → `PASSED` (a real Postgres cluster booted; the `conn` fixture's skip did not
+  fire on this machine).
+- **The drift claim is true, so the equality is non-vacuous.**
+  `0.10+0.20+0.30` → `0.6000000000000001`, `10.10+20.20+0.05` →
+  `30.349999999999998`; both `!= Decimal("0.60")` / `Decimal("30.35")`. A `float`
+  column or a Python-side float sum would therefore redden the `==` assertion,
+  and separately `isinstance(0.6, Decimal)` is `False`, so the type assertion
+  catches a float SUM return even if the value happened to land exact.
+- **The soft-delete guard genuinely guards (mutation check).** I temporarily
+  changed the `SELECT … FROM active_transactions` to `FROM transactions` and
+  re-ran the one test → `1 failed`: the soft-deleted ₹999.99 Food row leaks in
+  and Food becomes `1000.59 != 0.60`. Restored the file; `git status` clean.
+  This confirms the §6 read-through-the-view rule is exercised, not just recited.
+- **Sources of truth respected.** Categories come from
+  `EXPENSE_CATEGORIES` in `kanakko/categories.py` (indices 0/1 = Food/Groceries),
+  not string literals; amounts enter through `parse_amount`; the sum runs in
+  Postgres over `NUMERIC(12,2)`.
+
+### Notes (non-blocking, not findings)
+
+- The test binds Food/Groceries to `EXPENSE_CATEGORIES[0]`/`[1]` by position. If
+  someone reorders the tuple in `categories.py` the test still passes (it reads
+  whatever names sit at 0/1), so it won't spuriously break — acceptable, and the
+  category-ordering contract isn't this test's job.
+- Coverage of the money path is now: single-row round-trip
+  (`test_schema_stores_money_exactly`) + multi-row SUM/GROUP BY with soft-delete
+  exclusion (this commit). Month/day bucketing `AT TIME ZONE 'Asia/Kolkata'` is
+  still unwritten — but its task is unchecked, so that's not-yet-done, not a
+  finding here.
+
+---
+
 ## 2026-08-06 — `44b3096` — reject non-finite Decimals in `parse_amount`
 
 **Scope:** Fix for finding 1 of the `9d7046b` review — `Decimal("nan")` slipped

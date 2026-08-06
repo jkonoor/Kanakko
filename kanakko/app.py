@@ -4,9 +4,10 @@ import hmac
 import logging
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
@@ -20,8 +21,10 @@ from kanakko.db import (
     connect,
     get_or_create_user,
     month_summary,
+    recent_transactions,
     save_pending,
     set_pending_category,
+    soft_delete_transaction,
     totals,
     undo_last,
 )
@@ -106,10 +109,52 @@ def mini_app_data(request: Request) -> str:
         # month_summary is a generic date-range summary; its top categories are
         # the month's, so the week's are discarded — the week section is figures only.
         w_income, w_expenses, _ = month_summary(conn, user_id, w_first, w_next)
+        recent = recent_transactions(conn, user_id)
     return dashboard_html(
         income, expenses, w_income, w_expenses,
-        first.strftime("%B %Y"), m_income, m_expenses, top,
+        first.strftime("%B %Y"), m_income, m_expenses, top, recent,
     )
+
+
+@app.post("/app/delete")
+async def mini_app_delete(request: Request) -> Response:
+    """Soft-delete one of the authenticated user's transactions (§13, task 100).
+
+    The dashboard's per-row delete button POSTs `{"id": <txn_id>}` here with the
+    same `Authorization: tma <initData>` header the read route uses. Unlike
+    `/app/data` this route *mutates state*, so it passes
+    `max_age=timedelta(hours=24)`: a captured `initData` must not stay a working
+    delete button forever (§13, and the official SDK's 24h default). The row is
+    scoped to the user resolved from the *signed* `user` object, so one user
+    cannot delete another's transaction by guessing an id.
+
+    A missing/forged/stale payload is 401; a body without a usable integer `id`
+    is 400; a delete that matched no live row of this user's is 404 (already gone
+    or never theirs). Success is 204 — the client re-fetches `/app/data`.
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(
+            header[len(TMA_PREFIX):], max_age=timedelta(hours=24)
+        )
+        telegram_user_id = user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+    try:
+        body = await request.json()
+        txn_id = int(body["id"])
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+
+    with connect() as conn:
+        user_id = get_or_create_user(conn, telegram_user_id)
+        deleted = soft_delete_transaction(conn, user_id, txn_id)
+    if deleted is None:
+        raise HTTPException(status_code=404)
+    return Response(status_code=204)
 
 
 @dataclass(frozen=True)

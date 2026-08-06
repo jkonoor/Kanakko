@@ -25,6 +25,7 @@ from kanakko.webapp import (
     current_month_ist,
     current_week_ist,
     dashboard_html,
+    recent_list,
     user_id_from_init_data,
     validate_init_data,
 )
@@ -164,7 +165,7 @@ def test_dashboard_html_shows_rupee_amounts_and_exact_balance():
         Decimal("20000.00"), Decimal("500.50"),
         Decimal("0.70"), Decimal("0.50"),
         "August 2026",
-        Decimal("0.30"), Decimal("0.10"), [],
+        Decimal("0.30"), Decimal("0.10"), [], [],
     )
     assert "₹20,000.00" in html  # all-time income
     assert "₹500.50" in html  # all-time expenses
@@ -180,7 +181,7 @@ def test_dashboard_html_week_and_month_balances_are_distinct():
         Decimal("100"), Decimal("40"),
         Decimal("30"), Decimal("10"),  # week: balance 20
         "August 2026",
-        Decimal("80"), Decimal("25"), [],  # month: balance 55
+        Decimal("80"), Decimal("25"), [], [],  # month: balance 55
     )
     assert "This week" in html
     assert "₹20.00" in html  # week balance: 30 - 10
@@ -213,7 +214,7 @@ def test_dashboard_html_renders_the_category_breakdown():
         Decimal("500"), Decimal("200"),
         "August 2026",
         Decimal("1000"), Decimal("400"),
-        [("Food", Decimal("400.00"))],
+        [("Food", Decimal("400.00"))], [],
     )
     assert "Spending by category" in html
     assert "width:100.0%" in html  # the sole category is all the spending
@@ -329,3 +330,126 @@ def test_shell_serves_the_bootstrap_without_a_secret():
     assert resp.status_code == 200
     assert "telegram-web-app.js" in resp.text
     assert TOKEN not in resp.text
+
+
+# --- Recent-transactions list + per-row soft delete (§13, task 100) ---
+
+
+def test_recent_list_escapes_the_note():
+    """A note is user-typed (§11), so it is HTML-escaped before rendering (§13).
+
+    The note is the first user-controlled string the dashboard renders. Without
+    `html.escape`, a logged `<script>alert(1)</script>` would be stored XSS in the
+    Mini App. Assert the *escaped bytes* are present and the raw `<script>` tag is
+    not — not merely that the page "looks fine".
+    """
+    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6))]
+    out = recent_list(rows)
+    assert "<script>alert(1)</script>" not in out  # not rendered live
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out  # rendered inert
+
+
+def test_recent_list_renders_row_with_delete_button_and_amount():
+    """Each row shows its amount (through `format_amount`, §9) and a delete button
+    carrying the `txn_id` the `POST /app/delete` route needs."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6))]
+    out = recent_list(rows)
+    assert "₹50.00" in out
+    assert 'data-id="7"' in out
+    assert "Food" in out
+
+
+def test_recent_list_null_category_is_uncategorised():
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6))]
+    out = recent_list(rows)
+    assert "Uncategorised" in out
+
+
+def test_recent_list_empty_renders_nothing():
+    assert recent_list([]) == ""
+
+
+def _fresh_init_data(user_id: int = 42) -> str:
+    """A valid `initData` whose `auth_date` is now — passes the delete route's
+    24h freshness window. Signed for `user_id`."""
+    now_ts = str(int(datetime.now(timezone.utc).timestamp()))
+    return _sign({"auth_date": now_ts, "user": f'{{"id":{user_id}}}'})
+
+
+def test_delete_route_soft_deletes_the_users_row(conn, monkeypatch):
+    """`POST /app/delete` soft-deletes the named row and it drops out of the
+    dashboard's recent list and totals (§6, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (uid, Decimal("300.00"), "expense", "Transport", "", date(2026, 8, 6)),
+        )
+        (txn_id,) = cur.fetchone()
+
+    resp = client.post(
+        "/app/delete",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 0  # gone from the view
+    conn.rollback()
+
+
+def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
+    """A row belonging to a different user is a 404, never deleted — the delete is
+    scoped to the signed user id (§1, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (txn_id,) = cur.fetchone()
+
+    resp = client.post(
+        "/app/delete",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=42)},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 404
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 1  # still live — the other user's row untouched
+    conn.rollback()
+
+
+def test_delete_route_rejects_a_stale_init_data(conn, monkeypatch):
+    """A genuine-but-old `initData` is a 401 on the mutation route — proof the
+    route passes `max_age` (§13, task 100). `FIELDS` carries a 2023 `auth_date`,
+    far outside the 24h window, yet its HMAC is valid. Without the freshness
+    guard a captured payload would be a delete button that works forever."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    resp = client.post(
+        "/app/delete",
+        headers={"Authorization": "tma " + _sign(FIELDS)},  # auth_date = 2023
+        json={"id": 1},
+    )
+    conn.rollback()
+    assert resp.status_code == 401

@@ -97,7 +97,7 @@ the plan's order and it matters.
 - [x] Add the dashboard route rendering totals, balance, and current-month figures
 - [x] Add the category breakdown as a sorted list with CSS percentage bars — no charting library
 - [x] Add the weekly and monthly summary sections
-- [ ] Add the recent-transactions list with per-row soft delete — **two constraints
+- [x] Add the recent-transactions list with per-row soft delete — **two constraints
       that arrive with this task, both noted attended on `62f5708`:**
       **(a) escape the `note`.** This is the first task to render a user-typed
       string into server-rendered markup. `webapp.py` currently says "no

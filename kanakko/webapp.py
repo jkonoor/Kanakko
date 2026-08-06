@@ -176,6 +176,38 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
     )
 
 
+def recent_list(rows: list[tuple]) -> str:
+    """The recent-transactions list with a per-row delete button (§13, task 100).
+
+    Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on)`
+    from `db.recent_transactions`. `note` is the first *user-typed* string the
+    dashboard renders — §11 keeps the note's original wording, so it is arbitrary
+    text that arrived through the bot — and it is HTML-escaped: an unescaped
+    `<img src=x onerror=...>` in a logged expense would be stored XSS. Category
+    is escaped too (a null category shows as "Uncategorised"). Amounts go through
+    `format_amount` (§9), prefixed −/+ by direction. The delete button carries the
+    `txn_id` for `POST /app/delete`. An empty ledger renders nothing.
+    """
+    if not rows:
+        return ""
+    items = []
+    for txn_id, amount, type_, category, note, occurred_on in rows:
+        label = html.escape(category or "Uncategorised")
+        sign = "−" if type_ == "expense" else "+"
+        note_html = (
+            f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
+        )
+        items.append(
+            '<div class="txn">'
+            f'<div class="txn-main"><span>{occurred_on:%d %b} · {label}</span>'
+            f'<span>{sign}{format_amount(amount)}</span></div>'
+            + note_html
+            + f'<button class="del" data-id="{txn_id}">✕</button>'
+            "</div>"
+        )
+    return '<section class="recent"><h2>Recent</h2>' + "".join(items) + "</section>"
+
+
 def dashboard_html(
     income: Decimal,
     expenses: Decimal,
@@ -185,17 +217,19 @@ def dashboard_html(
     month_income: Decimal,
     month_expenses: Decimal,
     top: list[tuple[str, Decimal]],
+    recent: list[tuple],
 ) -> str:
-    """The dashboard fragment: all-time totals + balance, this week, this month, bars (§13).
+    """The dashboard fragment: totals + balance, this week/month, bars, recent list (§13).
 
     Balance is `income - expenses` — exact `Decimal` subtraction, can be negative.
     Server-rendered so every section (week/month figures, category bars, recent
     list) stays Python + CSS with no charting library (§13). The week and month
     summaries carry each period's income, expenses, and balance; `top` is the
     month's expense categories biggest-first, rendered as
-    percentage-of-month-expenses bars. Only formatted amounts, a strftime month
-    label, and escaped category names are interpolated, so no user-controlled
-    string reaches the markup unescaped.
+    percentage-of-month-expenses bars; `recent` is the recent-transactions list
+    with per-row delete. Formatted amounts, a strftime month label, and escaped
+    category names / notes are interpolated — the note is the only user-typed
+    string and `recent_list` escapes it, so nothing reaches the markup unescaped.
     """
     return (
         "<h1>Kanakko</h1>"
@@ -215,6 +249,7 @@ def dashboard_html(
         + _stat("Expenses", month_expenses)
         + "</section>"
         + category_bars(top, month_expenses)
+        + recent_list(recent)
     )
 
 
@@ -235,6 +270,10 @@ body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
 .cat { margin: 8px 0; }
 .bar { background: rgba(128,128,128,.2); border-radius: 4px; height: 8px; overflow: hidden; }
 .fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; }
+.txn { display: flex; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.txn-main { display: flex; justify-content: space-between; flex: 1; min-width: 0; }
+.txn-note { flex-basis: 100%; opacity: .7; font-size: .9em; }
+.del { margin-left: 8px; border: none; background: none; cursor: pointer; color: inherit; }
 </style>
 </head>
 <body>
@@ -242,10 +281,23 @@ body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready();
-fetch('/app/data', {headers: {Authorization: 'tma ' + tg.initData}})
-  .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
-  .then(html => { document.getElementById('app').innerHTML = html; })
-  .catch(() => { document.getElementById('app').textContent = 'Could not load dashboard.'; });
+const app = document.getElementById('app');
+function load() {
+  fetch('/app/data', {headers: {Authorization: 'tma ' + tg.initData}})
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then(html => { app.innerHTML = html; })
+    .catch(() => { app.textContent = 'Could not load dashboard.'; });
+}
+app.addEventListener('click', e => {
+  const btn = e.target.closest('.del');
+  if (!btn) return;
+  fetch('/app/delete', {
+    method: 'POST',
+    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+    body: JSON.stringify({id: Number(btn.dataset.id)}),
+  }).then(r => { if (r.ok) load(); });
+});
+load();
 </script>
 </body>
 </html>

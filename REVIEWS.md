@@ -12,6 +12,44 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `7852921` — category nullable, amount non-nullable in parse schema (§3, task 40)
+
+**Scope:** `parse_schema()` makes `category` nullable (`type: ["string","null"]`,
+`enum: [*schema_enum(), None]`); `Transaction.category` becomes `str | None` and
+`_category_is_known` passes `None` through while still rejecting any non-null
+value outside the closed set. New test `test_null_category_validates_without_retry`.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **Spec fit (§3).** `docs/DECISIONS.md` §3 lines 56–70: uncertainty is a
+  nullable field, `category: null` → show buttons, `amount` **not** nullable, no
+  confidence score, and the nullability is enforced by the schema rather than
+  validation code. The diff matches all of it: null is added in `parse_schema()`
+  (not in `categories.py`), `amount` type stays `"string"` and required, and no
+  confidence field appears anywhere. `schema_enum()` still returns only real
+  categories (`kanakko/categories.py:35`), so null is not smuggled in as a
+  category (§11 preserved).
+- **Validator behaviour.** `parse.py:142-147` — `None` short-circuits before the
+  membership test, so a null category validates; any non-null string outside
+  `ALL_CATEGORIES` still raises. `amount` remains routed through
+  `parse_amount` (§9), untouched.
+- **`uv run pytest -q` → 51 passed** (matches the commit message).
+- **Revert-verified the new test guards the behaviour, not the spelling.** I
+  temporarily restored the old `if value not in ALL_CATEGORIES:` and re-ran
+  `tests/test_parse.py`: `test_null_category_validates_without_retry` went red
+  with `IndexError: tuple index out of range` (rejected null → unwanted retry →
+  the single-response `_feed` runs dry), exactly as the commit claims. Restored;
+  `git diff` clean. So the test fails for the reason it exists.
+- `TASKS.md` box for task 40 is now ticked and the work behind it is real, not a
+  stub.
+
+No `float` on the money path, no read-through-view concern (parse only), no
+timezone bucketing, no secret, no new dependency. Nothing to change.
+
+---
+
 ## 2026-08-06 — `cbc3a9d` — validate parse result with Pydantic + one retry (§2, task 39)
 
 **Scope:** Adds a `Transaction` Pydantic model and `parse_message()` to

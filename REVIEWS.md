@@ -12,6 +12,89 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `131dbe5` — guard that every production read goes through `active_transactions` (§6, task 80)
+
+**Status: ⚠️ CHANGES REQUESTED** — the invariant genuinely holds today and the
+guard reddens when the *current* read is repointed, but the guard silently
+misses the two most likely ways the bypass gets reintroduced. This is the
+"guard that reports safety it doesn't provide" failure mode CLAUDE.md flags as
+the #1 recurring defect here: the box is now ticked and the next iteration will
+trust it, while a bypass written in an ordinary style walks straight past it.
+
+**Scope:** New `tests/test_read_paths.py` — a source-scan guard that strips
+docstrings/`#` comments from `kanakko/*.py` and fails on any
+`\bfrom\s+transactions\b`. `TASKS.md` tick.
+
+**What I actually checked (commands + results):**
+
+- `git show HEAD` / `--stat` — read the full diff; 2 files, +48/−1.
+- `uv run pytest -q` → **`101 passed, 1 warning in 2.69s`** (was 100).
+- **Confirmed the invariant holds.** Grepped every `FROM`/`INSERT`/`UPDATE` in
+  `kanakko/*.py`: the only ledger *read* is `undo_last`'s subquery,
+  `SELECT txn_id FROM active_transactions` (`db.py:163`); the writes target the
+  base table (`INSERT INTO transactions` `db.py:103`, `UPDATE transactions SET
+  deleted_at` `db.py:161`), which a view can't own. Correct.
+- **Verified the redden-on-repoint claim.** Edited `db.py:163` to `SELECT
+  txn_id FROM transactions` and ran `uv run pytest tests/test_read_paths.py -q`
+  → **`1 failed`** (`AssertionError` at `test_read_paths.py:44`). Restored the
+  file. So the guard does fire on the read that exists today. (The commit
+  message cites `db.py:107` for this; the actual read is `db.py:163` — `:107` is
+  the INSERT's `fetchone`. Cosmetic, not a finding.)
+- **Tried to defeat the guard** with the test's own `sql_only`/scan logic — see
+  findings below.
+
+**Findings (ranked):**
+
+### 1 — ⚠️ Triple-quoted SQL bypasses the guard silently (`tests/test_read_paths.py:38-40`)
+
+`sql_only` strips **every** triple-quoted string
+(`re.sub(r'""".*?"""', "", ...)`), on the assumption that only prose lives in
+`"""..."""`. But a multi-line SQL query written as a triple-quoted string — the
+most idiomatic way to write multi-line SQL in Python — is stripped along with
+the prose, so its `FROM transactions` never reaches the scan.
+
+Failure scenario (verified with the guard's own logic):
+
+```python
+cur.execute("""
+    SELECT sum(amount) FROM transactions WHERE user_id = %s
+""", (user_id,))
+```
+
+→ `sql_only` deletes the whole string; `scan` returns `[]`; the guard stays
+**green** on a read that resurrects soft-deleted rows inside a sum. The
+concatenated-`"..."` style `db.py` uses today is caught (I confirmed), which is
+exactly why the guard passes now — but the invariant it protects breaks the
+moment a future dashboard/report query (task 81+, the reads this guard exists
+for) is written as triple-quoted SQL. The guard's whole reason to exist is to
+catch that reintroduction, and it doesn't.
+
+Suggested fix: don't strip triple-quoted strings wholesale. Walk the module
+with `ast` and scan the values of every string literal *except* the docstring
+positions (`ast.get_docstring`), or at minimum stop stripping `"""..."""` and
+only strip `#` comments plus the leading module/function docstrings. Then
+re-verify by pasting the triple-quoted query above into a module and watching it
+redden.
+
+### 2 — ⚠️ `JOIN transactions` is not caught (`tests/test_read_paths.py:41`)
+
+The scan matches only `\bfrom\s+transactions\b`. Reading the base table through
+a join — `FROM active_transactions a JOIN transactions t ON a.txn_id = t.txn_id`
+— reads soft-deleted rows just as `FROM transactions` does (the join row set
+includes deleted `t` rows), but there is no `FROM transactions` token, so the
+guard stays green. Verified: `scan` returns `[]` for that string.
+
+Suggested fix: match `\b(from|join)\s+transactions\b` (case-insensitive), and
+re-verify by adding such a join and watching it redden.
+
+Both findings are guard-coverage gaps, not defects in production code — the
+current ledger read is correct. But a guard that passes on the idiomatic
+reintroduction of the very bypass it names is, per CLAUDE.md, "worse than no
+guard, because it stops anyone looking." Task 80 should stay open until the
+guard reddens on at least the triple-quoted case.
+
+---
+
 ## 2026-08-06 — `f7fa03d` — dedup Telegram updates by `update_id` so a redelivered `/undo` can't delete a second row (§14, review b9acac9)
 
 **Status: ✅ DONE** — no blocking issues. The fix resolves the sole open finding

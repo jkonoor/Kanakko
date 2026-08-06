@@ -12,6 +12,69 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `4c4c71b` — cron sidecar crontab with all three reminder jobs (Phase 3, task 90)
+
+**Status: ✅ DONE** — no blocking issues.
+
+The commit adds `cron/kanakko.crontab` (installed to `/etc/cron.d/kanakko`) and
+`cron/entrypoint.sh`, switches the compose `cron` command to run the entrypoint,
+COPYs `cron/` in the Dockerfile and installs the crontab 0644, updates
+`DEPLOYMENT.md`, and ticks task 90. The central risk it addresses is real: cron
+runs jobs with a stripped environment, so a bare `cron -f` would ship jobs that
+crash on `connect()` at 12:00/21:00 IST — visible only in the sidecar log.
+
+### What I checked (and what it returned)
+
+- **Full suite**: `uv run pytest -q` → **124 passed** (matches the claim; was
+  118). `tests/test_crontab.py` alone → **6 passed**.
+- **Schedules vs §12** (`cron/kanakko.crontab:18-20`): `0 12 * * *` → noon,
+  `0 21 * * *` → evening, `0 9 1 * *` → monthly. Matches the §12 table
+  (12:00 daily / 21:00 daily / 09:00 on the 1st) exactly.
+- **/etc/cron.d format**: each job line carries the `root` user field between
+  schedule and command (7 whitespace fields), so cron won't reject the file as
+  a 5-field `crontab -e` line. File is named `kanakko` (no dot) — cron.d ignores
+  dotted filenames, and this one is fine.
+- **Trailing newline** present after the last job line (`Read` shows line 21
+  empty), so Vixie cron won't drop the monthly entry.
+- **Env round-trip**: the committed effect test `test_entrypoint_round_trips_a_hostile_value`
+  runs the real `entrypoint.sh` and confirms a value with `'`, space, `$` and
+  `;` survives dump-and-source — the escaping (`sed "s/'/'\\\\''/g"` → the
+  standard `'\''` close/escape/reopen) is genuinely exercised, not asserted by
+  spelling. I could not additionally run the entrypoint by hand (sandbox blocked
+  it), but the committed test covers a strictly harder value than a real
+  `postgres://…` / `123456:AA…` secret.
+- **Secrets present to dump**: the `cron` service merges `<<: *app-env`
+  (`docker-compose.yml:68`), so `DATABASE_URL`/`TELEGRAM_BOT_TOKEN` are in the
+  container env for `printenv` to capture. No secret literal in the crontab,
+  entrypoint, compose, or Dockerfile — all sourced from the environment.
+- **TZ / §10**: `TZ=Asia/Kolkata` is set on the `cron` service and inherited by
+  `exec cron -f`, with `tzdata` installed in the image (Dockerfile), so the
+  wall-clock times are read as IST rather than firing 5.5h early. The entrypoint
+  dumps `TZ` into `cron.env` too, so the Python jobs also see it (and boundaries
+  are computed `AT TIME ZONE 'Asia/Kolkata'` in SQL regardless).
+- **PID-1 logging**: entrypoint `exec`s cron so PID 1 *is* cron; jobs redirect
+  to `/proc/1/fd/1`, reaching the container log, and the redirect also means cron
+  captures no output → no mail spool.
+- **Guards that guard**: the schedule map fails on a fat-fingered time (commit
+  claims a 20:00 evening reddens it — consistent with `EXPECTED`), the round-trip
+  reddens if the sed escaper is dropped, and `test_compose_cron_runs_the_entrypoint`
+  reddens on a revert to `cron -f`. These fail for the reasons they exist.
+- **Task hygiene**: task 90 ticked for delivered work; the following task ("check
+  a 23:50 IST last-day transaction lands in that month's report") correctly
+  remains unchecked — out of scope for this commit.
+
+### Findings
+
+None blocking. Minor notes, not requiring change:
+
+- `entrypoint.sh` dumps the env with `printenv | while IFS='=' read`, which would
+  mangle an env value containing a newline. None of Kanakko's secrets
+  (`DATABASE_URL`, `TELEGRAM_BOT_TOKEN`) contain newlines, so this is not a
+  real exposure — noted only so a future multi-line secret isn't a silent
+  surprise.
+
+---
+
 ## 2026-08-06 — `372181b` — write `reminder_log` from every job, noon suppression reads it (Phase 3, task 89)
 
 **Status: ✅ DONE** — no blocking issues. Every job now records what it sent in

@@ -12,6 +12,68 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `c6024de` — add `app.handle_text` + `db.get_or_create_user` (§1, §2, §4, task 58 split)
+
+**Scope:** Split the text-message half of the core loop out of Handle Confirm.
+`app.handle_text(conn, msg)` resolves the user, parses the text, sends the
+confirm card, and writes the pending row keyed by the *sent card's* message id.
+New `db.get_or_create_user` maps a Telegram id to the internal `users.user_id`
+(idempotent upsert). Standalone — not yet wired into `/webhook`.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run, not assumed)
+
+- `uv run pytest -q` → **76 passed** (was 74), matching the commit message.
+- **Guard 1 bites.** Edited `app.py` to key `save_pending` on `msg.message_id`
+  instead of `card_message_id`, then ran
+  `test_handle_text_keys_the_pending_row_on_the_sent_card` → **1 failed**
+  (`assert card_message_id == 909`). Reverted; passes again. The test drives the
+  real `get_or_create_user`, `confirm_card`, and `save_pending` against a real
+  Postgres cluster (only `parse_message`/`send_message` stubbed), so it exercises
+  the actual persistence path, not a mock of itself.
+- **Guard 2 bites.** Dropped `ON CONFLICT (telegram_user_id) DO NOTHING` from the
+  CTE, then ran `test_get_or_create_user_is_idempotent` → **1 failed**
+  (`psycopg.errors.UniqueViolation` on the second call). Reverted; passes again.
+- Traced the money path: `handle_text` → `save_pending` stores
+  `txn.model_dump(mode="json")`, and the test asserts `parsed["amount"] ==
+  "500.00"` (a string, §9). No `float` touches the amount. ✅
+- Confirmed the CTE returns the right id on both paths: on a fresh insert `ins`
+  yields the new row and the sibling `SELECT` sees nothing (statement snapshot),
+  so `UNION ALL … LIMIT 1` returns the inserted id; on conflict `ins` is empty
+  and the `SELECT` returns the existing row. The idempotency test confirms one
+  row, same id, distinct ids for distinct users.
+- **"Failed send leaves no pending row" holds structurally.** `tg.send_message`
+  → `_call` calls `response.raise_for_status()`, so an HTTP error raises before
+  `save_pending` is reached; an API-level `ok:false` (HTTP 200) instead raises
+  `KeyError` on `sent["result"]` — either way no pending row is written, the safe
+  direction the docstring claims.
+- `git status` clean after the two revert experiments (both files restored to
+  HEAD).
+
+### Non-blocking observations (do not fix now)
+
+1. **`kanakko/db.py:40` — `ON CONFLICT DO NOTHING` upsert has the classic
+   concurrent-first-insert race.** If two transactions insert the *same* new
+   `telegram_user_id` concurrently, the loser's `DO NOTHING` returns 0 rows while
+   its sibling `SELECT` (statement-start snapshot) can't yet see the winner's
+   uncommitted row → `fetchone()` returns `None` → `(user_id,) = None` raises
+   `TypeError`. Only reachable on two truly-parallel *first* messages from one
+   brand-new user; the send is sync and single-user today (§14 deferred), so this
+   is informational, not a scale finding to action now. If it ever wires up under
+   concurrency, the standard fix is a retry loop or a follow-up `SELECT` after a
+   commit boundary.
+2. No test for the "failed send → no pending row" direction. The behaviour is
+   structurally guaranteed by call ordering (send raises before `save_pending`),
+   so a test is optional; noting it only so the claim isn't mistaken for tested.
+
+### TASKS.md
+
+The tick is honest: task 58 was genuinely split, its scope narrowed to the
+wiring, and the box marks only the standalone handler that now exists and is
+tested. The follow-on Handle Confirm task correctly retains the `/webhook`
+routing, Confirm handler, and connection open/commit.
+
 ## 2026-08-06 — `5a19d43` — add `kanakko/tg.py` — Telegram send client (§4, §14, task 51)
 
 **Scope:** New thin Telegram Bot API send client (`answer_callback_query`,

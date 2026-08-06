@@ -12,6 +12,60 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `13d1d00` — scan string literals via `ast` so the read-path guard catches triple-quoted SQL and `JOIN` (§6, task 80)
+
+**Status: ✅ DONE** — no blocking issues. This is a test-only change
+(`tests/test_read_paths.py` + the resolution note in `REVIEWS.md`) that closes
+the two coverage gaps the `131dbe5` review flagged. The guard now fails for the
+reason it exists.
+
+**Scope reviewed.** `git show HEAD` — the diff replaces the regex-strip
+`sql_only` helper with an `ast`-based `sql_literals` generator and widens the
+match from `\bfrom\s+transactions\b` to `\b(from|join)\s+transactions\b`. No
+production code changed.
+
+**What I ran.**
+
+- `uv run pytest -q` → **101 passed**, 1 warning. Matches the commit claim.
+- Probed the new guard directly (`sql_literals` + `BYPASS` imported from the
+  test module):
+  - Triple-quoted `SELECT ... FROM transactions` → **hit** (line 4). The old
+    `re.sub(r'""".*?"""', ...)` deleted this wholesale.
+  - `SELECT * FROM active_transactions a JOIN transactions t ...` → **hit**.
+  - f-string `f"... FROM transactions WHERE id = {x}"` → **hit** — the literal
+    portion of a `JoinedStr` is still a `Constant` node, so f-string SQL is
+    covered too.
+  - Adjacent-literal concatenation split at the boundary (`"SELECT * FROM "`
+    `"transactions ..."`) → **hit** (Python folds adjacent literals into one
+    `Constant`).
+  - `SELECT * FROM active_transactions WHERE ...` → **no hit** (no false
+    positive on the view; `\btransactions\b` doesn't match `active_transactions`
+    / `pending_transactions`).
+  - `INSERT INTO transactions ...` and `UPDATE transactions SET deleted_at ...`
+    → **no hit** — writes to the base table are correctly ignored.
+- Reverted to the old logic in isolation and confirmed it **missed** both the
+  triple-quoted read and the `JOIN` read (`False`, `False`). So the two gaps
+  were real and the guard now genuinely reddens for them — not a surface-form
+  assertion.
+- Confirmed the live production surface is clean: `kanakko/db.py` reads go
+  through `active_transactions` (line 163) and the `pending_transactions` queue;
+  the only base-`transactions` references are the `INSERT` (line 103) and the
+  `UPDATE ... SET deleted_at` soft-delete write (line 161), both correct. Task
+  80 in `TASKS.md` is legitimately ticked.
+
+**Non-blocking observations (no action required).**
+
+- `+`-operator concatenation across the table-name boundary
+  (`"SELECT * FROM " + "transactions"`) is not caught, because neither
+  `Constant` contains the contiguous substring. This is a genuinely contrived
+  way to write SQL (nobody splits a table name across a `+`), so it is not a
+  realistic bypass — noting it only for completeness.
+- A bare SQL string as the *first* statement of a function would be treated as
+  a docstring and skipped, but such a string is never executed as a query, so
+  it is not a real read path.
+
+---
+
 ## 2026-08-06 — `131dbe5` — guard that every production read goes through `active_transactions` (§6, task 80)
 
 **Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — both

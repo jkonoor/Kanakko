@@ -12,6 +12,77 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `1426440` — handle Cancel: discard the pending row, acknowledge (§5, task 65)
+
+**Scope:** Wire the CANCEL button tap into `/webhook`. New `db.cancel_pending`
+deletes the user's pending row for the card's `telegram_message_id` (scoped by
+`user_id`, §1) and returns the deleted `pending_id` or `None` on a redelivered
+tap. New `app.handle_cancel` resolves the user, cancels, and answers the
+callback query ("Discarded ❌" / "Already gone"). Nothing is written to the
+ledger (§5).
+
+**Status: ✅ DONE** — no blocking issues. One low-severity note below; it does
+not change behaviour or require a fix before the next task.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (`TASKS.md`, `kanakko/app.py`,
+  `kanakko/db.py`, `tests/test_webhook.py`).
+- `uv run pytest -q` → **82 passed, 1 warning** (the pre-existing Starlette
+  `httpx` deprecation, unrelated). Matches the commit message's claim.
+- **Reddened the scoping guard myself** to confirm it fails for the reason it
+  exists: temporarily dropped `AND user_id = %s` from `cancel_pending`'s DELETE
+  and reran `tests/test_webhook.py::test_cancel_is_scoped_to_the_user` →
+  **`assert 0 == 1` (FAILED)** — A's Cancel deleted B's identically-numbered
+  card. Restored `db.py` (`git checkout`) and reran the suite → 82 passed. The
+  guard is real, not a surface-form assertion.
+- Read `docs/DECISIONS.md` §1 (every table keyed on internal `user_id`) and §5
+  (Cancel discards, no ledger write, no state machine) — the change matches
+  both.
+
+### Correctness and spec fit
+
+- **§5 honoured.** `handle_cancel`/`cancel_pending` only DELETE the pending row
+  and ack; no `transactions` insert, no conversation state. The
+  `test_handle_cancel_discards_the_pending_row_and_acknowledges` test asserts
+  `ledger_count == 0` via `active_transactions` — the right assertion, since a
+  stray write would show up there.
+- **§1 scoping** mirrors the already-reviewed `confirm_pending`: DELETE is keyed
+  on `(user_id, telegram_message_id)`, verified reddening above.
+- **Idempotent redelivery** (§5-adjacent, matches the Confirm handler's
+  contract): a second tap returns `None` and still acks "Already gone", so
+  Telegram's spinner clears on the redelivered 200. Covered by
+  `test_handle_cancel_is_idempotent_on_a_redelivered_tap`.
+- **Routing** is asserted both ways in the rewritten
+  `test_webhook_routes_confirm_and_cancel_to_their_handlers`: CONFIRM→confirm,
+  CANCEL→cancel, never crossed; each button tap opens exactly one connection; an
+  ignored update opens none. Good — a CANCEL leaking to `handle_confirm` would
+  write a ledger row, and that path is now guarded.
+- **Commit semantics:** the endpoint uses `with connect() as conn:`, identical
+  to the Confirm path, so the DELETE commits on clean exit and a handler
+  exception rolls back and 500s for redelivery. `cancel_pending` correctly does
+  not commit itself.
+- No `float`, no amount arithmetic, no read of `transactions`/`active_transactions`
+  in this diff — none of the money/timezone axes are touched.
+
+### Low-severity note (no fix required)
+
+1. `kanakko/app.py:138` — `handle_cancel` acknowledges but does **not**
+   `edit_message_text` to strip the Confirm/Cancel buttons off the discarded
+   card. Not a spec violation (§5 asks only to discard + acknowledge) and it is
+   safe: the pending row is gone, so a later Confirm tap on the same lingering
+   card hits `confirm_pending`→`None` and writes nothing. Worth a follow-up only
+   if the stale card's buttons prove confusing in use; leaving it is the correct
+   lazy call for this task.
+
+### Falsely-ticked check
+
+Task 65 is genuinely done: real behaviour (DB delete + ack), real error/edge
+handling (idempotent redelivery, user scoping), and guards that fail for their
+stated reason. Not a stub.
+
+---
+
 ## 2026-08-06 — `fbd351f` — wire Handle Confirm into `/webhook` (§4, §14, §15, task 64)
 
 **Scope:** Route a dispatched `TextMessage` → `handle_text` and a

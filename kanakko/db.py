@@ -12,7 +12,7 @@ Reads elsewhere go through `active_transactions` (§6).
 """
 
 import os
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import psycopg
@@ -236,6 +236,24 @@ def day_summary(
         )
         count, spent, received = cur.fetchone()
     return count, spent, received
+
+
+def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:
+    """True if `user_id` has any live transaction logged since `since` (§6, §12).
+
+    The noon nudge's suppression check: was the user already active since the
+    previous evening summary? `created_at` — when the row was *logged*, not
+    `occurred_on` — is the right column, so recording a back-dated expense this
+    morning still counts as activity. Reads `active_transactions`, so a row the
+    user logged and then undid doesn't keep the nudge suppressed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM active_transactions"
+            " WHERE user_id = %s AND created_at >= %s LIMIT 1",
+            (user_id, since),
+        )
+        return cur.fetchone() is not None
 
 
 def cancel_pending(

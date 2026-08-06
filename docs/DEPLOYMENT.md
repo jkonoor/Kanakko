@@ -32,6 +32,31 @@ Existing projects on this instance (do not disturb): `Innogenio`,
 `fixed-asset`, `shared-mariadb`, `vpn`, `CineApp`, `N8N`, `ace`, `insurance`.
 Kanakko gets its own project.
 
+## Provisioned resources
+
+Created 2026-08-06 via the REST API. IDs are needed for every subsequent call.
+
+| Resource | ID | Internal host / notes |
+|---|---|---|
+| Project `Kanakko` | `xa5cDzEGJUgB2MHgl0xJB` | |
+| Environment `production` | `T74aci5qFWuG_wQ9TvV4P` | `isDefault` — services attach here, not to the project |
+| `kanakko-db` (Postgres 16-alpine) | `y8iECURcqfeVsYkaNkcCt` | host **`kanakko-db-kwuz62`**, db/user `kanakko` |
+| `kanakko-web` (Application) | `xvcTr0x3RmHLzUHAuH1Mn` | appName `kanakko-web-kmeizk` |
+| `kanakko-cron` (Application) | `ZW25YvpB8Edv-nCfh6Jwz` | appName `kanakko-cron-y4qpyy` |
+
+**API notes for v0.29.7**, learned the hard way here:
+
+- `project.create` returns `{"project": {...}, "environment": {...}}` — the IDs
+  are nested, not top level.
+- Services hang off `environmentId`, not `projectId`. `project.one` returns them
+  under `environments[].applications` / `.postgres` / `.compose`.
+- `application.saveEnvironment` rejects `{applicationId, env}` with a Zod
+  validation error. **Use `application.update` with an `env` field instead** —
+  it accepts arbitrary application fields, including `command`.
+- `application.saveDockerProvider` takes
+  `{applicationId, dockerImage, registryUrl, username, password}`.
+- The deploy webhook token is the application's `refreshToken`.
+
 ## Topology
 
 **Not a compose stack.** Three Dokploy resources in one `Kanakko` project:

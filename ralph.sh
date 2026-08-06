@@ -118,7 +118,18 @@ qa_pass() {
 for (( i = 1; i <= MAX; i++ )); do
   if [[ "$MODE" != "qa" ]]; then
     log "══ iteration $i/$MAX — implementer   model=$DEV_MODEL"
+    before="$(git rev-parse HEAD)"
     output="$(dev_pass)" || log "[dev] pass exited non-zero — continuing"
+    # A pass that both failed and committed nothing produced nothing, and the
+    # next one will fail the same way — an exhausted account session limit is
+    # the usual cause, and "continuing" burns the whole cap in seconds. Stop and
+    # let a person decide, rather than spending 8 iterations on nothing.
+    if [[ "$(git rev-parse HEAD)" == "$before" ]] \
+       && ! grep -qF '<promise>COMPLETE</promise>' <<<"$output"; then
+      log "implementer produced no commit — stopping at iteration $i. Last output:"
+      tail -n 3 <<<"$output" >&2
+      exit 1
+    fi
     if grep -qF '<promise>COMPLETE</promise>' <<<"$output"; then
       log "COMPLETE emitted — every task done and no open findings. Stopping at iteration $i."
       exit 0

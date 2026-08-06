@@ -12,6 +12,70 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `15dc9e4` — noon nudge job, 12:00 daily, suppressed when the day has activity (Phase 3, task 87)
+
+**Status: ✅ DONE** — no blocking issues. The suppression boundary is the
+previous 21:00 `Asia/Kolkata` computed in IST, `logged_since` reads
+`active_transactions` and keys on `created_at` (when logged, not when the money
+moved), no amount is touched, and both new guards fail for the reason they
+exist (verified by revert-and-red, below).
+
+**Scope reviewed.** `git show HEAD` only: `kanakko/db.py` (`logged_since`, new),
+`kanakko/jobs/noon.py` (new), `tests/test_noon.py` (new), `TASKS.md` (box
+ticked). No other production behaviour changed; no new dependency (`datetime`,
+`zoneinfo` are stdlib).
+
+**Spec fit (§12, §6, §10).**
+
+- §12 says the noon nudge is *suppressed if anything was logged since the
+  previous evening summary*. `run` fans out over `all_users`, skips any user for
+  whom `logged_since(conn, user_id, previous_evening_ist())` is true, sends the
+  rest, and returns the count actually sent. Matches.
+- The "previous evening summary" boundary is modelled as the most recent 21:00
+  IST — sound while the evening summary is a fixed unconditional 21:00 job
+  (task 86, already merged). The commit is explicit that reading `reminder_log`
+  for the exact instant is task 89, and the crontab + `reminder_log` write are
+  still unticked in `TASKS.md`. Not-yet-done, not wrong.
+- §6: `logged_since` reads `active_transactions`, so an undone row cannot keep
+  the nudge suppressed. §10: the boundary is pinned to `Asia/Kolkata`, not UTC.
+
+**What I ran.**
+
+- `uv run pytest -q` → **110 passed**, 1 warning. Matches the commit claim (was
+  106).
+- **Revert-and-red on both guards** (edited source, reran, restored — `git
+  status` clean after):
+  - `logged_since`: `FROM active_transactions` → `FROM transactions`.
+    `test_logged_since_ignores_soft_deleted` **failed** (`assert True is False` —
+    the soft-deleted row leaked back and kept the nudge suppressed). Confirms
+    the read-path guard reddens on `db.py:252`.
+  - Timezone: simulated a UTC-date boundary computation off the tz test's third
+    input (16:00 UTC on the 6th = 21:30 IST). It yields **02:30 IST on the 6th**
+    where the correct IST computation yields **21:00 IST on the 6th**, so
+    `test_previous_evening_is_last_2100_ist`'s UTC-case assertion **fails**. The
+    guard is real: it pins the boundary to IST and catches the 5.5-hour slide.
+
+**Money / invariants.** No amount is formatted or summed in this change; `float`
+never appears. Categories, confidence score, ORM/Redis/Celery — all untouched.
+No secret introduced. `SELECT ... LIMIT 1` on the suppression read is bounded.
+
+**Non-blocking observations** (not findings; recorded for later tasks):
+
+- `previous_evening_ist`'s docstring says "strictly before `now`", but at
+  exactly 21:00:00 the code returns *today's* 21:00 (`evening > now` is false,
+  so no day is subtracted). Immaterial — the noon run is at 12:00, always
+  yesterday's 21:00 — but the docstring and code disagree on the boundary
+  instant. No fix needed now.
+- `run` has no per-user error isolation: a `send_message` raising mid-fan-out
+  aborts the batch, same as `evening.py`. Already flagged on the task-86 review
+  as work for when the fan-out is finalized (tasks 89/90); not new to this
+  commit.
+
+**Verdict.** Task 87 does what it claimed, matches §12/§6/§10, and its two guards
+each fail for the reason they exist. ✅ DONE.
+
+---
+
 ## 2026-08-06 — `f5fbf8e` — evening summary job, 21:00 daily unconditional (Phase 3, task 86)
 
 **Status: ✅ DONE** — no blocking issues. `day_summary` reads

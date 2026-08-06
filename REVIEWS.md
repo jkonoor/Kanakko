@@ -12,6 +12,49 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `d0d97a5` — add `TELEGRAM_WEBHOOK_SECRET` to `.env.example` and compose (§15, task 43)
+
+**Scope:** Wire the §15 webhook secret through both config sources —
+`.env.example` gains `TELEGRAM_WEBHOOK_SECRET=` with the §15 alphabet note, and
+`docker-compose.yml`'s shared `x-app-env` declares it with `:?see .env.example`
+so a missing secret stops `up`. Task 43 ticked. No code change.
+
+**Status: ✅ DONE** — matches §15, the cross-file guard provably bites, nothing
+regressed. No findings.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **68 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). Unchanged count, as claimed.
+- **Guard bites for its stated reason.** Removed the compose line and reran
+  `uv run pytest tests/test_compose.py -q` → **1 failed, 9 passed**, failing
+  exactly `test_env_example_lists_no_key_no_service_consumes` with
+  `AssertionError: TELEGRAM_WEBHOOK_SECRET is in .env.example but no service
+  consumes it`. Restored via `git checkout` and confirmed `git status` clean.
+  This is a real bidirectional guard, not a surface-string assert: `COMPOSE_VARS`
+  is derived by regex over the *actual* `${VAR}` interpolations and `ENV_KEYS`
+  from a *parsed* .env, so the check tracks what compose really consumes, not a
+  spelling. The commit's guard claim is accurate.
+- **Spec fit (§15).** DECISIONS §15 requires the key **required** with `:?`
+  (docker-compose.yml:22 ✓), a 403 on absent/wrong/unset header, and alphabet
+  `A-Za-z0-9_-`, 1–256 chars. `.env.example:24-27` documents exactly that
+  alphabet and length, and correctly describes the header
+  `X-Telegram-Bot-Api-Secret-Token` and the fail-closed behaviour. No value is
+  committed (`test_env_example_holds_no_values` covers this, still green).
+- **The consumer exists.** `kanakko/app.py:26` reads
+  `os.environ.get("TELEGRAM_WEBHOOK_SECRET")` and `scripts/push-env.py` validates
+  and pushes it — so the key the operator is now told to set is genuinely wired,
+  which is the whole point of task 43 following task 42.
+- **No money/timezone/soft-delete/`initData` surface** in this diff — it is pure
+  config wiring, so those decision classes are not in scope here.
+
+### Findings
+
+None. Config-only change, spec-accurate, guard verified to fail for the reason
+it exists, full suite green.
+
+---
+
 ## 2026-08-06 — `f565137` — verify `/webhook` origin with `secret_token`, fail closed (§15, task 42)
 
 **Scope:** `/webhook` now rejects any request whose

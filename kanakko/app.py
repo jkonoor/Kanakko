@@ -1,6 +1,7 @@
 """FastAPI app: webhook and Mini App routes."""
 
 import hmac
+import logging
 import os
 from dataclasses import dataclass
 
@@ -8,7 +9,7 @@ import psycopg
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
-from kanakko import __version__
+from kanakko import __version__, configure_logging
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import CANCEL, CONFIRM, category_prompt, confirm_card
 from kanakko.db import (
@@ -24,6 +25,9 @@ from kanakko.db import (
 from kanakko.money import format_amount
 from kanakko.parse import Transaction, parse_message
 from kanakko.tg import answer_callback_query, edit_message_text, send_message
+
+configure_logging()
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Kanakko", version=__version__)
 
@@ -290,4 +294,5 @@ async def webhook(request: Request) -> dict[str, bool]:
             handle_cancel(conn, action)
         elif action.data.startswith(CATEGORY_PREFIX):
             handle_category(conn, action)
+    log.info("handled update %s: %s", update.get("update_id"), type(action).__name__)
     return {"ok": True}

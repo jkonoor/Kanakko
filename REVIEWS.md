@@ -12,6 +12,72 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `a7bfd2a` — monthly report job, 09:00 on the 1st, previous month (Phase 3, task 88)
+
+**Status: ✅ DONE** — no blocking issues. `month_summary` reads
+`active_transactions`, sums come back `Decimal`, the previous-month range is
+computed in `Asia/Kolkata`, and both new guards redden on revert (verified
+below). Task 88's box is ticked for work that is actually done.
+
+**Scope reviewed.** `git show HEAD` only: `kanakko/db.py` (`month_summary`,
+new), `kanakko/jobs/monthly.py` (new), `tests/test_monthly.py` (new), `TASKS.md`
+(box ticked). No other production behaviour changed; no new dependency
+(`datetime`, `decimal`, `zoneinfo` are stdlib; `IST` reused from
+`jobs/evening.py`).
+
+**Spec fit (§12, §6, §9, §10).**
+
+- §12: *Monthly report — 09:00 on the 1st — previous month: income, expenses,
+  balance, top categories*, and unconditional (§12 marks only the noon nudge
+  suppressible). `report_text` renders all four and always sends, empty month
+  included. Matches.
+- §6: both queries in `month_summary` read `active_transactions`
+  (`kanakko/db.py:259`, `:265`), so a soft-deleted row cannot re-enter a total.
+- §9: sums are `coalesce(sum(amount)…, 0)` over `NUMERIC(12,2)` → `Decimal`; the
+  empty-month test asserts `Decimal("0")`, and the money-path test asserts
+  `isinstance(…, Decimal)`. No `float` touches an amount — `format_amount`
+  refuses one at the door.
+- §10: `previous_month_ist` (`kanakko/jobs/monthly.py:38`) converts to IST
+  before taking `.date()`, so the month boundary is IST, not UTC. `occurred_on`
+  is a `DATE` column (`migrations/001_init.sql:24`), so the half-open
+  `[first, next_first)` range is a pure date comparison — correct, no 5.5-hour
+  slide at the SQL layer.
+- Top categories: expense-only, `GROUP BY category ORDER BY sum(amount) DESC,
+  category` — biggest first with a deterministic tiebreak; `run` trims to
+  `TOP_N=5`. Income category (Salary) is correctly excluded from the spend list.
+
+**Verified live — commands actually run.**
+
+- `uv run pytest -q` → **114 passed**, 1 warning (the pre-existing Starlette
+  httpx deprecation). Matches the commit claim.
+- Guard 1 (soft-delete / `active_transactions`): repointed only
+  `month_summary`'s two queries to `transactions` via `uv run python`, ran
+  `uv run pytest tests/test_monthly.py` →
+  `test_month_summary_buckets_by_ist_month_and_excludes_deleted` **FAILED**
+  (the deleted ₹500 folds back into July's ₹350.50). Restored. The guard fails
+  for the reason it exists.
+- Guard 2 (IST boundary): dropped `.astimezone(IST)` in `previous_month_ist`,
+  ran `test_previous_month_is_computed_in_ist` → **FAILED** (the 20:00-UTC-on-
+  Jul-31 = 01:30-IST-Aug-1 instant reports June instead of July). Restored.
+  Also fails for the reason it exists.
+
+**NULL category — checked, not a finding.** `month_summary`'s top-categories
+query groups by `category`, which is nullable (§3), and a NULL group would
+render as the literal `• None: ₹…`. But the product flow never persists a
+null-category transaction: a null category routes to `category_prompt`
+(`kanakko/confirm.py:36` asserts non-null on the confirm card), and the
+category-prompt keyboard carries only `cat:<name>` buttons — no Confirm — so
+the user must pick a category before a save is possible. The upstream invariant
+holds, so the NULL branch is unreachable in practice. Noted for the record, not
+blocking.
+
+**Scope deferred, correctly unticked.** The crontab and the `reminder_log`
+write remain tasks 89/90 and are still `[ ]` in `TASKS.md`; `run`'s fan-out over
+`all_users` mirrors the merged `evening.run`, so the untested thin wrapper is
+consistent with prior reviews. Missing, not wrong.
+
+---
+
 ## 2026-08-06 — `15dc9e4` — noon nudge job, 12:00 daily, suppressed when the day has activity (Phase 3, task 87)
 
 **Status: ✅ DONE** — no blocking issues. The suppression boundary is the

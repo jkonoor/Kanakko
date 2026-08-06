@@ -7,42 +7,15 @@ against a virgin database, and `migrate()` commits, so a persistent DSN would
 pass once and then fail on every later run.
 """
 
-import subprocess
 from decimal import Decimal
-from glob import glob
 
-import psycopg
 import pytest
 
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.migrate import MIGRATIONS, migrate
 from kanakko.money import parse_amount
 
-
-def pg_bin(name: str) -> str | None:
-    """Debian keeps the server binaries off PATH, under /usr/lib/postgresql."""
-    found = glob(f"/usr/lib/postgresql/*/bin/{name}") + glob("/usr/local/pgsql/bin/" + name)
-    return sorted(found)[-1] if found else None
-
-
-@pytest.fixture(scope="module")
-def conn(tmp_path_factory):
-    initdb, pg_ctl = pg_bin("initdb"), pg_bin("pg_ctl")
-    if not (initdb and pg_ctl):
-        pytest.skip("no local Postgres server binaries under /usr/lib/postgresql")
-
-    data = tmp_path_factory.mktemp("pgdata") / "cluster"
-    socket = tmp_path_factory.mktemp("pgsock")
-    subprocess.run([initdb, "-D", data, "-U", "postgres", "--auth=trust", "-N"], check=True)
-    # No TCP port, so a developer's own Postgres can't be hit by accident.
-    subprocess.run(
-        [pg_ctl, "-D", data, "-w", "-o", f"-k {socket} -h '' -c fsync=off", "start"], check=True
-    )
-    try:
-        with psycopg.connect(f"postgresql://postgres@/postgres?host={socket}") as fresh:
-            yield fresh
-    finally:
-        subprocess.run([pg_ctl, "-D", data, "-m", "immediate", "stop"], check=True)
+# The `conn` fixture (a throwaway Postgres cluster) lives in tests/conftest.py.
 
 
 def test_migrate_refuses_to_succeed_with_no_migrations(tmp_path, monkeypatch):

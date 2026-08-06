@@ -53,7 +53,21 @@ the plan's order and it matters.
       rejected. Safe to defer past task 48 (render confirm card writes no rows);
       must land before task 49 (Handle Confirm), the first handler that writes.
 - [x] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
-- [ ] Handle Confirm — write to `transactions`, clear the pending row
+- [x] Add `kanakko/db.py` — connection + the confirm-flow persistence: `save_pending`
+      (parsed row keyed by the card's message id) and `confirm_pending` (read →
+      insert into `transactions` → delete the pending row, atomically). Carved off
+      task 56 below: this is its DB logic, tested against Postgres. The amount
+      travels as a JSON string and returns through the §9 door (`parse_amount`),
+      so a float can't reach the ledger; `confirm_pending` returns `None` on a
+      redelivered tap so a confirm never double-writes.
+- [ ] Handle Confirm — wire the `ButtonPress(data=CONFIRM)` handler in `app.py`:
+      call `db.confirm_pending`, then acknowledge over Telegram. **Blocked on a
+      Telegram-send client** (`answerCallbackQuery` + edit/send message) that does
+      not exist yet — no send code anywhere in `kanakko/`. The DB write itself is
+      done (`kanakko/db.py`, task above). Reaching this handler also needs the
+      not-yet-built message handler that parses a text message and calls
+      `db.save_pending` to create the pending row. Split out the Telegram-send
+      client as its own task before wiring these handlers.
 - [ ] Handle Cancel — discard the pending row, acknowledge
 - [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing
 - [ ] Show category buttons instead of the confirm card when `category` came back null

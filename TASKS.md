@@ -69,7 +69,7 @@ the plan's order and it matters.
       A handler exception is left to 500 so Telegram redelivers a transiently
       failed transaction; only CONFIRM routes here — Cancel is the next task.
 - [x] Handle Cancel — discard the pending row, acknowledge
-- [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing
+- [x] Reject messages with no parseable amount with a rephrase prompt, storing nothing
 - [ ] Show category buttons instead of the confirm card when `category` came back null
 
 ## Phase 2 — Corrections

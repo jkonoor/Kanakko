@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import ValidationError
 
 from kanakko import __version__
 from kanakko.confirm import CANCEL, CONFIRM, confirm_card
@@ -94,7 +95,13 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
     return None
 
 
-def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int:
+REPHRASE_PROMPT = (
+    'I couldn\'t find an amount in that. Try again with the amount — '
+    'like "spent 500 on groceries" or "got 20000 salary".'
+)
+
+
+def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """Parse a typed message and send its confirm card (§2, §4) — first half of
     the core loop, split off from Handle Confirm.
 
@@ -105,12 +112,21 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int:
     it; a send that fails leaves no pending row, which is the safe direction (a
     dead card the user can retry, never a Confirm with nothing to confirm).
 
+    A message with no parseable amount is no transaction (§3): after `parse_message`
+    exhausts its one retry the `ValidationError` propagates here, and instead of
+    500ing (which makes Telegram redeliver the same unparseable text forever) we
+    ask the user to rephrase and store nothing. Returns `None` in that case.
+
     In a private chat the chat id is the user's Telegram id, so it doubles as the
     `telegram_user_id`. Does not commit — the caller owns the transaction.
-    Returns the new `pending_id`.
+    Returns the new `pending_id`, or `None` when the message couldn't be parsed.
     """
     user_id = get_or_create_user(conn, msg.chat_id)
-    txn = parse_message(msg.text)
+    try:
+        txn = parse_message(msg.text)
+    except ValidationError:
+        send_message(msg.chat_id, REPHRASE_PROMPT)
+        return None
     text, keyboard = confirm_card(txn)
     sent = send_message(msg.chat_id, text, reply_markup=keyboard)
     card_message_id = sent["result"]["message_id"]

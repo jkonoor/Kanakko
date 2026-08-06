@@ -188,6 +188,54 @@ def test_handle_text_keys_the_pending_row_on_the_sent_card(conn, monkeypatch):
     conn.rollback()
 
 
+def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkeypatch):
+    """No parseable amount → rephrase prompt, no pending row, no 500 (§3).
+
+    `parse_message` raises `ValidationError` after its retry when the amount can't
+    be read. `handle_text` must catch that, ask the user to rephrase, and store
+    nothing — not let it propagate to a 500 that Telegram redelivers forever.
+    """
+    migrate(conn)
+
+    def raise_validation(text):
+        # A real amount-less parse: parse_amount rejects the empty amount, which
+        # surfaces as the ValidationError parse_message re-raises after its retry.
+        Transaction.model_validate(
+            {
+                "type": "expense",
+                "amount": "",
+                "category": EXPENSE_CATEGORIES[0],
+                "date": "2026-08-06",
+                "note": text,
+            }
+        )
+
+    monkeypatch.setattr(app_module, "parse_message", raise_validation)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(app_module, "send_message", fake_send)
+
+    result = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="how's it going")
+    )
+    assert result is None  # nothing to confirm
+    assert sent["text"] == app_module.REPHRASE_PROMPT
+    assert sent["reply_markup"] is None  # a rephrase prompt, not a confirm card
+
+    user_id = get_or_create_user(conn, 12345)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pending_transactions WHERE user_id = %s", (user_id,)
+        )
+        (pending_count,) = cur.fetchone()
+    assert pending_count == 0  # §3: an unparseable message stores nothing
+    conn.rollback()
+
+
 def _seed_pending(conn, chat_id, card_message_id, amount="100.00"):
     user_id = get_or_create_user(conn, chat_id)
     txn = Transaction.model_validate(

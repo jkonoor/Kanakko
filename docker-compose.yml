@@ -16,6 +16,10 @@ x-app-env: &app-env
   # or job — an env the operator set on Dokploy but no service asked for is a
   # KeyError phases later, not at deploy.
   TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?see .env.example}"
+  # web verifies /webhook origin against this (DECISIONS §15). Required and `:?`:
+  # fail-closed lives in the app, but an unset secret should stop `up`, not ship
+  # an endpoint that 403s every legitimate Telegram update.
+  TELEGRAM_WEBHOOK_SECRET: "${TELEGRAM_WEBHOOK_SECRET:?see .env.example}"
   OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?see .env.example}"
   # Optional: §2 defaults to claude-opus-5 when unset, so `:-` not `:?`.
   OPENROUTER_MODEL: "${OPENROUTER_MODEL:-}"

@@ -40,7 +40,7 @@ the plan's order and it matters.
 - [x] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
 - [x] Add the Telegram webhook endpoint and update dispatch
 - [x] Reject `/webhook` with 403 unless `X-Telegram-Bot-Api-Secret-Token` matches `TELEGRAM_WEBHOOK_SECRET`, compared with `hmac.compare_digest`; **fail closed when the secret is unset** — per `docs/DECISIONS.md` §15. Do this **before** the Confirm handler: that is the commit where a forged update starts writing rows
-- [ ] Add `TELEGRAM_WEBHOOK_SECRET` to `.env.example` and to compose's shared app env with `:?`, alongside the other required keys
+- [x] Add `TELEGRAM_WEBHOOK_SECRET` to `.env.example` and to compose's shared app env with `:?`, alongside the other required keys
 - [x] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
 - [x] Add `kanakko/db.py` — connection + the confirm-flow persistence: `save_pending`
       (parsed row keyed by the card's message id) and `confirm_pending` (read →

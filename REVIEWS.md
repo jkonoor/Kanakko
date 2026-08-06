@@ -12,6 +12,414 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `9519735` — guard a 23:50-IST last-day transaction lands in that month's report (Phase 3, task 91)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: one new test in `tests/test_monthly.py` and the task-91 tick in `TASKS.md`.
+Test-only; no production code changed (`git show HEAD` confirms).
+
+### What I checked
+
+- **Full suite** — `uv run pytest -q` → **125 passed** (was 124). Matches the
+  commit message. `uv run pytest tests/test_monthly.py -q` → 6 passed.
+- **The guard reddens for the reason it exists.** The commit claims the mutant
+  "return `this_first - timedelta(days=1)` as the upper bound" fails the new
+  test. I applied exactly that edit to `previous_month_ist`
+  (`kanakko/jobs/monthly.py:40`) and ran the test →
+  `FAILED test_last_day_2350_ist_lands_in_that_months_report`. Restored;
+  `git status --short` clean. So the guard is not asserting a surface form — it
+  fails when the month's upper bound slides off first-of-next to the last day
+  and `occurred_on < %s` then drops the 31st.
+  - Note: an earlier mutation I tried — making the SQL bound *inclusive* of the
+    last day (`occurred_on <= last_day`) — left the test green, correctly, since
+    that variant still keeps Jul 31. The off-by-one the test actually catches is
+    the half-open bound pointing one day short, which is the real risk in
+    `month_summary` (`kanakko/db.py:260,266`, `occurred_on < %s`).
+- **Spec fit.** `month_summary` reads `active_transactions` (§6), sums come back
+  `Decimal` (§9), the range is half-open `[first, next_first)` computed in IST by
+  `previous_month_ist` (§10). The test asserts `expenses == Decimal("250.00")`
+  and `top == [("Food", Decimal("250.00"))]` — money stays `Decimal`, category
+  from the real keyboard set.
+- **Scope honesty.** The test inserts `occurred_on = date(2026, 7, 31)` directly
+  rather than converting a 23:50-IST *timestamp* to an IST date. That is correct
+  scoping, not a gap: `occurred_on` is a `DATE` column and `month_summary`
+  buckets on it; the timestamp→IST-date pinning lives in the parse layer, out of
+  this test's scope. The docstring states this plainly ("`occurred_on` is a
+  `DATE` the parse pins in IST"), so the title is not overclaiming.
+
+### Findings
+
+None. The test guards a genuine silent-failure path (last-day money dropping out
+of the month report), fails under the documented regression, and asserts the
+effect (the ₹250 is in July's total) rather than a spelling. Task 91's tick is
+earned.
+
+---
+
+## 2026-08-06 — `4c4c71b` — cron sidecar crontab with all three reminder jobs (Phase 3, task 90)
+
+**Status: ✅ DONE** — no blocking issues.
+
+The commit adds `cron/kanakko.crontab` (installed to `/etc/cron.d/kanakko`) and
+`cron/entrypoint.sh`, switches the compose `cron` command to run the entrypoint,
+COPYs `cron/` in the Dockerfile and installs the crontab 0644, updates
+`DEPLOYMENT.md`, and ticks task 90. The central risk it addresses is real: cron
+runs jobs with a stripped environment, so a bare `cron -f` would ship jobs that
+crash on `connect()` at 12:00/21:00 IST — visible only in the sidecar log.
+
+### What I checked (and what it returned)
+
+- **Full suite**: `uv run pytest -q` → **124 passed** (matches the claim; was
+  118). `tests/test_crontab.py` alone → **6 passed**.
+- **Schedules vs §12** (`cron/kanakko.crontab:18-20`): `0 12 * * *` → noon,
+  `0 21 * * *` → evening, `0 9 1 * *` → monthly. Matches the §12 table
+  (12:00 daily / 21:00 daily / 09:00 on the 1st) exactly.
+- **/etc/cron.d format**: each job line carries the `root` user field between
+  schedule and command (7 whitespace fields), so cron won't reject the file as
+  a 5-field `crontab -e` line. File is named `kanakko` (no dot) — cron.d ignores
+  dotted filenames, and this one is fine.
+- **Trailing newline** present after the last job line (`Read` shows line 21
+  empty), so Vixie cron won't drop the monthly entry.
+- **Env round-trip**: the committed effect test `test_entrypoint_round_trips_a_hostile_value`
+  runs the real `entrypoint.sh` and confirms a value with `'`, space, `$` and
+  `;` survives dump-and-source — the escaping (`sed "s/'/'\\\\''/g"` → the
+  standard `'\''` close/escape/reopen) is genuinely exercised, not asserted by
+  spelling. I could not additionally run the entrypoint by hand (sandbox blocked
+  it), but the committed test covers a strictly harder value than a real
+  `postgres://…` / `123456:AA…` secret.
+- **Secrets present to dump**: the `cron` service merges `<<: *app-env`
+  (`docker-compose.yml:68`), so `DATABASE_URL`/`TELEGRAM_BOT_TOKEN` are in the
+  container env for `printenv` to capture. No secret literal in the crontab,
+  entrypoint, compose, or Dockerfile — all sourced from the environment.
+- **TZ / §10**: `TZ=Asia/Kolkata` is set on the `cron` service and inherited by
+  `exec cron -f`, with `tzdata` installed in the image (Dockerfile), so the
+  wall-clock times are read as IST rather than firing 5.5h early. The entrypoint
+  dumps `TZ` into `cron.env` too, so the Python jobs also see it (and boundaries
+  are computed `AT TIME ZONE 'Asia/Kolkata'` in SQL regardless).
+- **PID-1 logging**: entrypoint `exec`s cron so PID 1 *is* cron; jobs redirect
+  to `/proc/1/fd/1`, reaching the container log, and the redirect also means cron
+  captures no output → no mail spool.
+- **Guards that guard**: the schedule map fails on a fat-fingered time (commit
+  claims a 20:00 evening reddens it — consistent with `EXPECTED`), the round-trip
+  reddens if the sed escaper is dropped, and `test_compose_cron_runs_the_entrypoint`
+  reddens on a revert to `cron -f`. These fail for the reasons they exist.
+- **Task hygiene**: task 90 ticked for delivered work; the following task ("check
+  a 23:50 IST last-day transaction lands in that month's report") correctly
+  remains unchecked — out of scope for this commit.
+
+### Findings
+
+None blocking. Minor notes, not requiring change:
+
+- `entrypoint.sh` dumps the env with `printenv | while IFS='=' read`, which would
+  mangle an env value containing a newline. None of Kanakko's secrets
+  (`DATABASE_URL`, `TELEGRAM_BOT_TOKEN`) contain newlines, so this is not a
+  real exposure — noted only so a future multi-line secret isn't a silent
+  surprise.
+
+---
+
+## 2026-08-06 — `372181b` — write `reminder_log` from every job, noon suppression reads it (Phase 3, task 89)
+
+**Status: ✅ DONE** — no blocking issues. Every job now records what it sent in
+`reminder_log`, and the noon nudge keys its suppression window on the *actual*
+`sent_at` of the user's last evening summary, falling back to the nominal 21:00
+IST only for a user with no logged summary. Task 89's box is ticked for work
+that is actually done.
+
+**What I checked (commands and their output):**
+
+- `uv run pytest -q` → **118 passed, 1 warning in 5.00s**. The pre-existing
+  Starlette/httpx deprecation warning is unrelated to this commit.
+- **Revert-and-red on the core guard.** Replaced the per-user boundary
+  (`kanakko/jobs/noon.py:59`, `since = last_reminder_at(...) or fallback`) with
+  `since = fallback` and ran `uv run pytest tests/test_noon.py -q` →
+  `test_run_reads_last_evening_from_reminder_log` failed with `assert 1 == 0`
+  (the 5-day-old activity, which sits after the real 10-day-old summary but
+  before the nominal 21:00, wrongly nudges under the fallback). Restored the
+  file; `git status --short` clean, byte-identical to HEAD. The guard fails for
+  the reason it exists.
+- **Spec fit (§12, `docs/DECISIONS.md:235`).** Noon suppressed on activity since
+  the previous evening summary; evening and monthly unconditional. Evening and
+  monthly write `log_reminder` once per user unconditionally
+  (`evening.py:60`, `monthly.py:73`); noon writes only for users actually nudged
+  (`noon.py:63`). Matches the table.
+- **Reads through `active_transactions`.** `logged_since` (`db.py:275`) — the
+  only read this path makes — queries `active_transactions`, so a soft-deleted
+  row can't keep the nudge suppressed. This commit adds no new transaction read.
+- **`kind` isolation.** `last_reminder_at` filters `kind = 'evening'`
+  (`db.py:319-323`), so the new `'noon'`/`'monthly'` rows can't pollute the
+  suppression boundary. `kind` values are the three literals in the table's
+  CHECK constraint (`migrations/001_init.sql:48`); a typo hard-errors as claimed.
+- **No `float`, no timezone change.** This commit touches no money path;
+  `previous_evening_ist` (the only IST boundary here) is unchanged from task 87.
+- **Log-write guards.** `test_run_logs_a_{evening,monthly,noon}_reminder…` assert
+  the exact `reminder_log` rows via `fetchall()`; dropping each write empties the
+  result and reddens the assert. (Confirmed by inspection; the core guard above
+  was exercised live.)
+- **No new dependency.** `git show HEAD` imports only add existing `db` helpers.
+
+**Findings:** none blocking.
+
+**Note (not a finding):** keying the window on the actual last-summary `sent_at`
+means a *late* evening summary moves the boundary forward, so activity that the
+late summary already reported can fall before the new boundary and still draw a
+noon nudge. That is the intended §12 behaviour ("since the previous evening
+summary"), not a defect — recorded only so the next reader doesn't re-flag it.
+
+Tasks left unticked in `TASKS.md` (crontab; the 23:50-IST month-boundary check)
+are the *next* tasks, correctly not claimed here.
+
+---
+
+## 2026-08-06 — `a7bfd2a` — monthly report job, 09:00 on the 1st, previous month (Phase 3, task 88)
+
+**Status: ✅ DONE** — no blocking issues. `month_summary` reads
+`active_transactions`, sums come back `Decimal`, the previous-month range is
+computed in `Asia/Kolkata`, and both new guards redden on revert (verified
+below). Task 88's box is ticked for work that is actually done.
+
+**Scope reviewed.** `git show HEAD` only: `kanakko/db.py` (`month_summary`,
+new), `kanakko/jobs/monthly.py` (new), `tests/test_monthly.py` (new), `TASKS.md`
+(box ticked). No other production behaviour changed; no new dependency
+(`datetime`, `decimal`, `zoneinfo` are stdlib; `IST` reused from
+`jobs/evening.py`).
+
+**Spec fit (§12, §6, §9, §10).**
+
+- §12: *Monthly report — 09:00 on the 1st — previous month: income, expenses,
+  balance, top categories*, and unconditional (§12 marks only the noon nudge
+  suppressible). `report_text` renders all four and always sends, empty month
+  included. Matches.
+- §6: both queries in `month_summary` read `active_transactions`
+  (`kanakko/db.py:259`, `:265`), so a soft-deleted row cannot re-enter a total.
+- §9: sums are `coalesce(sum(amount)…, 0)` over `NUMERIC(12,2)` → `Decimal`; the
+  empty-month test asserts `Decimal("0")`, and the money-path test asserts
+  `isinstance(…, Decimal)`. No `float` touches an amount — `format_amount`
+  refuses one at the door.
+- §10: `previous_month_ist` (`kanakko/jobs/monthly.py:38`) converts to IST
+  before taking `.date()`, so the month boundary is IST, not UTC. `occurred_on`
+  is a `DATE` column (`migrations/001_init.sql:24`), so the half-open
+  `[first, next_first)` range is a pure date comparison — correct, no 5.5-hour
+  slide at the SQL layer.
+- Top categories: expense-only, `GROUP BY category ORDER BY sum(amount) DESC,
+  category` — biggest first with a deterministic tiebreak; `run` trims to
+  `TOP_N=5`. Income category (Salary) is correctly excluded from the spend list.
+
+**Verified live — commands actually run.**
+
+- `uv run pytest -q` → **114 passed**, 1 warning (the pre-existing Starlette
+  httpx deprecation). Matches the commit claim.
+- Guard 1 (soft-delete / `active_transactions`): repointed only
+  `month_summary`'s two queries to `transactions` via `uv run python`, ran
+  `uv run pytest tests/test_monthly.py` →
+  `test_month_summary_buckets_by_ist_month_and_excludes_deleted` **FAILED**
+  (the deleted ₹500 folds back into July's ₹350.50). Restored. The guard fails
+  for the reason it exists.
+- Guard 2 (IST boundary): dropped `.astimezone(IST)` in `previous_month_ist`,
+  ran `test_previous_month_is_computed_in_ist` → **FAILED** (the 20:00-UTC-on-
+  Jul-31 = 01:30-IST-Aug-1 instant reports June instead of July). Restored.
+  Also fails for the reason it exists.
+
+**NULL category — checked, not a finding.** `month_summary`'s top-categories
+query groups by `category`, which is nullable (§3), and a NULL group would
+render as the literal `• None: ₹…`. But the product flow never persists a
+null-category transaction: a null category routes to `category_prompt`
+(`kanakko/confirm.py:36` asserts non-null on the confirm card), and the
+category-prompt keyboard carries only `cat:<name>` buttons — no Confirm — so
+the user must pick a category before a save is possible. The upstream invariant
+holds, so the NULL branch is unreachable in practice. Noted for the record, not
+blocking.
+
+**Scope deferred, correctly unticked.** The crontab and the `reminder_log`
+write remain tasks 89/90 and are still `[ ]` in `TASKS.md`; `run`'s fan-out over
+`all_users` mirrors the merged `evening.run`, so the untested thin wrapper is
+consistent with prior reviews. Missing, not wrong.
+
+---
+
+## 2026-08-06 — `15dc9e4` — noon nudge job, 12:00 daily, suppressed when the day has activity (Phase 3, task 87)
+
+**Status: ✅ DONE** — no blocking issues. The suppression boundary is the
+previous 21:00 `Asia/Kolkata` computed in IST, `logged_since` reads
+`active_transactions` and keys on `created_at` (when logged, not when the money
+moved), no amount is touched, and both new guards fail for the reason they
+exist (verified by revert-and-red, below).
+
+**Scope reviewed.** `git show HEAD` only: `kanakko/db.py` (`logged_since`, new),
+`kanakko/jobs/noon.py` (new), `tests/test_noon.py` (new), `TASKS.md` (box
+ticked). No other production behaviour changed; no new dependency (`datetime`,
+`zoneinfo` are stdlib).
+
+**Spec fit (§12, §6, §10).**
+
+- §12 says the noon nudge is *suppressed if anything was logged since the
+  previous evening summary*. `run` fans out over `all_users`, skips any user for
+  whom `logged_since(conn, user_id, previous_evening_ist())` is true, sends the
+  rest, and returns the count actually sent. Matches.
+- The "previous evening summary" boundary is modelled as the most recent 21:00
+  IST — sound while the evening summary is a fixed unconditional 21:00 job
+  (task 86, already merged). The commit is explicit that reading `reminder_log`
+  for the exact instant is task 89, and the crontab + `reminder_log` write are
+  still unticked in `TASKS.md`. Not-yet-done, not wrong.
+- §6: `logged_since` reads `active_transactions`, so an undone row cannot keep
+  the nudge suppressed. §10: the boundary is pinned to `Asia/Kolkata`, not UTC.
+
+**What I ran.**
+
+- `uv run pytest -q` → **110 passed**, 1 warning. Matches the commit claim (was
+  106).
+- **Revert-and-red on both guards** (edited source, reran, restored — `git
+  status` clean after):
+  - `logged_since`: `FROM active_transactions` → `FROM transactions`.
+    `test_logged_since_ignores_soft_deleted` **failed** (`assert True is False` —
+    the soft-deleted row leaked back and kept the nudge suppressed). Confirms
+    the read-path guard reddens on `db.py:252`.
+  - Timezone: simulated a UTC-date boundary computation off the tz test's third
+    input (16:00 UTC on the 6th = 21:30 IST). It yields **02:30 IST on the 6th**
+    where the correct IST computation yields **21:00 IST on the 6th**, so
+    `test_previous_evening_is_last_2100_ist`'s UTC-case assertion **fails**. The
+    guard is real: it pins the boundary to IST and catches the 5.5-hour slide.
+
+**Money / invariants.** No amount is formatted or summed in this change; `float`
+never appears. Categories, confidence score, ORM/Redis/Celery — all untouched.
+No secret introduced. `SELECT ... LIMIT 1` on the suppression read is bounded.
+
+**Non-blocking observations** (not findings; recorded for later tasks):
+
+- `previous_evening_ist`'s docstring says "strictly before `now`", but at
+  exactly 21:00:00 the code returns *today's* 21:00 (`evening > now` is false,
+  so no day is subtracted). Immaterial — the noon run is at 12:00, always
+  yesterday's 21:00 — but the docstring and code disagree on the boundary
+  instant. No fix needed now.
+- `run` has no per-user error isolation: a `send_message` raising mid-fan-out
+  aborts the batch, same as `evening.py`. Already flagged on the task-86 review
+  as work for when the fan-out is finalized (tasks 89/90); not new to this
+  commit.
+
+**Verdict.** Task 87 does what it claimed, matches §12/§6/§10, and its two guards
+each fail for the reason they exist. ✅ DONE.
+
+---
+
+## 2026-08-06 — `f5fbf8e` — evening summary job, 21:00 daily unconditional (Phase 3, task 86)
+
+**Status: ✅ DONE** — no blocking issues. `day_summary` reads
+`active_transactions`, sums come back `Decimal`, the day boundary is bucketed in
+`Asia/Kolkata`, and all three new guards fail for the reason they exist
+(verified by revert-and-red, below). One non-blocking observation on batch
+resilience is recorded for when the fan-out is finalized (tasks 89/90).
+
+**Scope reviewed.** `git show HEAD` only: `kanakko/db.py` (`all_users`,
+`day_summary`), `kanakko/jobs/{__init__,evening}.py` (new), `tests/test_evening.py`
+(new), `tests/test_read_paths.py` (glob→rglob), `TASKS.md` (box ticked). No other
+production behaviour changed; no new dependency (`zoneinfo`, `datetime`, `decimal`
+are stdlib).
+
+**What I ran.**
+
+- `uv run pytest -q` → **106 passed**, 1 warning. Matches the commit claim (was 102).
+- **Revert-and-red on all three guards** (edited the two source files, reran, then
+  restored — `git status` clean afterward):
+  - `today_ist` → `now.date()` (UTC): `test_today_ist_buckets_in_kolkata` **failed**
+    (`date(2026,8,7)` expected, `date(2026,8,6)` got for 22:00 UTC).
+  - `day_summary` `FROM active_transactions` → `FROM transactions`:
+    `test_day_summary_buckets_by_ist_date_and_excludes_deleted` **failed** (deleted
+    ₹500 folded back into spend) *and* the read-path guard **failed** flagging
+    `db.py:231`. The `rglob` widening genuinely reaches `kanakko/jobs/` too.
+- **Money type on the empty day** (the project's most-guarded invariant): threw a
+  throwaway test at the real-Postgres `conn` fixture — `day_summary` on a day with
+  no rows returns `type(spent) is Decimal` and `type(received) is Decimal`, not
+  `int`. `coalesce(sum(...), 0)` stays `NUMERIC` → `Decimal`. Removed the temp test.
+
+**Spec fit (`docs/DECISIONS.md` §6, §9, §10, §12).**
+
+- §12: evening summary is unconditional — `summary_text` returns a message even for
+  `count == 0`, and `run` sends to every user regardless of activity. Carries the
+  day's total and entry count. ✅
+- §9: amounts never touch `float`. `day_summary` sums are `Decimal`; `format_amount`
+  takes `Decimal`. The `count == 0` branch returns before `format_amount`, so the
+  empty-day `Decimal("0")` is never formatted anyway. ✅
+- §6: the only ledger read is through `active_transactions`; `all_users` reads
+  `users` (not a ledger read, correctly outside the view). ✅
+- §10: day boundary computed once in `today_ist` via `Asia/Kolkata`; `occurred_on`
+  is a `DATE` column and `day` is compared as a plain IST-derived date, so no UTC
+  bucketing sneaks in. ✅
+- No confidence score, no ORM/Celery/Redis, categories untouched. ✅
+
+**Non-blocking observation (not a defect in the committed scope).**
+
+- `kanakko/jobs/evening.py:59-64` — `run` calls `send_message` in a bare loop with
+  no per-user isolation. `send_message` does `raise_for_status`, so the first user
+  who has blocked the bot (Telegram 403) or is otherwise unreachable will abort the
+  whole batch; every user ordered after them silently gets no summary, and `main`'s
+  "sent to N user(s)" line never logs because the exception propagates. This is the
+  kind of silent partial-failure the project cares about, but it is arguably out of
+  task 86's stated scope (the commit defers the `reminder_log` write to task 89 and
+  the crontab to task 90, both of which touch this loop). **Suggested fix when the
+  fan-out is finalized:** wrap the per-user body in `try/except`, log-and-continue
+  on send failure, and count only the successes. No test exercises `run`/`main`
+  today; a test that makes one user's `send_message` raise and asserts the others
+  still receive theirs would pin this once the behaviour exists.
+
+**Verdict.** The committed scope is correct, matches §12, and every new guard
+earns its place. ✅ DONE.
+
+---
+
+## 2026-08-06 — `c217c8d` — configure logging at startup so `kanakko` `log.info` emits (Phase 3, task 84)
+
+**Status: ✅ DONE** — no blocking issues. Adds `kanakko.configure_logging()`
+(stderr handler on the `kanakko` package logger at INFO, idempotent), calls it
+once at `app.py` import, and logs one INFO line per handled webhook update. The
+guard fails for the reason it exists.
+
+**Scope reviewed.** `git show HEAD` only — `kanakko/__init__.py`
+(`configure_logging`), `kanakko/app.py` (call + `log.info`), `tests/test_logging.py`
+(new), `TASKS.md` (box ticked). No production behaviour outside logging changed;
+nothing touches money, timezones, `active_transactions`, categories, or secrets,
+and no new dependency (`logging` is stdlib).
+
+**What I ran.**
+
+- `uv run pytest -q` → **102 passed**, 1 warning. Matches the commit claim (was 101).
+- **Verified the guard reddens** — temporarily replaced the `configure_logging`
+  body with `return` (a no-op) and ran `uv run pytest tests/test_logging.py -q`
+  → **1 failed**: `AssertionError: assert 'after config' in ''` at
+  `test_logging.py:24`. Restored the fix; working tree confirmed clean
+  (`git status --short` empty). So the test is not asserting a spelling — with
+  the fix gone, the INFO record genuinely never reaches a handler and the check
+  goes red. This is the exact failure the task exists to prevent.
+- Confirmed the config premise: `getLogger("kanakko")` gets `setLevel(INFO)` +
+  a `StreamHandler`; `app.py`'s `log = getLogger("kanakko.app")` is a child, so
+  it inherits both level and handler. `grep -rn "logging" kanakko/` shows this
+  is the only logging config — no competing `basicConfig` to fight with.
+
+**Correctness notes (non-blocking).**
+
+- `configure_logging` is genuinely idempotent: `if logger.handlers: return`
+  guards the handler add, so repeat calls from the web app and the future cron
+  jobs won't stack duplicate handlers. `setLevel(INFO)` runs before the guard
+  but is itself idempotent.
+- `app.py:297` `log.info(... type(action).__name__)` is only reached when
+  `action is not None` (early returns at 270/272/276) and fires after the
+  handler block, so it does *not* log on a deduped redelivery (early return at
+  285). That is the right call — it logs genuinely-handled updates, and the line
+  exercises the config on the happy path rather than asserting it. It logs only
+  `update_id` and the action class name, no message content — no PII leak.
+- The `kanakko` logger keeps `propagate=True`, so records also reach root. Under
+  the uvicorn setup the docstring describes (root has no app handler), this is
+  harmless — the last-resort handler only fires for WARNING+, so a propagated
+  INFO with no root handler emits nothing extra. No double-logging in production.
+  Left as a note only.
+
+**Findings.** None blocking. The task box is ticked for real work, not a stub:
+the function does what it claims, the app exercises it, and the test fails
+without it.
+
+---
+
 ## 2026-08-06 — `13d1d00` — scan string literals via `ast` so the read-path guard catches triple-quoted SQL and `JOIN` (§6, task 80)
 
 **Status: ✅ DONE** — no blocking issues. This is a test-only change

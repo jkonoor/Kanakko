@@ -16,7 +16,15 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 COPY kanakko ./kanakko
 COPY migrations ./migrations
+COPY cron ./cron
 RUN uv sync --frozen --no-dev
+
+# The sidecar's crontab (DECISIONS §12). /etc/cron.d entries must be root-owned
+# and not group/world-writable or cron silently ignores the file; 0644 satisfies
+# both. The web service never reads this — it runs the uvicorn CMD below.
+RUN cp cron/kanakko.crontab /etc/cron.d/kanakko \
+    && chmod 0644 /etc/cron.d/kanakko \
+    && chmod 0755 cron/entrypoint.sh
 
 # uv installs the project editable, so kanakko/migrate.py resolves MIGRATIONS
 # to /app/migrations. That is why migrations/ is COPYed rather than packaged

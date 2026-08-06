@@ -12,6 +12,8 @@ Reads elsewhere go through `active_transactions` (§6).
 """
 
 import os
+from datetime import date, datetime
+from decimal import Decimal
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -199,6 +201,130 @@ def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
             (update_id,),
         )
         return cur.fetchone() is not None
+
+
+def all_users(conn: psycopg.Connection) -> list[tuple[int, int]]:
+    """Every user as `(user_id, telegram_user_id)` — the scheduled jobs' fan-out.
+
+    The jobs read a user's ledger by internal `user_id` (§1) but send to the
+    Telegram id; a private chat's `chat_id` is that Telegram id. Not a ledger
+    read, so it goes straight to `users`.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id, telegram_user_id FROM users ORDER BY user_id")
+        return cur.fetchall()
+
+
+def day_summary(
+    conn: psycopg.Connection, user_id: int, day: date
+) -> tuple[int, Decimal, Decimal]:
+    """`(entry_count, spent, received)` for `user_id`'s live rows on `day` (§6, §9, §12).
+
+    Buckets on `occurred_on` — when the money moved, not when it was logged — and
+    reads `active_transactions` so a soft-deleted row never re-enters a total. The
+    two sums come back as `NUMERIC` → `Decimal` (never float, §9); an empty day
+    yields `(0, 0.00, 0.00)`. `day` is a plain date the caller computes in
+    `Asia/Kolkata` (§10), keeping the timezone boundary in one testable place.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0)"
+            " FROM active_transactions WHERE user_id = %s AND occurred_on = %s",
+            (user_id, day),
+        )
+        count, spent, received = cur.fetchone()
+    return count, spent, received
+
+
+def month_summary(
+    conn: psycopg.Connection, user_id: int, first_day: date, next_first_day: date
+) -> tuple[Decimal, Decimal, list[tuple[str, Decimal]]]:
+    """`(income, expenses, top_categories)` for `user_id`'s live rows in the month (§6, §9, §12).
+
+    The range is half-open `[first_day, next_first_day)` on `occurred_on` — when
+    the money moved — so a 23:50 IST entry on the month's last day lands in that
+    month (the caller computes both boundaries in `Asia/Kolkata`, §10). Reads
+    `active_transactions`, so a soft-deleted row never re-enters the totals (§6).
+    The two sums come back as `NUMERIC` → `Decimal` (never float, §9). Top
+    categories are the month's expense categories with their totals, biggest
+    first — the caller decides how many to show.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT"
+            " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
+            " FROM active_transactions"
+            " WHERE user_id = %s AND occurred_on >= %s AND occurred_on < %s",
+            (user_id, first_day, next_first_day),
+        )
+        income, expenses = cur.fetchone()
+        cur.execute(
+            "SELECT category, sum(amount) FROM active_transactions"
+            " WHERE user_id = %s AND occurred_on >= %s AND occurred_on < %s"
+            " AND type = 'expense'"
+            " GROUP BY category ORDER BY sum(amount) DESC, category",
+            (user_id, first_day, next_first_day),
+        )
+        top = cur.fetchall()
+    return income, expenses, top
+
+
+def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:
+    """True if `user_id` has any live transaction logged since `since` (§6, §12).
+
+    The noon nudge's suppression check: was the user already active since the
+    previous evening summary? `created_at` — when the row was *logged*, not
+    `occurred_on` — is the right column, so recording a back-dated expense this
+    morning still counts as activity. Reads `active_transactions`, so a row the
+    user logged and then undid doesn't keep the nudge suppressed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM active_transactions"
+            " WHERE user_id = %s AND created_at >= %s LIMIT 1",
+            (user_id, since),
+        )
+        return cur.fetchone() is not None
+
+
+def log_reminder(conn: psycopg.Connection, user_id: int, kind: str) -> None:
+    """Record that a `kind` reminder ('noon' | 'evening' | 'monthly') was sent now (§12).
+
+    Every scheduled job writes one of these per message it sends; the noon nudge
+    reads them (`last_reminder_at`) to find the *actual* last evening summary
+    instant rather than assuming a fixed 21:00. `kind` is checked against the
+    table's CHECK constraint, so a typo is a hard error, not a silent no-op. Does
+    not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reminder_log (user_id, kind) VALUES (%s, %s)",
+            (user_id, kind),
+        )
+
+
+def last_reminder_at(
+    conn: psycopg.Connection, user_id: int, kind: str
+) -> datetime | None:
+    """When `user_id` was last sent a `kind` reminder, or `None` if never (§12).
+
+    The noon nudge's suppression boundary: the actual instant of the previous
+    evening summary. Reading it here means a missed or delayed summary shifts the
+    window to when the summary really went out, not the nominal 21:00 — the caller
+    falls back to that nominal boundary only when there is no logged summary yet.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sent_at FROM reminder_log"
+            " WHERE user_id = %s AND kind = %s"
+            " ORDER BY sent_at DESC LIMIT 1",
+            (user_id, kind),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
 
 
 def cancel_pending(

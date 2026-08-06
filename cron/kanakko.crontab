@@ -1,0 +1,20 @@
+# Kanakko reminder jobs — installed to /etc/cron.d/kanakko, read by the `cron`
+# daemon in the sidecar. DECISIONS §12 (the three jobs) and §10 (Asia/Kolkata).
+#
+# Times are Asia/Kolkata: the cron service sets TZ=Asia/Kolkata
+# (docker-compose.yml) and tzdata is in the image, so the daemon reads these
+# wall-clock times as IST. With TZ unset or unresolved they would fire in UTC —
+# 5.5 hours early — with nothing logged about it (see tests/test_compose.py).
+#
+# cron strips the environment, so each line sources /app/cron.env (written from
+# the container env by cron/entrypoint.sh) to get DATABASE_URL and
+# TELEGRAM_BOT_TOKEN. Output goes to PID 1 (cron)'s stdout so each job's one log
+# line — its only evidence of having run — reaches the container log.
+#
+# /etc/cron.d format carries a user field (root) between schedule and command;
+# omit it and cron logs an error and ignores the whole file.
+
+# m  h dom mon dow  user  command
+0 12 * * *  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.noon    > /proc/1/fd/1 2>&1
+0 21 * * *  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.evening > /proc/1/fd/1 2>&1
+0 9 1 * *   root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.monthly > /proc/1/fd/1 2>&1

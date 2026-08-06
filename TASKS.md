@@ -24,7 +24,10 @@ the plan's order and it matters.
 - [x] Add a migration runner that applies `migrations/*.sql` in order and records which have run — while doing it, actually attempt to execute `001_init.sql` against Postgres (`psql -f`, or `docker compose up db`) and record the command and its real output; that DDL has never been parsed by a server (`REVIEWS.md` finding 5 on `4b92212`)
 - [x] Add `docker-compose.yml` with `web`, `db` (postgres), and `cron` services; `cron` uses the same image with a cron command and `TZ=Asia/Kolkata`
 - [x] Add `.env.example` with every required key and empty values — carry the `POSTGRES_PASSWORD` constraint from `REVIEWS.md` finding 2 on `4341744` onto the key itself: it is interpolated into `DATABASE_URL` unencoded, so `[A-Za-z0-9._~-]` only
-- [ ] `[human]` Create the Dokploy project, deploy, attach domain, verify `/healthz` over HTTPS — see `docs/DEPLOYMENT.md`
+- [ ] `[human]` Create a GitHub PAT with `read:packages` for Dokploy to pull the private GHCR image
+- [ ] `[human]` Create the `Kanakko` project on doc-panel with three resources: `kanakko-db` (Postgres), `kanakko-web` and `kanakko-cron` (Applications, Docker provider) — see `docs/DEPLOYMENT.md` → Topology
+- [ ] `[human]` Set `DOKPLOY_DEPLOY_WEBHOOK` as a repo secret from the `kanakko-web` service UI, and run the deploy workflow
+- [ ] `[human]` Attach the domain to `kanakko-web` and verify `/healthz` returns 200 over HTTPS
 
 ## Phase 1 — The core loop
 
@@ -72,7 +75,7 @@ the plan's order and it matters.
 
 ## Phase 5 — Backups and hardening
 
-- [ ] `[human]` Create the Dokploy backup for the compose Postgres, **including the `metadata` field** — see `docs/DEPLOYMENT.md`
+- [ ] `[human]` Create the Dokploy backup for `kanakko-db` (`backupType: "database"` — the managed resource, so no `metadata` field needed) — see `docs/DEPLOYMENT.md`
 - [ ] `[human]` Trigger a manual backup, restore it into a scratch database, verify the row count
 - [ ] `[human]` Confirm every secret lives in Dokploy env and none is in the repo
 

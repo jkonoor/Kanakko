@@ -1,0 +1,89 @@
+# Build the image on GitHub, push it to GHCR, then poke Dokploy to pull it.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # first deploy runs from a branch, before main has the code
+
+# Never let two deploys overlap; a half-pulled image is worse than a slow one.
+# Deliberately not cancel-in-progress — cancelling mid-deploy leaves Dokploy
+# recreating containers with no one watching.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/kanakko
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  build-and-push:
+    needs: test                       # a red test never becomes an image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write                 # lets GITHUB_TOKEN push to GHCR — no PAT needed here
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only :latest, re-pushed in place, plus :buildcache — the "simpler
+      # alternative that needs no cleanup job" from the DevOps repo's
+      # gitea/workflows.md. Nothing tagged accumulates, so there is no prune
+      # job to fail. Adding per-build tags means adding cleanup with them.
+      #
+      # provenance/sbom off: build-push-action attaches attestations by
+      # default, which pushes an OCI image *index* rather than a plain
+      # manifest. Belt-and-braces on GHCR (it resolves indexes fine), but it
+      # keeps the artifact a single manifest that any puller can handle.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:latest
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+          provenance: false
+          sbom: false
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      # The webhook URL is per-service and comes from the Dokploy UI. Until
+      # it's set the image still ships — the deploy is simply skipped with a
+      # warning rather than failing a build that otherwise succeeded.
+      - name: Trigger Dokploy redeploy
+        env:
+          WEBHOOK: ${{ secrets.DOKPLOY_DEPLOY_WEBHOOK }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning::DOKPLOY_DEPLOY_WEBHOOK is not set — image pushed, deploy not triggered."
+            exit 0
+          fi
+          # Print the status code. A silent pass here is how the saron-erp CD
+          # hid a runner-DNS failure behind a 000 for a while.
+          code="$(curl -sS -X POST -o /dev/stderr -w '%{http_code}' "$WEBHOOK")"
+          echo "Dokploy webhook returned HTTP $code"
+          case "$code" in
+            200|201|204) ;;
+            000) echo "::error::No HTTP response — DNS or egress failure reaching Dokploy."; exit 1 ;;
+            *)   echo "::error::Dokploy rejected the deploy trigger."; exit 1 ;;
+          esac

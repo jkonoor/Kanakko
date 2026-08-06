@@ -32,28 +32,78 @@ Existing projects on this instance (do not disturb): `Innogenio`,
 `fixed-asset`, `shared-mariadb`, `vpn`, `CineApp`, `N8N`, `ace`, `insurance`.
 Kanakko gets its own project.
 
-## Deploy sequence
+## Topology
 
-Dokploy is driven entirely over REST. The working order:
+**Not a compose stack.** Three Dokploy resources in one `Kanakko` project:
 
-1. `project.create` — a `Kanakko` project
-2. `compose.create` — **`sourceType: "raw"`** with the compose file inline,
-   `composeType: "docker-compose"`
-3. `compose.saveEnvironment` — bot token, OpenRouter key, DB credentials
-4. `domain.create` — hostname + Let's Encrypt
-5. `compose.deploy`
+| Resource | Kind | Notes |
+|---|---|---|
+| `kanakko-db` | Dokploy **Postgres** service | Managed by Dokploy, so backups are native (see below) |
+| `kanakko-web` | **Application**, Docker provider | `ghcr.io/jkonoor/kanakko:latest`, runs uvicorn. Holds the domain |
+| `kanakko-cron` | **Application**, Docker provider | Same image, command `cron -f`, `TZ=Asia/Kolkata` |
 
-### Gotchas, all learned the hard way upstream
+`docker-compose.yml` in the repo root stays as the **local development** stack
+(`docker compose up --build`). It is no longer what gets deployed — keep the two
+in step by hand when services or environment keys change.
 
-- **`sourceType` defaults to a git provider.** Omitting `sourceType: "raw"`
-  fails at deploy time with `Github Provider not found`, not at create time.
-- **`compose.deployTemplate` is broken on this Dokploy image** — it 500s with
-  `Template files not found`. Deploy manually via the sequence above.
+Why separate services rather than the compose file: this instance has **no
+GitHub git provider** (`github.githubProviders` returns `[]`; the only provider
+is Gitea), so Dokploy cannot clone this repo to run `build: .`. Images are built
+in GitHub Actions instead and pulled from GHCR. That also makes the database a
+Dokploy-managed resource, which removes the compose-backup gotcha entirely.
+
+### Registry credentials are per service
+
+Each Application's **Provider → Docker** tab takes the image, registry URL,
+username, and password directly. A private GHCR package therefore needs no
+entry in Dokploy's global registry list:
+
+| Field | Value |
+|---|---|
+| Docker Image | `ghcr.io/jkonoor/kanakko:latest` |
+| Registry URL | `ghcr.io` |
+| Username | `jkonoor` |
+| Password | A GitHub PAT with **`read:packages`** — pull only, no write |
+
+The three global registry entries on this instance (`ghcr.io` as
+`ronyantony-ig`, `ghcr.io` as `ronyantony00`, `git.innogenio.com` as `ci-bot`)
+belong to other work and are not used here.
+
+## CI/CD
+
+`.github/workflows/deploy.yml`, modelled on the `saron-erp` builder pattern in
+the DevOps repo:
+
+```
+push to main ─▶ test (uv run pytest)
+                 └─▶ build ─▶ ghcr.io/jkonoor/kanakko:latest (+ :buildcache)
+                       └─▶ POST $DOKPLOY_DEPLOY_WEBHOOK
+                             └─▶ Dokploy pulls the image and redeploys
+```
+
+- Pushing to GHCR uses the workflow's own `GITHUB_TOKEN` with
+  `packages: write` — **no PAT needed for the push.** The PAT above is only for
+  Dokploy to *pull*.
+- Only `:latest` (re-pushed in place) and `:buildcache` are pushed, so nothing
+  accumulates and there is no cleanup job to fail — the "simpler alternative"
+  in the DevOps repo's `gitea/workflows.md`. Adding per-build tags means adding
+  a prune job with them.
+- Repo secret **`DOKPLOY_DEPLOY_WEBHOOK`** — copy the URL from the
+  `kanakko-web` service's UI. Until it is set the workflow still builds and
+  pushes, and warns instead of deploying.
+- The deploy step prints the HTTP status and **fails on `000`**. A silent pass
+  there is how the `saron-erp` CD hid a runner-DNS failure for a while.
+
+### Gotchas
+
 - **`appName` gets a random suffix.** Container names are
-  `<appName>-<suffix>-<service>-N`, not `<appName>-<service>-N`. Don't
-  hardcode container names anywhere.
+  `<appName>-<suffix>-…`. Don't hardcode container names anywhere.
 - **Every redeploy returns 502/503 for ~30–60 seconds** while containers
   recreate. This is normal. Wait for a 200 before concluding a deploy failed.
+- **`compose.deployTemplate` is broken on this Dokploy image** (500s with
+  `Template files not found`) — irrelevant now, but don't reach for it later.
+- **`sourceType` defaults to a git provider** on `compose.create`. Only matters
+  if something is ever deployed here as a raw compose file.
 
 ## Scheduling — Dokploy will not do this for you
 
@@ -86,20 +136,22 @@ destination — confirm with the DevOps team which is appropriate.
 > destination exists. The two docs disagree; treat neither as authoritative
 > until reconciled.
 
-### The gotcha that silently breaks a compose-embedded DB backup
+### The compose-backup gotcha no longer applies — keep it in mind anyway
 
-Kanakko's Postgres runs *inside* the compose stack, so the backup is
-`backupType: "compose"` — and Dokploy then has no credential record to read
-from. It expects credentials in a `metadata` field:
+Because `kanakko-db` is a **Dokploy-managed Postgres resource** rather than a
+container inside a compose stack, its backup is `backupType: "database"` and
+Dokploy already holds the credentials. The `metadata` trap below is therefore
+**avoided by the topology**, which is a real argument for it:
 
-```json
-{"metadata": {"postgres": {"databaseUser": "kanakko"}}}
-```
+> For `backupType: "compose"`, Dokploy has no credential record and expects
+> `{"metadata": {"postgres": {"databaseUser": "…"}}}`. Without it,
+> `generateBackupCommand` returns `null`, the run shells out to the literal
+> string `null` (`/bin/bash: line 15: null: command not found`), the API
+> returns a bare 400, and the real reason appears *only in the deployment log*.
+> This has bitten this team before.
 
-**Without `metadata`, `generateBackupCommand` returns `null` and the backup run
-shells out to the literal string `null`** — `/bin/bash: line 15: null: command
-not found`. The API returns a bare 400 and the real reason appears *only in the
-deployment log*. This has bitten this team before.
+If the stack is ever collapsed back into a single compose deployment, that trap
+returns.
 
 Also: **`backup.update` requires the full field set on every call.** A partial
 payload is rejected by Zod with "expected string, received undefined" for each

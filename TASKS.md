@@ -38,7 +38,13 @@ the plan's order and it matters.
 - [x] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
 - [x] Add Pydantic validation of the parse result plus exactly one retry on schema failure
 - [x] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
-- [ ] Add the Telegram webhook endpoint and update dispatch
+- [x] Add the Telegram webhook endpoint and update dispatch
+- [ ] Verify the webhook's origin — `docs/DECISIONS.md` decides user-facing auth
+      (§1 "no auth", §13 Mini App `initData`) but is silent on the webhook itself.
+      `/webhook` is public, so once handlers write rows a forged update forges a
+      transaction. Telegram's `secret_token` → `X-Telegram-Bot-Api-Secret-Token`
+      header is the fix, but it needs a new env key + a spec line. Decide it in
+      DECISIONS before wiring, then guard that a wrong/absent secret is rejected.
 - [ ] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
 - [ ] Handle Confirm — write to `transactions`, clear the pending row
 - [ ] Handle Cancel — discard the pending row, acknowledge

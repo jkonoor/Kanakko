@@ -12,6 +12,100 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `b9acac9` — add `/undo`: soft-delete the last confirmed transaction (§5, §6, task 79)
+
+**Status: ⚠️ CHANGES REQUESTED** — one open finding on the money path: a
+redelivered `/undo` update soft-deletes a *second* real transaction, silently
+dropping it from the user's totals. The rest of the commit is correct and its
+guards genuinely guard.
+
+**Scope:** New `db.undo_last` sets `deleted_at` on the user's newest live row
+(chosen from `active_transactions`, scoped by `user_id`) and returns its fields;
+`app.handle_undo` replies naming what was removed or "Nothing to undo."; the
+webhook intercepts `/undo` (and `/undo@bot`) before `handle_text` so it never
+reaches the parser. +7 tests, TASKS.md tick.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — read the full diff. `undo_last` (`kanakko/db.py:146-181`)
+  SELECTs from `active_transactions` (§6), scopes by `user_id` (§1), orders
+  `created_at DESC, txn_id DESC` (correct: "most recent *confirmed*" = insert
+  time, not `occurred_on`), and UPDATEs the base `transactions` table to set
+  `deleted_at = now()` — a single atomic statement. Amount comes back as a
+  `NUMERIC` → `Decimal` and reaches `format_amount` unchanged; no float on the
+  path (§9). `format_amount` (`kanakko/money.py:61-63`) additionally rejects a
+  float/bool with `TypeError`, so a leak would raise, not round silently.
+- `uv run pytest -q` → **99 passed, 1 warning** (matches the commit's claim; the
+  warning is the pre-existing Starlette/httpx testclient deprecation, unrelated).
+- **Reverted the view guard** — changed `active_transactions` → `transactions`
+  in `undo_last` and ran the undo tests: `test_undo_walks_back_through_history`
+  **FAILED** (`AssertionError: Decimal('250.00') == Decimal('100.00')` — the
+  second `/undo` re-latched onto the already-deleted newest row instead of
+  walking back). Restored. The guard fails for the reason it exists.
+- **Reverted the scope guard** — dropped `WHERE user_id = %s` (and its param, to
+  keep the SQL valid) and ran `test_undo_is_scoped_to_the_user`: **FAILED**
+  (`AssertionError: Decimal('999.99') == Decimal('100.00')` — user A's `/undo`
+  removed user B's newer ₹999.99 row). Restored. Genuine §1 guard.
+- Traced routing: `_is_undo` (`app.py:150-153`) splits `text`, strips an
+  `@bot` suffix, lowercases — `/undo`, `/undo@KanakkoBot`, `/UNDO` all route to
+  `handle_undo`; ordinary text falls through to `handle_text`. `dispatch`
+  guarantees `text` is a `str`, so no `None` crash. Webhook wiring at
+  `app.py:264-268`. `test_webhook_routes_undo_to_handle_undo_not_handle_text`
+  covers all three cases.
+- `git status --short` → clean after all reverts; no residue from the
+  experiments.
+
+**Findings:**
+
+1. **(Medium — money path, silent) A redelivered `/undo` update removes a second
+   real transaction.** `kanakko/app.py:264-268`, `kanakko/db.py:146-181`.
+
+   Telegram redelivers any update it did not get a 2xx for (documented at
+   `app.py:247` and in `confirm_pending`'s docstring). Every *other* money-path
+   handler is idempotent against this: `confirm_pending` / `cancel_pending`
+   operate on a specific pending row keyed by `message_id`, so once that row is
+   consumed a redelivered tap is a no-op (returns `None`). `undo_last` has no
+   such anchor — it deletes "the newest live row", so each redelivery removes one
+   *more* row.
+
+   Scenario: user confirms ₹250 (food) and ₹100 (transport), then sends `/undo`.
+   The handler soft-deletes ₹100 and calls `send_message` (an outbound HTTP call
+   to Telegram) — if that call is slow and the webhook doesn't return 200 in
+   time, Telegram redelivers the same `/undo`, the handler runs again and
+   soft-deletes ₹250 too. The user asked to undo one entry; two are gone. Because
+   there is no user-facing un-undo, the extra row stays out of every total until
+   someone edits the DB — a monthly total quietly short by ₹250, exactly the
+   "total quietly off by a day's transactions" class this project treats as the
+   expensive kind. Soft delete makes it recoverable in principle but not by the
+   user.
+
+   No test would catch this: the routing test stubs `handle_undo`, and no test
+   drives two `undo_last` calls for one logical `/undo`. This is the first
+   money-mutating handler keyed on "the newest row" rather than a specific
+   message id, so it is the first one where redelivery deletes instead of
+   no-ops.
+
+   Suggested fix (design call for the implementer, not made here): dedup updates
+   at the webhook by Telegram `update_id` before dispatching (a general fix that
+   also hardens `handle_text`), or make `/undo` idempotent per source message —
+   e.g. anchor the undo to the triggering message so a redelivery of the *same*
+   `/undo` is a no-op rather than "delete the next one". Whichever, add a guard
+   that reddens when two deliveries of one `/undo` delete two rows.
+
+**Not findings (checked, deliberately not flagged):**
+
+- Send-before-commit (`send_message` runs inside `handle_undo`, the commit is on
+  `with connect()` exit) is the codebase-wide pattern — `handle_confirm` /
+  `handle_cancel` also ack before commit. Pre-existing, out of scope for this
+  commit.
+- `get_or_create_user` creating a row for a fresh user who types `/undo` with no
+  transactions is harmless and matches `handle_text`.
+- Reads go through `active_transactions`; the UPDATE correctly targets the base
+  `transactions` table (a view can't own the soft-delete write). Consistent with
+  §6.
+
+---
+
 ## 2026-08-06 — `00561e9` — swallow "message is not modified" 400 in edit_message_text (§5, review 9a25c4f)
 
 **Status: ✅ DONE** — no blocking issues. The fix root-causes the redelivery

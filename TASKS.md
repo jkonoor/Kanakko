@@ -61,11 +61,13 @@ the plan's order and it matters.
       the *sent card's* message id. Standalone + tested without network
       (`tests/test_webhook.py`, `tests/test_db.py`); not yet wired into `/webhook`.
       Null-category cards still render `Category: None` — that branch is task 66.
-- [ ] Handle Confirm — wire it up in `app.py`: route `TextMessage` in `/webhook`
+- [x] Handle Confirm — wire it up in `app.py`: route `TextMessage` in `/webhook`
       to `handle_text`, and add the `ButtonPress(data=CONFIRM)` handler — call
       `db.confirm_pending`, then acknowledge over Telegram with `kanakko/tg.py`.
       The message handler and send client both exist now (tasks above); this task
       opens the DB connection, commits, and connects the pieces in the endpoint.
+      A handler exception is left to 500 so Telegram redelivers a transiently
+      failed transaction; only CONFIRM routes here — Cancel is the next task.
 - [ ] Handle Cancel — discard the pending row, acknowledge
 - [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing
 - [ ] Show category buttons instead of the confirm card when `category` came back null

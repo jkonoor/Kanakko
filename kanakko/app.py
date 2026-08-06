@@ -1,7 +1,6 @@
 """FastAPI app: webhook and Mini App routes."""
 
 import hmac
-import logging
 import os
 from dataclasses import dataclass
 
@@ -9,13 +8,12 @@ import psycopg
 from fastapi import FastAPI, HTTPException, Request
 
 from kanakko import __version__
-from kanakko.confirm import confirm_card
-from kanakko.db import get_or_create_user, save_pending
+from kanakko.confirm import CONFIRM, confirm_card
+from kanakko.db import confirm_pending, connect, get_or_create_user, save_pending
 from kanakko.parse import parse_message
-from kanakko.tg import send_message
+from kanakko.tg import answer_callback_query, send_message
 
 app = FastAPI(title="Kanakko", version=__version__)
-log = logging.getLogger(__name__)
 
 WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 
@@ -113,6 +111,24 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int:
     return save_pending(conn, user_id, card_message_id, txn)
 
 
+def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
+    """Confirm the pending transaction the Confirm tap carries, then acknowledge (§4).
+
+    The tap carries the confirm card's message id; `confirm_pending` scopes the
+    write to this user (§1) so one user's Confirm can't latch onto another's
+    identically-numbered card. It returns `None` on a redelivered tap (the row
+    is already stored) — either way we answer the callback query so Telegram
+    clears the spinner. Does not commit — the caller owns the transaction.
+    Returns the new `txn_id`, or `None` when there was nothing to confirm.
+    """
+    user_id = get_or_create_user(conn, press.chat_id)
+    txn_id = confirm_pending(conn, user_id, press.message_id)
+    answer_callback_query(
+        press.callback_query_id, "Saved ✅" if txn_id else "Already saved"
+    )
+    return txn_id
+
+
 @app.post("/webhook")
 async def webhook(request: Request) -> dict[str, bool]:
     """Receive a Telegram update and route it (§14).
@@ -132,8 +148,13 @@ async def webhook(request: Request) -> dict[str, bool]:
         return {"ok": True}
 
     action = dispatch(update if isinstance(update, dict) else {})
-    if action is not None:
-        # ponytail: handling (parse→confirm card, Confirm/Cancel, category
-        # buttons) is tasks 42–46; this endpoint receives and routes only.
-        log.info("dispatched %s", type(action).__name__)
+    # One connection per handled update, committed on block exit; a redelivered
+    # or ignored update opens nothing. Confirm is idempotent (confirm_pending
+    # returns None on redelivery), so answering 200 after the commit is safe.
+    if isinstance(action, TextMessage):
+        with connect() as conn:
+            handle_text(conn, action)
+    elif isinstance(action, ButtonPress) and action.data == CONFIRM:
+        with connect() as conn:
+            handle_confirm(conn, action)
     return {"ok": True}

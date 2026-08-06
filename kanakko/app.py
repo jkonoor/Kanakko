@@ -1,14 +1,33 @@
 """FastAPI app: webhook and Mini App routes."""
 
+import hmac
 import logging
+import os
 from dataclasses import dataclass
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 
 from kanakko import __version__
 
 app = FastAPI(title="Kanakko", version=__version__)
 log = logging.getLogger(__name__)
+
+WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+
+
+def _origin_is_verified(request: Request) -> bool:
+    """The request carries Telegram's registered `secret_token` (§15).
+
+    Fails closed: an unset `TELEGRAM_WEBHOOK_SECRET` rejects *every* request, so
+    a missing secret can never silently mean "accept everything" — the exact
+    failure that looks fine in dev and ships an open endpoint. Compared with
+    `hmac.compare_digest`, not `==`.
+    """
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET") or ""
+    if not secret:
+        return False
+    presented = request.headers.get(WEBHOOK_SECRET_HEADER) or ""
+    return hmac.compare_digest(presented, secret)
 
 
 @app.get("/healthz")
@@ -72,8 +91,13 @@ async def webhook(request: Request) -> dict[str, bool]:
 
     Telegram redelivers any update it did not get a 2xx for, so this answers
     200 to *everything* — a malformed body or an update we ignore must not
-    become a growing retry loop.
+    become a growing retry loop. But first the origin is verified (§15): a
+    request without Telegram's `secret_token` gets a 403 and its body is never
+    read, so a forged POST cannot reach `dispatch`.
     """
+    if not _origin_is_verified(request):
+        raise HTTPException(status_code=403)
+
     try:
         update = await request.json()
     except Exception:

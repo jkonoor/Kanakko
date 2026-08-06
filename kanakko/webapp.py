@@ -292,14 +292,24 @@ SHELL_HTML = """<!doctype html>
 <title>Kanakko</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+/* Follow Telegram's theme: it injects --tg-theme-* CSS vars, so binding the
+   background and text to them makes the page dark in a dark theme and light in
+   a light one. Without this the body keeps the browser default (black on white)
+   and shows as a glaring white panel inside Telegram's dark chrome. Fallbacks
+   are the light-theme values for a plain-browser open. */
+body {
+  font-family: system-ui, sans-serif; margin: 0; padding: 16px;
+  background: var(--tg-theme-bg-color, #fff);
+  color: var(--tg-theme-text-color, #000);
+}
+.label, .txn-note { color: var(--tg-theme-hint-color, #707579); }
 .stat, .cat-head { display: flex; justify-content: space-between; }
 .cat { margin: 8px 0; }
 .bar { background: rgba(128,128,128,.2); border-radius: 4px; height: 8px; overflow: hidden; }
 .fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; }
 .txn { display: flex; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .txn-main { display: flex; justify-content: space-between; flex: 1; min-width: 0; }
-.txn-note { flex-basis: 100%; opacity: .7; font-size: .9em; }
+.txn-note { flex-basis: 100%; font-size: .9em; }
 .del { margin-left: 8px; border: none; background: none; cursor: pointer; color: inherit; }
 .cat-select { background: none; border: none; color: inherit; font: inherit; cursor: pointer; }
 </style>

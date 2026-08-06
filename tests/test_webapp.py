@@ -332,6 +332,21 @@ def test_shell_serves_the_bootstrap_without_a_secret():
     assert TOKEN not in resp.text
 
 
+def test_shell_body_follows_the_telegram_theme():
+    """The page binds its background and text to Telegram's theme vars (§13, task 102).
+
+    Telegram injects `--tg-theme-*` CSS variables; binding the body to them is the
+    only mechanism that makes the dashboard dark in a dark theme. Without it the
+    body keeps the browser default (black on white) and renders as a glaring white
+    panel inside Telegram's dark chrome — the exact bug this task fixes. Assert the
+    binding is present (the mechanism), not a rendered pixel colour a headless test
+    can't observe.
+    """
+    css = client.get("/app").text
+    assert "var(--tg-theme-bg-color" in css  # page background follows the theme
+    assert "var(--tg-theme-text-color" in css  # text colour follows the theme
+
+
 # --- Recent-transactions list + per-row soft delete (§13, task 100) ---
 
 

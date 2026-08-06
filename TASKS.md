@@ -122,7 +122,7 @@ the plan's order and it matters.
 - [x] Add per-row category change from the dashboard — same two constraints as the
       task above if they haven't landed yet; category itself is a closed set from
       `categories.py`, so the escaping risk here is the note, not the category
-- [ ] Make the dashboard render correctly in both light and dark themes
+- [x] Make the dashboard render correctly in both light and dark themes
 - [ ] `[human]` Register the Mini App menu button with BotFather
 
 ## Phase 5 — Backups and hardening

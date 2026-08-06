@@ -12,6 +12,78 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `b21aa45` — inject current `Asia/Kolkata` date into the parse prompt (§10)
+
+**Scope:** `build_request` now prepends today's `Asia/Kolkata` date to the
+system prompt, `today()` reads that date from `zoneinfo` (§10's "one function"
+provision), `today_str` is injectable for tests; `tests/test_parse.py` gains two
+guards; `TASKS.md` line 38 ticked. `git show --stat HEAD` confirms exactly those
+three files (+47/-5). Judged against `docs/DECISIONS.md` §10 (current
+`Asia/Kolkata` date injected into **every** LLM prompt; timezone read through one
+function for the multi-user path) and the CLAUDE.md guard conventions.
+
+**Status: ⚠️ CHANGES REQUESTED** — the shipped code is correct and matches §10,
+but one of the two new guards asserts a surface form (date *format*) while
+claiming to verify the behaviour that actually matters (the zone is
+`Asia/Kolkata`, not UTC). It stays green when the zone is broken. Per this
+repo's own rule — "a guard that reports safety it doesn't provide is worse than
+no guard" — that is an open finding.
+
+### What I checked (and what it returned)
+
+- **Whole suite green.** `uv run pytest -q` → `44 passed, 1 warning` (the lone
+  warning is the pre-existing Starlette/httpx deprecation, unrelated).
+- **Spec fit (§10).** The date reaches the system message verbatim, ahead of the
+  user message; wording tells the model to resolve "yesterday"/"last Friday"
+  against it. `today()` uses `ZoneInfo("Asia/Kolkata")` via stdlib `zoneinfo` —
+  no new dependency, no naive datetime. The single `today()` function satisfies
+  §10's "read the timezone through one function … later returns a per-user
+  column" provision. Matches §10.
+- **No money/`float`/`active_transactions`/SQL surface touched** by this diff —
+  nothing to check there.
+- **Guard #1 revert-verified.** Replacing the injected `system` with bare
+  `_SYSTEM_PROMPT` → `test_current_kolkata_date_is_injected_into_the_prompt`
+  and `test_today_reads_the_kolkata_clock` both **FAIL**
+  (`2 failed, 4 passed`). So the "date reaches the prompt" behaviour is genuinely
+  guarded.
+- **Guard #2 defeat test — it does NOT guard its stated purpose.** I mutated
+  `KOLKATA = ZoneInfo("Asia/Kolkata")` → `ZoneInfo("UTC")` and reran
+  `tests/test_parse.py` → **`6 passed`**, all green. The zone is broken and every
+  guard stays green.
+
+### Findings
+
+**1 — LOW — `tests/test_parse.py:60-63` `test_today_reads_the_kolkata_clock`
+does not verify Kolkata; its docstring overclaims.**
+
+The test's comment says today() "must be a real Kolkata date, not a naive UTC
+one," but the assertions are `re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())` plus
+`today() in _system_content(build_request("x"))`. The regex passes for *any*
+zone's date, and the second assertion is satisfied because both sides call the
+same `today()` — it can never disagree with itself. **Failure scenario:** a
+future edit sets `KOLKATA = ZoneInfo("UTC")` (or someone writes
+`datetime.now().strftime(...)` with no tz). Between 18:30–24:00 UTC that yields
+*yesterday's* IST date, so every "yesterday"/"today" the model resolves near IST
+midnight is silently off by a day — exactly the §10 failure. This guard stays
+green through all of it (verified above: UTC mutation → `6 passed`). The
+production code is correct **today**; the risk is that the test advertises
+protection it doesn't provide, so the next person trusts it.
+
+**Suggested fix:** pin an instant that differs across the two zones and assert
+the IST answer. e.g. monkeypatch `parse.datetime` (or inject a clock) to
+`2026-08-06 20:00:00+00:00` — UTC date `2026-08-06`, IST date `2026-08-07` — and
+assert `today() == "2026-08-07"`. That reddens the moment the zone is wrong.
+Keep the existing format/injection assertions.
+
+### Not findings
+
+- Absence of Pydantic validation + retry (task 39) and the nullable-category
+  refinement (task 40) — both boxes still unchecked, out of scope.
+- `today_str` injectability is a test seam, not dead flexibility — it's the
+  §10 "one function" seam and how guard #1 stays deterministic.
+
+---
+
 ## 2026-08-06 — `262fc0d` — add `kanakko/parse.py` (OpenRouter call + schema)
 
 **Scope:** New `kanakko/parse.py` (parse schema, request body, thin httpx call)

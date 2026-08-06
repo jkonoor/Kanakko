@@ -31,8 +31,8 @@ case "${1:-}" in
 esac
 MAX="${1:-10}"
 
-DEV_MODEL="${RALPH_DEV_MODEL:-opus}"
-QA_MODEL="${RALPH_QA_MODEL:-opus}"
+DEV_MODEL="${RALPH_DEV_MODEL:-claude-opus-4-8}"
+QA_MODEL="${RALPH_QA_MODEL:-claude-opus-4-8}"
 
 # Least privilege. The loop runs unattended, so anything not listed here stalls
 # rather than prompting. Widen it deliberately when a task genuinely needs

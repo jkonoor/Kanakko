@@ -20,6 +20,7 @@ from kanakko.app import app
 from kanakko.migrate import migrate
 from kanakko.jobs.evening import IST
 from kanakko.webapp import (
+    SHELL_HTML,
     InitDataError,
     category_bars,
     current_month_ist,
@@ -609,3 +610,33 @@ def test_delete_route_rejects_a_stale_init_data(conn, monkeypatch):
     )
     conn.rollback()
     assert resp.status_code == 401
+
+
+def test_txn_row_places_note_and_delete():
+    """A transaction row is a grid: note on its own row, delete pinned to row 1 (§13).
+
+    What this catches, and what it can't. The original CSS made `.txn` a wrapping
+    flex row with `.txn-note` at `flex-basis:100%`; because `.del` is a sibling
+    *after* the note, it was pushed onto a third line and the row's text collided
+    with itself — every row carrying a note was unreadable, while the note-less
+    rows looked fine, which is why it survived review. That is a rendered-layout
+    bug: no headless assertion can see it. Verified by rendering the real markup
+    in Chrome at 390px in both themes, before and after.
+
+    So this guard pins the *mechanism* that fixes it — grid placement — rather
+    than claiming to check the appearance. Reverting `.txn` to the wrapping flex
+    layout reddens it. Anything subtler than that still needs eyes on a phone.
+    """
+    def rule(selector: str) -> str:
+        """The body of the rule that *starts* a line with `selector`.
+
+        Anchored to the newline on purpose: `.txn-note` also appears in the shared
+        `.label, .txn-note { color: ... }` rule, and an unanchored search finds
+        that colour declaration instead of the layout one — which is how the first
+        version of this test passed the wrong string and failed against correct CSS.
+        """
+        return SHELL_HTML.split(f"\n{selector} {{", 1)[1].split("}", 1)[0]
+
+    assert "display: grid" in rule(".txn")
+    assert "grid-row: 1" in rule(".del")  # delete button stays on the first row
+    assert "grid-column: 1" in rule(".txn-note")  # note gets a row of its own

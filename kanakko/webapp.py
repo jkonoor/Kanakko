@@ -307,10 +307,15 @@ body {
 .cat { margin: 8px 0; }
 .bar { background: rgba(128,128,128,.2); border-radius: 4px; height: 8px; overflow: hidden; }
 .fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; }
-.txn { display: flex; flex-wrap: wrap; align-items: center; margin: 8px 0; }
-.txn-main { display: flex; justify-content: space-between; flex: 1; min-width: 0; }
-.txn-note { flex-basis: 100%; font-size: .9em; }
-.del { margin-left: 8px; border: none; background: none; cursor: pointer; color: inherit; }
+/* Grid, not wrapping flex: the note needs its own row while the delete button
+   stays on the first one. As sibling flex items with `.txn-note` at
+   flex-basis:100%, `.del` was pushed onto a third line and the rows collided —
+   visible only in a browser, which is why the test can guard just the structure
+   that makes this work (see test_txn_row_places_note_and_delete). */
+.txn { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: center; margin: 8px 0; }
+.txn-main { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.txn-note { grid-column: 1; font-size: .9em; }
+.del { grid-row: 1; grid-column: 2; border: none; background: none; cursor: pointer; color: inherit; }
 .cat-select { background: none; border: none; color: inherit; font: inherit; cursor: pointer; }
 </style>
 </head>

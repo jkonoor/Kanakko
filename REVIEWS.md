@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `55db09f` — wire the three app keys into compose, parse `.env` instead of regexing it
+
+**Scope:** Resolves the two open findings from the `a69544e` review.
+`docker-compose.yml` (+3 keys in `x-app-env`), `tests/test_compose.py` (parser
+`_env_pairs`, `COMPOSE_VARS`, reverse guard), `REVIEWS.md` (marked RESOLVED).
+`git show --stat HEAD` confirms exactly those three files. No application code, no
+migration, no ticked box moved — so money/`Decimal`, `AT TIME ZONE
+'Asia/Kolkata'`, `active_transactions`, and the no-ORM/Celery/Redis decisions have
+no surface here.
+
+**Status: ✅ DONE** — both findings genuinely closed; the guards fail for the
+reasons they exist. One non-blocking note for whoever writes the Phase 2 reader.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Suite green | `uv run pytest -q` | `18 passed, 1 warning in 1.07s` (was 17) |
+| Parser catches all four bypass spellings | `_env_pairs` over `export KEY=…`, indent, spaces-around-`=`, and the shadowed-empty duplicate | all four → `CAUGHT` (the shadow case yields both `('SECRET','realtoken')` and `('SECRET','')`, so the valued line still asserts) |
+| Reverse guard non-vacuous | Removed the three added lines from a copy of compose and recomputed | `unconsumed after revert: ['OPENROUTER_API_KEY','OPENROUTER_MODEL','TELEGRAM_BOT_TOKEN']` — goes red, as claimed |
+| `$$VAR` escape excluded from `COMPOSE_VARS` | `re.findall(r'(?<!\$)\$\{?(\w+)', 'test $$POSTGRES_USER end')` | `[]` — the healthcheck's escaped literal is correctly not counted as a consumer |
+| Both directions balance | `COMPOSE_VARS` vs `ENV_KEYS` | identical set of six; `web` and `cron` both inherit `*app-env`, so all three new keys reach a container |
+
+### Findings from the prior review — both closed
+
+1. **Three keys wired.** `x-app-env` now carries `TELEGRAM_BOT_TOKEN` and
+   `OPENROUTER_API_KEY` as `:?see .env.example` (a missing one stops `up`) and
+   `OPENROUTER_MODEL` as `:-` (`docker-compose.yml:18-21`). Both `web` and `cron`
+   inherit the anchor, so the operator-set keys reach a running container instead
+   of surfacing as a `KeyError` in Phase 1. The new
+   `test_env_example_lists_no_key_no_service_consumes` closes the reverse
+   direction the old suite never checked, and it is non-vacuous (verified above).
+
+2. **`.env` parsed, not regexed.** `_env_pairs()` replaces the anchored
+   `dict(re.findall(...))`; it strips lines, drops an optional `export `, splits
+   on the first `=`, and yields a **list** so a shadowed value still fails. All
+   four bypass spellings from the prior review's table are now caught (verified
+   above). This matches the CLAUDE.md rule "parse structured formats; never regex
+   them."
+
+### Non-blocking note (for the Phase 2 implementer, not this commit)
+
+- **`OPENROUTER_MODEL: "${OPENROUTER_MODEL:-}"` makes the key always present as
+  the empty string** (`docker-compose.yml:21`). Compose interpolation always sets
+  the key; `:-` only substitutes an empty default, it does not leave the variable
+  unset. So inside the container `OPENROUTER_MODEL=""`, never absent. DECISIONS §2
+  says unset ⇒ `claude-opus-5`. A reader written as
+  `os.environ.get("OPENROUTER_MODEL", "claude-opus-5")` would return `""` and the
+  default would never fire — a silent wrong model. The fix belongs in the reader
+  when it lands: `os.environ.get("OPENROUTER_MODEL") or "claude-opus-5"`. Nothing
+  reads it yet (grep found the name only in `.env.example`, `docker-compose.yml`,
+  and the tests), so this is a caveat, not a finding against `55db09f`.
+- **`COMPOSE_VARS` matches `$VAR` inside compose comments too.** A future
+  `.env.example` key mentioned only in a compose *comment* with a `$` prefix would
+  satisfy the reverse guard without any service actually consuming it. No such
+  comment exists today, so the guard is sound now; worth knowing before someone
+  adds a `# uses $FOO` comment. Low severity.
+
+---
+
 ## 2026-08-05 — `a69544e` — `.env.example` with every required key, plus two guards over it
 
 **Scope:** Phase 0 task 6. `.env.example` (new, 27 lines), `tests/test_compose.py`

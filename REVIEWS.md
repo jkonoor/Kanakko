@@ -12,6 +12,87 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `fbd351f` — wire Handle Confirm into `/webhook` (§4, §14, §15, task 64)
+
+**Scope:** Route a dispatched `TextMessage` → `handle_text` and a
+`ButtonPress(data=CONFIRM)` → the new `handle_confirm`, each inside a
+per-update `with connect() as conn:` block; ignored/redelivered/CANCEL updates
+open no connection. `handle_confirm` resolves the user, calls
+`db.confirm_pending`, and answers the callback query.
+
+**Status: ✅ DONE** — no blocking issues. Two low-severity notes below; neither
+changes behaviour or requires a fix before the next task.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (TASKS.md, `kanakko/app.py`,
+  `tests/test_webhook.py`).
+- `uv run pytest -q` → **79 passed, 1 warning** (the pre-existing Starlette
+  `httpx` deprecation). The three new/updated webhook tests are in that count.
+- Read `app.py`, `db.py`, `tg.py`, `confirm.py`, `conftest.py` end to end to
+  trace the real commit/redelivery flow, not just the diff.
+- `uv run python -c "import psycopg; print(psycopg.__version__)"` → **3.3.4**,
+  to confirm the `with connect() as conn:` commit-on-clean-exit contract the
+  webhook depends on. (An empirical two-cluster probe hung on parallel
+  `pg_ctl`; the conftest fixture already exercises the same context-manager
+  contract, so the reliance is sound.)
+- Spec fit: §15 (`app.py:21-33` origin verification unchanged, fails closed,
+  `hmac.compare_digest`), §14 (always-200 on malformed body / ignored update),
+  §1 (`confirm_pending` scopes the write by `user_id`), §4/§6/§9 (money path).
+
+### Guards — do they bite?
+
+- **CONFIRM discrimination** (`test_webhook_routes_confirm_but_not_cancel`):
+  routing a CANCEL to `handle_confirm` would push `confirmed` to 2, and opening
+  a connection for an ignored update would push `opened` past 1 — both asserted,
+  both would fail on regression. Real guard.
+- **Idempotency** (`test_handle_confirm_is_idempotent...`): drives the *real*
+  `confirm_pending` against Postgres twice on the same tap and asserts
+  `count == 1` via `active_transactions` plus acks `["Saved ✅", "Already
+  saved"]`. A double-write would make it 2. Real guard.
+- **Money path** (`test_handle_confirm_writes_the_ledger_row...`): asserts the
+  row reads back as exact `Decimal("100.00")` through `active_transactions`
+  (§6/§9), not `transactions` directly. Real guard.
+
+I confirmed idempotency-plus-500 is correct under both possible psycopg
+transaction semantics: whether `confirm_pending`'s inner `with conn.transaction()`
+commits the money write independently (delivery 1 saves, ack fails → 500 →
+delivery 2 sees no pending → "Already saved") or defers to the outer block
+(delivery 1 rolls back on the ack failure → delivery 2 re-confirms), the net is
+exactly one ledger row. No torn write either way.
+
+### Notes (low severity, non-blocking)
+
+1. **`handle_confirm` docstring says "Does not commit — the caller owns the
+   transaction" (`app.py:121`), but `confirm_pending` commits internally** via
+   its own `with conn.transaction()` on a fresh production connection (the
+   outermost transaction block → BEGIN…COMMIT). The behaviour is correct — and
+   arguably better, since the insert+delete money write is committed atomically,
+   independent of the Telegram ack — but the comment describes a transaction
+   ownership that isn't what actually happens. Doc nit only.
+
+2. **No test exercises the webhook's own commit for `handle_text`.** Both
+   webhook routing tests stub `connect` with `_FakeConn` (whose `__exit__`
+   commits nothing), and the `handle_confirm` DB tests call the handler directly
+   rather than through `/webhook`. So "the pending row is actually persisted by
+   the `with connect()` block" rests on the psycopg3 contract, untested here.
+   If that block ever silently stopped committing (e.g. an autocommit change),
+   the failure would be invisible: the pending row is lost, the user taps
+   Confirm, and `confirm_pending` returns `None` → "Already saved" with nothing
+   saved. Worth one end-to-end webhook test against real Postgres asserting a
+   `pending_transactions` row exists after the POST returns 200. Not blocking —
+   the contract holds at 3.3.4.
+
+Out of scope (correctly deferred, not findings): CANCEL taps get no ack yet
+(task 65, unchecked), and an unparseable message currently raises → 500 →
+Telegram redelivery until the "reject unparseable amount" task lands. Both are
+the next unchecked tasks; missing ≠ wrong.
+
+The TASKS.md tick for task 64 is justified — the endpoint opens the connection,
+routes CONFIRM, commits, and acks, with real-DB tests behind each claim.
+
+---
+
 ## 2026-08-06 — `c6024de` — add `app.handle_text` + `db.get_or_create_user` (§1, §2, §4, task 58 split)
 
 **Scope:** Split the text-message half of the core loop out of Handle Confirm.

@@ -12,6 +12,97 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `9a25c4f` — handle a category button press (§5, task 78)
+
+**Status: ⚠️ CHANGES REQUESTED** — one blocking finding: an ordinary re-tap of
+the already-selected category 500s into a Telegram redelivery loop — the exact
+trap this commit's docstring claims to have closed.
+
+**Scope:** New `db.set_pending_category` re-writes a pending row's category
+(scoped by `user_id`, round-tripped through the `Transaction` model) and returns
+the updated txn; new `app.handle_category` routes a `cat:<name>` tap, edits the
+card in place into a full confirm card, and answers the callback. Unknown/forged
+categories are acked and ignored. `categories.CATEGORY_PREFIX` is now one
+constant emitted by the keyboard and matched by the webhook dispatch.
+
+### What I checked (commands run)
+
+- `git show HEAD` — full diff (categories.py, db.py, app.py, test_db.py +3,
+  test_webhook.py +2 & routing, TASKS.md tick).
+- `uv run pytest -q` → **90 passed, 1 warning** (pre-existing httpx deprecation).
+  Matches the commit's "90 passed (was 85)".
+- **Verified the two claimed guards bite by reverting each:**
+  - Removed the `if category not in ALL_CATEGORIES` guard from `handle_category`
+    → `uv run pytest tests/test_webhook.py -k forged` → **1 failed**
+    (`test_handle_category_ignores_a_forged_unknown_category`). Restored.
+  - Dropped the `user_id = %s` clause from `set_pending_category`'s SELECT →
+    `uv run pytest tests/test_db.py -k scoped_to_the_user` → **2 failed**
+    (`test_set_pending_category_is_scoped_to_the_user` and, as a bonus, the
+    confirm scoping test — the fallback `ORDER BY … DESC` picks the other user's
+    row). Restored. Working tree clean, suite green again (90 passed).
+- **Spec fit against §5.1:** DECISIONS §5 replaces the field editor with, first
+  item, "Category buttons directly on the confirm card." The tap corrects the
+  most-often-wrong field in one press. No conversation state machine introduced.
+- **§9 money invariant:** round-trip is `Transaction.model_validate({**parsed,
+  "category": category})` then `model_dump(mode="json")`; `test_db.py` asserts
+  the stored `amount` is still the string `"250.00"`, not a float. Confirmed.
+- **§11 closed set:** category is re-validated by the model round-trip and by the
+  `ALL_CATEGORIES` guard. No category string literal added outside
+  `categories.py`; the `cat:` prefix is now the single `CATEGORY_PREFIX`
+  constant, emitted by `keyboard()` and matched by the dispatch — no drift.
+- **Dispatch ordering:** `CONFIRM`/`CANCEL` are exact-match branches, category is
+  `startswith(CATEGORY_PREFIX)`; `"confirm"`/`"cancel"` don't start with `"cat:"`,
+  so no collision. Confirmed by reading the four `elif` branches in `webhook`.
+
+### Findings
+
+**1. (blocking) Re-tapping the already-selected category 500s → Telegram
+redelivery loop — `kanakko/app.py:206`, via `kanakko/tg.py:40`.**
+
+`handle_category` unconditionally calls `edit_message_text(...)` with the
+freshly-rendered `confirm_card(txn)`. When the chosen category equals the row's
+current category — which the full confirm card *already displays as a tappable
+button* (§5.1) — the re-render is byte-identical (same text, same keyboard).
+Telegram's `editMessageText` then returns `400 Bad Request: message is not
+modified`. `tg._call` does `response.raise_for_status()` (`tg.py:40`), so that
+400 raises `httpx.HTTPStatusError`, which propagates out of `handle_category`
+and out of the `webhook` coroutine — there is no `try/except` around the
+handler (`app.py:242-244`). FastAPI returns **500**, Telegram never got a 2xx,
+so it **redelivers the same callback**, which 400s again → 500 again → forever.
+
+Failure scenario (inputs → wrong result): a confirm card shows `Category: Food`
+with the category buttons on it (parse returned "Food", or the user just picked
+it). The user taps **Food** again — to re-affirm, or by accident. First tap:
+`set_pending_category` writes Food (unchanged) → `confirm_card` renders
+identical content → `editMessageText` 400 → webhook 500 → Telegram redelivers →
+500 → redelivery loop; the spinner on the button never clears and
+`answer_callback_query` (which runs *after* the edit) is never reached. This is
+precisely "a raise here would make Telegram redeliver the bad tap forever" that
+the docstring says it avoided — the unknown-category branch is guarded, but the
+identical-edit branch is not.
+
+Why the tests didn't catch it: both new webhook tests `monkeypatch` a
+non-raising `edit_message_text`, so they never exercise the 400. A check that
+drives the *real* not-modified condition (or asserts the handler tolerates a
+400 from `edit_message_text`) would fail today and is the missing guard on this
+path.
+
+Suggested fix (root cause, one place): treat "message is not modified" as
+success rather than a 500 — either short-circuit when the category is unchanged
+(skip the edit, still `answer_callback_query`), or catch the specific 400 in
+`handle_category`/`edit_message_text` and fall through to acking the callback.
+Whichever, add a check that reddens if an identical re-render escapes as a 500.
+
+**2. (minor, non-blocking) Cross-type forged category accepted —
+`kanakko/app.py:197`.** The guard checks membership in `ALL_CATEGORIES` (the
+union), not in the categories valid for `txn.type`. A forged `cat:Salary`
+callback on an *expense* card passes and stores an income category on an expense
+row. Only reachable by forging one's own callback_data, and the parse schema
+already uses the union `enum`, so this is consistent with existing behaviour and
+affects only the forger's own data — noting it, not blocking on it.
+
+---
+
 ## 2026-08-06 — `ead8aab` — category buttons directly on the confirm card (§5, task 77)
 
 **Status: ✅ DONE** — no blocking issues.

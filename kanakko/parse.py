@@ -57,7 +57,11 @@ def parse_schema() -> dict:
                 "type": "string",
                 "description": "Numeric amount as a string, e.g. \"500.00\".",
             },
-            "category": {"type": "string", "enum": schema_enum()},
+            # §3: category is nullable — the model returns null when it genuinely
+            # cannot tell, and dispatch shows the buttons. amount is NOT nullable
+            # (no amount → no transaction). Strict mode keeps every key in
+            # `required`; optionality is expressed by the null in the type/enum.
+            "category": {"type": ["string", "null"], "enum": [*schema_enum(), None]},
             "date": {"type": "string", "description": "YYYY-MM-DD"},
             "note": {"type": "string", "description": "The original wording."},
         },
@@ -118,7 +122,7 @@ class Transaction(BaseModel):
 
     type: Literal["expense", "income"]
     amount: Decimal
-    category: str
+    category: str | None  # §3: null when the model cannot tell → show buttons
     date: date
     note: str
 
@@ -135,8 +139,10 @@ class Transaction(BaseModel):
 
     @field_validator("category")
     @classmethod
-    def _category_is_known(cls, value: str) -> str:
-        if value not in ALL_CATEGORIES:
+    def _category_is_known(cls, value: str | None) -> str | None:
+        # §3: null is a valid answer ("can't tell"); a non-null value must still
+        # be one of the closed set so the model can't invent a category (§11).
+        if value is not None and value not in ALL_CATEGORIES:
             raise ValueError(f"unknown category: {value!r}")
         return value
 

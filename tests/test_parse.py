@@ -39,8 +39,13 @@ def test_require_parameters_forces_schema_aware_provider():
 
 
 def test_category_enum_comes_from_categories_module():
-    # The model must not be able to invent a category (§11).
-    assert parse_schema()["properties"]["category"]["enum"] == schema_enum()
+    # The model must not be able to invent a category (§11); null is added by the
+    # schema for §3 nullability, not by categories.py.
+    cat = parse_schema()["properties"]["category"]
+    assert cat["enum"] == [*schema_enum(), None]
+    assert cat["type"] == ["string", "null"]  # §3: category is nullable
+    # amount is NOT nullable — no amount means no transaction (§3).
+    assert parse_schema()["properties"]["amount"]["type"] == "string"
 
 
 def test_amount_is_a_string_not_a_number():
@@ -124,6 +129,15 @@ def test_valid_response_validates_to_typed_transaction(monkeypatch):
     assert isinstance(txn.amount, Decimal)  # §9: never float
     assert txn.category == "Food"
     assert txn.date == date(2026, 8, 6)
+
+
+def test_null_category_validates_without_retry(monkeypatch):
+    # §3: category null is a valid answer ("can't tell" → show buttons), not a
+    # schema failure. It must validate on the first call, no retry.
+    calls = _feed(monkeypatch, {**_GOOD, "category": None})
+    txn = parse_message("paid 500")
+    assert txn.category is None
+    assert len(calls) == 1
 
 
 def test_schema_failure_is_retried_exactly_once(monkeypatch):

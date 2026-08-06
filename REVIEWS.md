@@ -12,6 +12,79 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `e51d214` — Category breakdown as sorted CSS percentage bars (§13, task 98)
+
+**Status: ✅ DONE** — no blocking issues. One low-severity robustness note below.
+
+Scope: `webapp.category_bars` (new); `dashboard_html` gains a `top` param and
+appends the breakdown; `app.mini_app_data` forwards `month_summary`'s
+previously-discarded categories; bar CSS in `SHELL_HTML`; the task-98 tick in
+`TASKS.md`; new tests in `tests/test_webapp.py`.
+
+### What I actually ran
+
+- `uv run pytest -q` → **147 passed, 1 warning** (matches the commit claim; was
+  144). Warning is Starlette's testclient/`httpx` deprecation, unrelated.
+- **Denominator guard, break-and-red (verified myself):** changed the share to
+  `amount / (total * 2) * 100` in `category_bars` (`kanakko/webapp.py:132`) and
+  ran `pytest -k "category or breakdown or dashboard"` → **3 failed**
+  (`test_category_bars_are_sorted_shares_of_month_expenses`,
+  `test_dashboard_html_renders_the_category_breakdown`,
+  `test_dashboard_route_renders_totals_and_current_month`). Matches the commit's
+  "reddens under a wrong denominator (3 tests fail)". Restored; `git status` clean.
+
+### What I checked and found correct
+
+- **Denominator is consistent, shares sum to 100.** `month_summary`
+  (`kanakko/db.py:241`) returns `expenses` and `top` from the *same*
+  `active_transactions` window, same `type='expense'` filter, same IST
+  boundaries — so `sum(top amounts) == month_expenses` exactly and each
+  `amount/total` share is a true fraction. `app.py:103-107` passes that same
+  `month_expenses` as the denominator, not all-time expenses. No day/UTC slip:
+  the boundaries are `current_month_ist`, unchanged by this commit.
+- **No float touches an amount (§9).** `amount` and `total` are `NUMERIC` →
+  `Decimal`; `pct = amount / total * 100` is `Decimal/Decimal`; `format_amount`
+  raises on a `float`. `{pct:.1f}` is a display-only rounding of a `Decimal`.
+- **Reads go through `active_transactions`** — via `month_summary`, so no
+  soft-deleted row re-enters a bar. Unbounded? No — `top` is capped at the fixed
+  `categories.py` set size.
+- **Divide-by-zero / empty month** guarded: `if not categories or total <= 0`
+  returns `""`; `test_category_bars_empty_when_no_expenses` pins both.
+- **No new dependency, no charting library (§13):** bars are a `<div>` with an
+  inline `width` and a few lines of CSS in `SHELL_HTML`. Good.
+- **XSS:** category names go through `html.escape`; amounts via `format_amount`;
+  month label via `strftime`. Nothing user-controlled reaches the markup raw.
+
+### Finding — low severity, non-blocking
+
+**`category_bars` crashes on a NULL category name** — `kanakko/webapp.py:135`.
+`category` is a nullable column (`migrations/001_init.sql:21`) and `null`
+category is a first-class state in the spec (§3). `month_summary`'s `top` query
+`GROUP BY category` (`kanakko/db.py:265-268`) will emit a `(None, amount)` row
+for any uncategorised expense, and `html.escape(None)` raises
+`AttributeError: 'NoneType' object has no attribute 'replace'` — I reproduced it:
+`category_bars([(None, Decimal("100"))], Decimal("100"))` → `AttributeError`.
+That would 500 the whole `/app/data` endpoint, so the dashboard shows only
+"Could not load dashboard.", not merely a missing breakdown section.
+
+Why it is **not** blocking: the write path cannot currently store a confirmed
+null-category expense. `handle_text` routes a null category to
+`category_prompt` (`app.py:196`), whose card carries no Confirm button
+(`confirm.py:55-69`), so a row only becomes confirmable after a category is
+tapped, and `confirm_card` asserts non-null (`confirm.py:36`). So `top` never
+actually contains a `None` today.
+
+It is worth a one-liner anyway because (a) the read side is the *only* place
+that assumes non-null while the rest of the read path already defends it —
+`handle_undo` guards `if removed["category"]` (`app.py:227`); and (b) tasks
+100/101 and the recent-transactions list widen what the dashboard reads, and a
+nullable column plus a first-class `null` state is exactly the kind of invariant
+that later loosens. Suggested fix: `html.escape(name or "Uncategorised")` in the
+loop, and a test that `category_bars([(None, Decimal("100"))], Decimal("100"))`
+renders instead of raising.
+
+---
+
 ## 2026-08-06 — `62f5708` — Mini App dashboard route: totals, balance, current-month figures (§13, task 97)
 
 **Status: ✅ DONE** — no blocking issues.

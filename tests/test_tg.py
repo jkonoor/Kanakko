@@ -93,3 +93,39 @@ def test_http_error_propagates(monkeypatch):
     monkeypatch.setattr(tg.httpx, "post", boom)
     with pytest.raises(httpx.HTTPError):
         tg.send_message(1, "x")
+
+
+class _StatusResponse:
+    """An httpx-like response whose raise_for_status raises HTTPStatusError."""
+
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        raise httpx.HTTPStatusError(
+            "error", request=httpx.Request("POST", "https://x"), response=self
+        )
+
+
+def test_edit_swallows_message_not_modified(monkeypatch):
+    # Re-tapping the already-selected category re-renders identical content;
+    # Telegram answers 400 "message is not modified". That must NOT propagate —
+    # a raise here 500s the webhook and Telegram redelivers the tap forever.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T0KEN")
+    payload = {"ok": False, "error_code": 400, "description": "Bad Request: message is not modified"}
+    monkeypatch.setattr(tg.httpx, "post", lambda url, json, timeout: _StatusResponse(400, payload))
+    assert tg.edit_message_text(1, 2, "same") == payload
+
+
+def test_edit_still_raises_on_other_400(monkeypatch):
+    # A different 400 (a real error) must still propagate — only the no-op edit
+    # is swallowed, not every 400.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T0KEN")
+    payload = {"ok": False, "error_code": 400, "description": "Bad Request: chat not found"}
+    monkeypatch.setattr(tg.httpx, "post", lambda url, json, timeout: _StatusResponse(400, payload))
+    with pytest.raises(httpx.HTTPStatusError):
+        tg.edit_message_text(1, 2, "x")

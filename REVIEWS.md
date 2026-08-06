@@ -14,9 +14,26 @@ returned, not what they were assumed to return.
 
 ## 2026-08-06 — `9a25c4f` — handle a category button press (§5, task 78)
 
-**Status: ⚠️ CHANGES REQUESTED** — one blocking finding: an ordinary re-tap of
-the already-selected category 500s into a Telegram redelivery loop — the exact
-trap this commit's docstring claims to have closed.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+blocking finding: an ordinary re-tap of the already-selected category 500s into
+a Telegram redelivery loop — the exact trap this commit's docstring claims to
+have closed.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-2`. The identical-edit
+> 400 is now swallowed in the shared `tg.edit_message_text`, not just on the
+> category path: an `editMessageText` that Telegram answers with
+> `400 "message is not modified"` is treated as success (the message already
+> reads the way we wanted) and its body returned, instead of `raise_for_status`
+> propagating a 500 that Telegram would answer by redelivering the tap forever.
+> A different 400 (e.g. "chat not found") still propagates. Fixed in the shared
+> send helper so every future editor benefits, not only `handle_category`.
+> Two new guards in `test_tg.py`: `test_edit_swallows_message_not_modified`
+> drives the real not-modified 400 through `edit_message_text` and asserts it
+> returns rather than raises; `test_edit_still_raises_on_other_400` pins that a
+> genuine 400 is not swallowed. Verified the swallow guard earns its place:
+> reverting the try/except to a plain `return _call(...)` reddens
+> `test_edit_swallows_message_not_modified` (the `HTTPStatusError` propagates);
+> restoring greens it. `uv run pytest -q` → `92 passed` (was 90).
 
 **Scope:** New `db.set_pending_category` re-writes a pending row's category
 (scoped by `user_id`, round-tripped through the `Transaction` model) and returns

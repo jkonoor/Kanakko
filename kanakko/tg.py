@@ -65,8 +65,31 @@ def edit_message_text(
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> dict:
-    """Replace the text (and keyboard) of an already-sent message."""
+    """Replace the text (and keyboard) of an already-sent message.
+
+    A re-render identical to what the message already shows (e.g. re-tapping the
+    already-selected category on a confirm card) is a Bot API 400 "message is not
+    modified". The message already reads the way we wanted, so that is success,
+    not an error — swallow it rather than let it raise into a 500 that Telegram
+    would answer by redelivering the same tap forever.
+    """
     payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup.to_dict()
-    return _call("editMessageText", payload)
+    try:
+        return _call("editMessageText", payload)
+    except httpx.HTTPStatusError as exc:
+        if _is_not_modified(exc):
+            return exc.response.json()
+        raise
+
+
+def _is_not_modified(exc: httpx.HTTPStatusError) -> bool:
+    """The edit was a no-op — Bot API 400 "message is not modified"."""
+    if exc.response.status_code != 400:
+        return False
+    try:
+        description = exc.response.json().get("description", "")
+    except ValueError:
+        return False
+    return "message is not modified" in description

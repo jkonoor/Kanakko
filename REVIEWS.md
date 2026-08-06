@@ -12,6 +12,59 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `4402e63` — `/webhook` endpoint + update dispatch (§14, task 41)
+
+**Scope:** `kanakko/app.py` gains `TextMessage`/`ButtonPress` frozen dataclasses,
+a `dispatch()` that classifies a Telegram update into one of those or `None`, and
+a `POST /webhook` that parses the body, routes via `dispatch()`, and returns
+`{"ok": true}` (200) unconditionally. New `tests/test_webhook.py` (6 checks).
+TASKS.md ticks task 41 and adds a webhook-origin-auth task.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **Full suite.** `uv run pytest -q` → **57 passed, 1 warning** (the warning is a
+  pre-existing Starlette/httpx deprecation, unrelated). Matches the commit
+  message's claim of 57.
+- **Webhook tests.** `uv run pytest tests/test_webhook.py -q` → **6 passed**.
+- **The load-bearing guard actually guards.** Claim: without the `try/except`
+  around `request.json()`, a malformed body would 500 and Telegram would
+  redeliver forever. I reproduced a copy of the endpoint *without* the guard and
+  posted `b"not json"` with a JSON content-type: it returned **500** (verified,
+  not assumed). With the guard in place the endpoint returns 200. So the guard
+  fails for the reason it exists — this is not a surface-form assertion.
+- **Spec fit (§14).** `docs/DECISIONS.md` §14 (lines 291–305) decides webhook over
+  long polling and is otherwise silent on dispatch shape; there is no routing
+  detail to contradict. Nothing in the diff touches money, timezones, categories,
+  soft-delete, or SQL, so none of the silent-wrongness classes apply here — no
+  `float`, no `transactions` read, no UTC bucketing.
+- **`dispatch()` classification.** Text → `TextMessage`; inline-button tap →
+  `ButtonPress`; photo (no `text`), `edited_message`, `channel_post`, and `{}` →
+  `None`. Confirmed by reading the code and the three-case ignore test. `message`
+  and `callback_query` are read with `or {}`, so a `null` value doesn't crash.
+- **Deferred webhook auth.** The endpoint is public and does no origin check. This
+  is deliberately deferred with a new TASKS.md line (Telegram `secret_token` →
+  `X-Telegram-Bot-Api-Secret-Token`), to be decided in DECISIONS before handlers
+  write rows. Correct call per CLAUDE.md ("Adding [a decision] is a decision"):
+  since `dispatch()` only logs and writes nothing, a forged update currently has
+  no effect, so there is no present data risk. Not a finding — it's sequenced
+  ahead of the handlers that would make it matter.
+
+### Findings
+
+None blocking.
+
+**Note (non-blocking, low):** `dispatch()` reads `chat.get("id")` and
+`message.get("message_id")` with `.get()`, so a text update missing its `chat`
+yields `TextMessage(chat_id=None, …)` rather than being ignored — the dataclass
+fields are typed `int` but can be `None`. Telegram always includes `chat` on a
+`message`, and no handler consumes these yet, so this is future-facing: the
+handler tasks (42–46) should reject an action with a `None` `chat_id` rather than
+try to reply to it. Recording it here so it isn't lost, not asking for a change now.
+
+---
+
 ## 2026-08-06 — `7852921` — category nullable, amount non-nullable in parse schema (§3, task 40)
 
 **Scope:** `parse_schema()` makes `category` nullable (`type: ["string","null"]`,

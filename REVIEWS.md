@@ -12,6 +12,57 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `1c979f4` — scope `confirm_pending` by `user_id` (§1, fixes `a22a437` Finding 1)
+
+**Scope:** Resolves the sole blocking finding from the `a22a437` review.
+`confirm_pending` now takes `user_id` and its `SELECT` is
+`WHERE user_id = %s AND telegram_message_id = %s`, mirroring `save_pending`'s
+scoping. Two existing db tests updated to pass `user_id`; one new guard,
+`test_confirm_is_scoped_to_the_user`. No production caller yet (task 63 wires
+the handler), so the signature change is safe.
+
+**Status: ✅ DONE** — the cross-tenant write is closed, the guard provably
+bites, and nothing else regressed.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **65 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation; was 64). Ran against a real
+  throwaway Postgres via `conftest.py`, not a mock.
+- **The guard fails for the reason it exists — verified by reverting.** I
+  temporarily dropped the `AND user_id = %s` clause (kept the signature) and
+  reran `tests/test_db.py`: `test_confirm_is_scoped_to_the_user` **failed** with
+  `AssertionError: (Decimal('999.99'), 3) == (Decimal('100.00'), 3)` — i.e. A's
+  Confirm wrote B's ₹999.99 to A's ledger, exactly the wrong-owner scenario §1
+  warns against. Restoring the clause → **4 passed**. The other three db tests
+  stayed green under the revert, so the new test is what pins the fix.
+- **§1 scoping matches `save_pending`.** `confirm_pending`'s `WHERE user_id = %s
+  AND telegram_message_id = %s` (`db.py:67-70`) reverses the `(user_id,
+  telegram_message_id)` `save_pending` stores. The test uses the returned
+  `a`/`b` user ids, not hardcoded integers, so it's robust to the identity
+  sequence.
+- **§9 money intact.** `_txn(amount)` still routes through
+  `Transaction.model_validate`; the scoped test asserts A gets exactly
+  `Decimal("100.00")`, not B's amount — a `Decimal`, not a float.
+- **§6 respected.** The verification read is on `active_transactions`
+  (`test_db.py:126`); `confirm_pending`'s own `SELECT` is on
+  `pending_transactions` (no soft-delete column, so §6 doesn't apply).
+- **No production caller.** `grep confirm_pending` outside tests → only the
+  definition and docstrings. Signature change breaks nothing; task 63 will call
+  it with the `user_id` from the callback query.
+- **Atomicity unchanged.** read → insert → delete still inside one
+  `conn.transaction()`. No new dependency, no ORM, no float.
+
+### Notes (non-blocking, carried forward)
+
+- The prior review's second note still stands: no `UNIQUE (user_id,
+  telegram_message_id)` on `pending_transactions`, so a double `save_pending`
+  for one card would leave `confirm_pending` confirming the newest and orphaning
+  the rest. Not reachable today (one card → one row); a migration-only
+  hardening for whoever wires task 63.
+
+---
+
 ## 2026-08-06 — `a22a437` — add `kanakko/db.py`, confirm-flow persistence (§1, §6, §9, prereq of task 56)
 
 **Scope:** New `kanakko/db.py` with `connect()`, `save_pending()`, and

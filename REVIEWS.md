@@ -12,6 +12,85 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `f5d2a4f` — recent-transactions list + per-row soft delete (§13, task 100)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: closes task 100. `db.recent_transactions` (newest-first live rows through
+`active_transactions`, each carrying `txn_id`), `db.soft_delete_transaction`
+(user-scoped soft delete via the view subquery), `webapp.recent_list` (renders
+the list with an HTML-escaped note and a per-row delete button), and
+`POST /app/delete` (the mutation route, `initData` validated with a 24h freshness
+window and scoped to the signed user). Ticks the box in `TASKS.md` for task 100
+with its two carried constraints (a) escape the note, (b) freshness on the
+mutation route.
+
+### What I checked
+
+- **Full test suite** — `uv run pytest -q` → **159 passed, 1 warning in 5.63s**.
+  Matches the commit message's claim (was 152).
+- **Diff read end to end** (`git show HEAD`): `kanakko/app.py:119-157`,
+  `kanakko/db.py:296-341`, `kanakko/webapp.py:179-205,217-260`, the six new tests,
+  and the `TASKS.md` tick.
+- **Both new guards fail for the reason they exist (revert-and-red, run myself):**
+  - Removed `max_age=timedelta(hours=24)` from the delete route
+    (`app.py:139-141`) → `test_delete_route_rejects_a_stale_init_data`
+    **FAILED** (a 2023 `auth_date` with a valid HMAC then reached the DB and
+    returned 404 instead of 401). Restored. The guard genuinely proves the
+    mutation route rejects a captured/replayed `initData`.
+  - Dropped `html.escape` on the note (`webapp.py:198`) →
+    `test_recent_list_escapes_the_note` **FAILED** (`assert '<scr...` — the raw
+    `<script>` tag rendered live). Restored. The test asserts the effect
+    (escaped bytes present, raw tag absent), not a surface form.
+- **Cross-user delete is a 404, not a delete** — `soft_delete_transaction`
+  (`db.py:319-341`) chooses the row from an `active_transactions` subquery scoped
+  to `user_id AND txn_id`; a foreign or already-deleted id makes the subquery
+  yield nothing, so `WHERE txn_id = (NULL)` matches no row → `RETURNING` empty →
+  `None` → 404, never a second write. `test_delete_route_cannot_delete_another_users_row`
+  covers it and asserts the victim's row is still live afterwards. Passed in the
+  full run.
+- **Reads go through the view (§6)** — both `recent_transactions` and the
+  `soft_delete_transaction` subquery select from `active_transactions`, never
+  `transactions`. A soft-deleted row can neither reappear in the list nor be
+  "re-deleted".
+- **Money stays `Decimal` (§9)** — `recent_transactions` returns raw
+  `NUMERIC(12,2)` → `Decimal` tuples; `recent_list` feeds `amount` straight to
+  `format_amount`. No float touches an amount. The sign is chosen from `type`,
+  not from the number.
+- **XSS surface (constraint a)** — in `recent_list` every interpolated value is
+  either escaped (`note`, `category`), an `int` (`txn_id` → `data-id`), a `date`
+  (`occurred_on` via strftime), or a `format_amount` string. `note`/`category`
+  null both handled (empty note renders no `.txn-note`, null category →
+  "Uncategorised"). No unescaped user string reaches the markup.
+- **Body validation on the delete route** (`app.py:146-150`) — `int(body["id"])`
+  wrapped in `except (ValueError, TypeError, KeyError)`: a non-JSON body
+  (`JSONDecodeError` ⊂ `ValueError`), a non-dict body, a missing/`null`/
+  non-numeric `id` all become a 400, not a 500. Query is bounded
+  (`recent_transactions` `LIMIT 10`).
+- **Freshness runs after the HMAC** — the delete route reuses
+  `validate_init_data`, whose `max_age` branch (`webapp.py:78-86`) sits below the
+  `compare_digest` check, so `auth_date` is only trusted once the signature
+  verifies. Constant-time comparison unchanged.
+
+### Non-blocking observations (not fixes required)
+
+- The delete route relies on `with connect() as conn:` committing on clean exit
+  (psycopg3's context-manager behaviour), the same pattern `/webhook` and
+  `/app/data` already use. The new `test_delete_route_soft_deletes_the_users_row`
+  uses the shared `_Reuse` connection wrapper (like every other route test), so
+  it verifies the UPDATE is *visible within the transaction* but not that the
+  real commit fires. If a future refactor dropped the commit, the delete would
+  silently not persist and no test would catch it — but this gap is systemic to
+  the whole app's test harness, not introduced here, so it is not a task-100
+  finding.
+- On a first-ever user who deletes a non-existent id, the route
+  `get_or_create_user`-creates an empty user row and commits it before returning
+  404. Harmless.
+
+Nothing blocking. Task 100 is done as specified.
+
+---
+
 ## 2026-08-06 — `10ca6c0` — `auth_date` freshness guard for initData (§13, task 100 prerequisite)
 
 **Status: ✅ DONE** — no blocking issues.

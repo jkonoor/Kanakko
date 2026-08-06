@@ -12,6 +12,59 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `372181b` — write `reminder_log` from every job, noon suppression reads it (Phase 3, task 89)
+
+**Status: ✅ DONE** — no blocking issues. Every job now records what it sent in
+`reminder_log`, and the noon nudge keys its suppression window on the *actual*
+`sent_at` of the user's last evening summary, falling back to the nominal 21:00
+IST only for a user with no logged summary. Task 89's box is ticked for work
+that is actually done.
+
+**What I checked (commands and their output):**
+
+- `uv run pytest -q` → **118 passed, 1 warning in 5.00s**. The pre-existing
+  Starlette/httpx deprecation warning is unrelated to this commit.
+- **Revert-and-red on the core guard.** Replaced the per-user boundary
+  (`kanakko/jobs/noon.py:59`, `since = last_reminder_at(...) or fallback`) with
+  `since = fallback` and ran `uv run pytest tests/test_noon.py -q` →
+  `test_run_reads_last_evening_from_reminder_log` failed with `assert 1 == 0`
+  (the 5-day-old activity, which sits after the real 10-day-old summary but
+  before the nominal 21:00, wrongly nudges under the fallback). Restored the
+  file; `git status --short` clean, byte-identical to HEAD. The guard fails for
+  the reason it exists.
+- **Spec fit (§12, `docs/DECISIONS.md:235`).** Noon suppressed on activity since
+  the previous evening summary; evening and monthly unconditional. Evening and
+  monthly write `log_reminder` once per user unconditionally
+  (`evening.py:60`, `monthly.py:73`); noon writes only for users actually nudged
+  (`noon.py:63`). Matches the table.
+- **Reads through `active_transactions`.** `logged_since` (`db.py:275`) — the
+  only read this path makes — queries `active_transactions`, so a soft-deleted
+  row can't keep the nudge suppressed. This commit adds no new transaction read.
+- **`kind` isolation.** `last_reminder_at` filters `kind = 'evening'`
+  (`db.py:319-323`), so the new `'noon'`/`'monthly'` rows can't pollute the
+  suppression boundary. `kind` values are the three literals in the table's
+  CHECK constraint (`migrations/001_init.sql:48`); a typo hard-errors as claimed.
+- **No `float`, no timezone change.** This commit touches no money path;
+  `previous_evening_ist` (the only IST boundary here) is unchanged from task 87.
+- **Log-write guards.** `test_run_logs_a_{evening,monthly,noon}_reminder…` assert
+  the exact `reminder_log` rows via `fetchall()`; dropping each write empties the
+  result and reddens the assert. (Confirmed by inspection; the core guard above
+  was exercised live.)
+- **No new dependency.** `git show HEAD` imports only add existing `db` helpers.
+
+**Findings:** none blocking.
+
+**Note (not a finding):** keying the window on the actual last-summary `sent_at`
+means a *late* evening summary moves the boundary forward, so activity that the
+late summary already reported can fall before the new boundary and still draw a
+noon nudge. That is the intended §12 behaviour ("since the previous evening
+summary"), not a defect — recorded only so the next reader doesn't re-flag it.
+
+Tasks left unticked in `TASKS.md` (crontab; the 23:50-IST month-boundary check)
+are the *next* tasks, correctly not claimed here.
+
+---
+
 ## 2026-08-06 — `a7bfd2a` — monthly report job, 09:00 on the 1st, previous month (Phase 3, task 88)
 
 **Status: ✅ DONE** — no blocking issues. `month_summary` reads

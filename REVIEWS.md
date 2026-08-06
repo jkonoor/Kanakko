@@ -12,6 +12,63 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `0667bfc` — reject an unparseable message with a rephrase prompt (§3, task 72)
+
+**Scope:** `handle_text` now catches the `ValidationError` that `parse_message`
+raises when the amount can't be read, sends `REPHRASE_PROMPT`, and returns
+`None` instead of letting it propagate to a 500 (which made Telegram redeliver
+the same unparseable text forever). Return type widened to `int | None`. New
+guard test.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (`TASKS.md`, `kanakko/app.py`,
+  `tests/test_webhook.py`).
+- Read `kanakko/parse.py`, `kanakko/money.py`, and `docs/DECISIONS.md` §2–§3
+  to confirm the exception path and the spec.
+- `uv run pytest -q` → **83 passed**, matching the commit message.
+- `uv run pytest tests/test_webhook.py -q` → 17 passed.
+- **Guard verified by reverting:** removed the `try/except` from `handle_text`
+  and ran `pytest -k rephrase` → the new test **FAILED** (the `ValidationError`
+  propagated instead of returning `None`). Restored `app.py` with
+  `git checkout`. The guard fails for the reason it exists.
+
+### Spec fit
+
+- §3 says "no amount means no transaction, so reject the message and ask for a
+  rephrase rather than showing a confirm card with a blank." The change does
+  exactly that: `send_message(msg.chat_id, REPHRASE_PROMPT)` then `return None`,
+  `save_pending` never reached. The test asserts `pending_count == 0` and
+  `reply_markup is None` (a prompt, not a confirm card) — the right effects.
+- Exception path traced end to end and confirmed real, not just the mock: an
+  empty/missing amount → `money.parse_amount("")` raises `ValueError("amount is
+  empty")` → the `_amount_is_exact` field validator re-raises as `ValueError` →
+  Pydantic surfaces it as `ValidationError` → `parse_message` re-raises after its
+  one retry (`parse.py:182-183`) → caught at `app.py:127`. The test's
+  `raise_validation` reproduces this faithfully by validating a real
+  `amount=""` payload rather than raising a bare exception.
+- Webhook path: `handle_text` returning `None` leaves `webhook` returning
+  `{"ok": True}` (200), so Telegram does not redeliver — the stated goal.
+
+### Notes (non-blocking, no fix required)
+
+- The catch is narrowed to `ValidationError` only. On the second (retry) attempt
+  `parse_message` can also raise `json.JSONDecodeError`, `httpx` errors, or
+  `RuntimeError` (missing key) — none of which are caught, so they still 500 and
+  Telegram redelivers. This is correct: those are transient transport/schema
+  failures, not "no amount," and redelivery is the right response for them
+  (`parse.py` docstring says as much). The scoping matches §3's intent.
+- `get_or_create_user` runs before the parse, so an unparseable first message
+  still creates (and, on `webhook` block-exit, commits) a user row. This is
+  benign — the user row is not a transaction, it's idempotent, and the same row
+  is created on any first message. Not a §3 "store nothing" violation.
+- No money/`float`, timezone, `active_transactions`, or `initData` surface is
+  touched by this commit.
+
+---
+
 ## 2026-08-06 — `1426440` — handle Cancel: discard the pending row, acknowledge (§5, task 65)
 
 **Scope:** Wire the CANCEL button tap into `/webhook`. New `db.cancel_pending`

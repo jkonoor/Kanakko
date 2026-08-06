@@ -12,6 +12,68 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `f565137` — verify `/webhook` origin with `secret_token`, fail closed (§15, task 42)
+
+**Scope:** `/webhook` now rejects any request whose
+`X-Telegram-Bot-Api-Secret-Token` header does not match
+`TELEGRAM_WEBHOOK_SECRET` with 403, *before* the body is read or `dispatch`
+runs. New `_origin_is_verified` helper; three new webhook guards. Task 42
+ticked; task 43 (`TELEGRAM_WEBHOOK_SECRET` into `.env.example`/compose) left
+open, correctly.
+
+**Status: ✅ DONE** — matches §15 point for point, the fail-closed guard
+provably bites, and nothing regressed. One low-severity robustness note below,
+not blocking.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **68 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation; was 65). Matches the commit's claim.
+- **The fail-closed guard fails for the reason it exists — verified by
+  reverting.** I temporarily removed the `if not secret: return False` clause
+  (`app.py:27-28`) and reran `tests/test_webhook.py`: **exactly**
+  `test_webhook_fails_closed_when_the_secret_is_unset` failed
+  (`403 != 200` — with the secret unset the endpoint accepted a forged POST),
+  the other 8 stayed green; restoring the clause → 9 passed. So the guard pins
+  the exact §15 "unset must never mean accept-everything" behaviour, and it is
+  the new test that pins it. Working tree restored, `git diff` clean.
+- **Spec fit against §15 (DECISIONS.md:320-352).** Header name
+  `X-Telegram-Bot-Api-Secret-Token` ✓ (`app.py:15`). Env key
+  `TELEGRAM_WEBHOOK_SECRET` ✓. 403 when header absent or mismatched ✓ (two
+  guards). `hmac.compare_digest`, not `==` ✓ (`app.py:30`). Fails closed on
+  unset secret ✓ (`app.py:27-28`, returns `False` before the compare, so an
+  empty presented token can't sneak past an empty secret under `==`). Check
+  runs **before** `request.json()` ✓ (`app.py:98-102`), so a forged POST never
+  buffers a body or reaches `dispatch`.
+- **Guard quality.** The three new tests assert the *behaviour* (status 403 on
+  missing / wrong / unset), not a surface string. The unset-secret test even
+  presents an empty token to prove the empty-vs-empty `==` trap is closed. Real
+  guards, not spelling checks.
+- **No convention violations.** Secret read from env at request time, never a
+  literal; no ORM/Redis/etc. touched; no money or timezone path involved.
+
+### Findings
+
+**Low — non-ASCII presented header 500s instead of 403 (`app.py:30`).** Not
+blocking. `hmac.compare_digest` on two `str` raises `TypeError` on non-ASCII
+input (verified: `comparing strings with non-ASCII characters is not
+supported`). Starlette decodes header values as latin-1, so a raw client
+sending a header byte in 0x80–0xFF reaches `_origin_is_verified` as a non-ASCII
+`str` and the `TypeError` propagates to an unhandled **500** rather than the
+403 the docstring promises. **Impact is contained:** the request is still
+rejected before `dispatch`, so no rows are forged and the security goal holds;
+legitimate Telegram traffic never triggers it (its `secret_token` alphabet is
+`A-Za-z0-9_-`). Only cost is a noisier 500 on malformed forged requests.
+Suggested fix if tightened later: `return False` on the `TypeError` (or compare
+on `.encode()` bytes). Left as a note, not a change request.
+
+**Nit — no test proves the body is never read.** The "before the body is read"
+property (a real anti-DoS point: don't buffer an unbounded forged body) is
+correct in the code ordering but untested. A `malformed body + missing secret →
+403` case would pin it. Optional.
+
+---
+
 ## 2026-08-06 — `1c979f4` — scope `confirm_pending` by `user_id` (§1, fixes `a22a437` Finding 1)
 
 **Scope:** Resolves the sole blocking finding from the `a22a437` review.

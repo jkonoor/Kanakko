@@ -12,6 +12,51 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `9519735` — guard a 23:50-IST last-day transaction lands in that month's report (Phase 3, task 91)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: one new test in `tests/test_monthly.py` and the task-91 tick in `TASKS.md`.
+Test-only; no production code changed (`git show HEAD` confirms).
+
+### What I checked
+
+- **Full suite** — `uv run pytest -q` → **125 passed** (was 124). Matches the
+  commit message. `uv run pytest tests/test_monthly.py -q` → 6 passed.
+- **The guard reddens for the reason it exists.** The commit claims the mutant
+  "return `this_first - timedelta(days=1)` as the upper bound" fails the new
+  test. I applied exactly that edit to `previous_month_ist`
+  (`kanakko/jobs/monthly.py:40`) and ran the test →
+  `FAILED test_last_day_2350_ist_lands_in_that_months_report`. Restored;
+  `git status --short` clean. So the guard is not asserting a surface form — it
+  fails when the month's upper bound slides off first-of-next to the last day
+  and `occurred_on < %s` then drops the 31st.
+  - Note: an earlier mutation I tried — making the SQL bound *inclusive* of the
+    last day (`occurred_on <= last_day`) — left the test green, correctly, since
+    that variant still keeps Jul 31. The off-by-one the test actually catches is
+    the half-open bound pointing one day short, which is the real risk in
+    `month_summary` (`kanakko/db.py:260,266`, `occurred_on < %s`).
+- **Spec fit.** `month_summary` reads `active_transactions` (§6), sums come back
+  `Decimal` (§9), the range is half-open `[first, next_first)` computed in IST by
+  `previous_month_ist` (§10). The test asserts `expenses == Decimal("250.00")`
+  and `top == [("Food", Decimal("250.00"))]` — money stays `Decimal`, category
+  from the real keyboard set.
+- **Scope honesty.** The test inserts `occurred_on = date(2026, 7, 31)` directly
+  rather than converting a 23:50-IST *timestamp* to an IST date. That is correct
+  scoping, not a gap: `occurred_on` is a `DATE` column and `month_summary`
+  buckets on it; the timestamp→IST-date pinning lives in the parse layer, out of
+  this test's scope. The docstring states this plainly ("`occurred_on` is a
+  `DATE` the parse pins in IST"), so the title is not overclaiming.
+
+### Findings
+
+None. The test guards a genuine silent-failure path (last-day money dropping out
+of the month report), fails under the documented regression, and asserts the
+effect (the ₹250 is in July's total) rather than a spelling. Task 91's tick is
+earned.
+
+---
+
 ## 2026-08-06 — `4c4c71b` — cron sidecar crontab with all three reminder jobs (Phase 3, task 90)
 
 **Status: ✅ DONE** — no blocking issues.

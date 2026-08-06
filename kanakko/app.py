@@ -24,6 +24,7 @@ from kanakko.db import (
     recent_transactions,
     save_pending,
     set_pending_category,
+    set_transaction_category,
     soft_delete_transaction,
     totals,
     undo_last,
@@ -153,6 +154,51 @@ async def mini_app_delete(request: Request) -> Response:
         user_id = get_or_create_user(conn, telegram_user_id)
         deleted = soft_delete_transaction(conn, user_id, txn_id)
     if deleted is None:
+        raise HTTPException(status_code=404)
+    return Response(status_code=204)
+
+
+@app.post("/app/category")
+async def mini_app_category(request: Request) -> Response:
+    """Change the category of one of the user's transactions (§5, §13, task 101).
+
+    The dashboard's per-row category `<select>` POSTs
+    `{"id": <txn_id>, "category": <name>}` here with the same
+    `Authorization: tma <initData>` header the read route uses. Like `/app/delete`
+    this *mutates state*, so it passes `max_age=timedelta(hours=24)` — a captured
+    `initData` must not stay a working edit button forever (§13). `category` must
+    be one of the closed set (`categories.py`, §11); anything else is a 400, so a
+    forged body can't write a junk label. The row is scoped to the user resolved
+    from the *signed* `user` object, so one user cannot relabel another's row.
+
+    A missing/forged/stale payload is 401; a body without a usable integer `id` or
+    with an unknown `category` is 400; an id matching no live row of this user's is
+    404. Success is 204 — the client re-fetches `/app/data`.
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(
+            header[len(TMA_PREFIX):], max_age=timedelta(hours=24)
+        )
+        telegram_user_id = user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+    try:
+        body = await request.json()
+        txn_id = int(body["id"])
+        category = body["category"]
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+    if category not in ALL_CATEGORIES:
+        raise HTTPException(status_code=400)
+
+    with connect() as conn:
+        user_id = get_or_create_user(conn, telegram_user_id)
+        updated = set_transaction_category(conn, user_id, txn_id, category)
+    if updated is None:
         raise HTTPException(status_code=404)
     return Response(status_code=204)
 

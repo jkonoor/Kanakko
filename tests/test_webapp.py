@@ -437,6 +437,147 @@ def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
     conn.rollback()
 
 
+# --- Per-row category change from the dashboard (§13, task 101) ---
+
+
+def test_recent_list_renders_a_category_select():
+    """Each row carries a `<select>` of the type's categories, current one selected,
+    naming the `txn_id` the `POST /app/category` route needs (§5, §13)."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6))]
+    out = recent_list(rows)
+    assert 'class="cat-select" data-id="7"' in out
+    assert "<option selected>Food</option>" in out
+    assert "<option>Transport</option>" in out  # another expense option offered
+    assert "Salary" not in out  # income-only category not offered on an expense
+
+
+def test_recent_list_null_category_select_defaults_to_uncategorised():
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6))]
+    out = recent_list(rows)
+    assert '<option value="" disabled selected>Uncategorised</option>' in out
+
+
+def test_category_route_changes_the_users_row(conn, monkeypatch):
+    """`POST /app/category` relabels the named row; the new category is what the
+    dashboard then reads back through the view (§5, §6, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (txn_id,) = cur.fetchone()
+
+    resp = client.post(
+        "/app/category",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id, "category": "Transport"},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute("SELECT category FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == "Transport"
+    conn.rollback()
+
+
+def test_category_route_rejects_an_unknown_category(conn, monkeypatch):
+    """A category outside the closed set (`categories.py`, §11) is a 400 and writes
+    nothing — a forged body can't put a junk label on the ledger."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (txn_id,) = cur.fetchone()
+
+    resp = client.post(
+        "/app/category",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id, "category": "Bribes"},
+    )
+    assert resp.status_code == 400
+    with conn.cursor() as cur:
+        cur.execute("SELECT category FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == "Food"  # unchanged
+    conn.rollback()
+
+
+def test_category_route_cannot_change_another_users_row(conn, monkeypatch):
+    """A row belonging to a different user is a 404, never relabeled — scoped to the
+    signed user id (§1, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (txn_id,) = cur.fetchone()
+
+    resp = client.post(
+        "/app/category",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=42)},
+        json={"id": txn_id, "category": "Transport"},
+    )
+    assert resp.status_code == 404
+    with conn.cursor() as cur:
+        cur.execute("SELECT category FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == "Food"  # unchanged
+    conn.rollback()
+
+
+def test_category_route_rejects_a_stale_init_data(conn, monkeypatch):
+    """A captured `initData` older than 24h can't relabel a row — the mutation route
+    passes `max_age`, so a valid-but-stale HMAC is 401, not an edit (§13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (txn_id,) = cur.fetchone()
+
+    stale = _sign({"auth_date": "1700000000", "user": '{"id":42}'})  # 2023
+    resp = client.post(
+        "/app/category",
+        headers={"Authorization": "tma " + stale},
+        json={"id": txn_id, "category": "Transport"},
+    )
+    assert resp.status_code == 401
+    with conn.cursor() as cur:
+        cur.execute("SELECT category FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == "Food"  # unchanged
+    conn.rollback()
+
+
 def test_delete_route_rejects_a_stale_init_data(conn, monkeypatch):
     """A genuine-but-old `initData` is a 401 on the mutation route — proof the
     route passes `max_age` (§13, task 100). `FIELDS` carries a 2023 `auth_date`,

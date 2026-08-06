@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import parse_qsl
 
+from kanakko.categories import CATEGORIES_BY_TYPE
 from kanakko.jobs.evening import IST
 from kanakko.money import format_amount
 
@@ -176,31 +177,57 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
     )
 
 
+def _category_select(txn_id: int, type_: str, current: str | None) -> str:
+    """A per-row category `<select>` for the recent list (§5, §13, task 101).
+
+    Offers the closed set for this transaction's `type_` (`categories.py`), the
+    current category pre-selected. A null/unknown category shows a disabled
+    "Uncategorised" placeholder so the picker still names one in one change. The
+    option *value* the browser reports is the decoded name (`html.escape` only
+    affects rendering), so `POST /app/category` receives the literal category. The
+    `data-id` carries the `txn_id`. Category names come from the fixed set today,
+    but escaping keeps the markup safe if a user-named category ever reaches it.
+    """
+    known = current in CATEGORIES_BY_TYPE.get(type_, ())
+    opts = []
+    if not known:
+        opts.append('<option value="" disabled selected>Uncategorised</option>')
+    for c in CATEGORIES_BY_TYPE.get(type_, ()):
+        sel = " selected" if c == current else ""
+        opts.append(f"<option{sel}>{html.escape(c)}</option>")
+    return (
+        f'<select class="cat-select" data-id="{txn_id}">'
+        + "".join(opts)
+        + "</select>"
+    )
+
+
 def recent_list(rows: list[tuple]) -> str:
-    """The recent-transactions list with a per-row delete button (§13, task 100).
+    """The recent-transactions list with per-row delete + category change (§13, tasks 100–101).
 
     Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on)`
     from `db.recent_transactions`. `note` is the first *user-typed* string the
     dashboard renders — §11 keeps the note's original wording, so it is arbitrary
     text that arrived through the bot — and it is HTML-escaped: an unescaped
-    `<img src=x onerror=...>` in a logged expense would be stored XSS. Category
-    is escaped too (a null category shows as "Uncategorised"). Amounts go through
-    `format_amount` (§9), prefixed −/+ by direction. The delete button carries the
-    `txn_id` for `POST /app/delete`. An empty ledger renders nothing.
+    `<img src=x onerror=...>` in a logged expense would be stored XSS. The category
+    is a per-row `<select>` (a null category is "Uncategorised") that POSTs to
+    `/app/category`. Amounts go through `format_amount` (§9), prefixed −/+ by
+    direction. The delete button carries the `txn_id` for `POST /app/delete`. An
+    empty ledger renders nothing.
     """
     if not rows:
         return ""
     items = []
     for txn_id, amount, type_, category, note, occurred_on in rows:
-        label = html.escape(category or "Uncategorised")
         sign = "−" if type_ == "expense" else "+"
         note_html = (
             f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
         )
         items.append(
             '<div class="txn">'
-            f'<div class="txn-main"><span>{occurred_on:%d %b} · {label}</span>'
-            f'<span>{sign}{format_amount(amount)}</span></div>'
+            f'<div class="txn-main"><span>{occurred_on:%d %b} · '
+            + _category_select(txn_id, type_, category)
+            + f'</span><span>{sign}{format_amount(amount)}</span></div>'
             + note_html
             + f'<button class="del" data-id="{txn_id}">✕</button>'
             "</div>"
@@ -274,6 +301,7 @@ body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
 .txn-main { display: flex; justify-content: space-between; flex: 1; min-width: 0; }
 .txn-note { flex-basis: 100%; opacity: .7; font-size: .9em; }
 .del { margin-left: 8px; border: none; background: none; cursor: pointer; color: inherit; }
+.cat-select { background: none; border: none; color: inherit; font: inherit; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -295,6 +323,15 @@ app.addEventListener('click', e => {
     method: 'POST',
     headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
     body: JSON.stringify({id: Number(btn.dataset.id)}),
+  }).then(r => { if (r.ok) load(); });
+});
+app.addEventListener('change', e => {
+  const sel = e.target.closest('.cat-select');
+  if (!sel || !sel.value) return;
+  fetch('/app/category', {
+    method: 'POST',
+    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+    body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
   }).then(r => { if (r.ok) load(); });
 });
 load();

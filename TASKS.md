@@ -119,7 +119,7 @@ the plan's order and it matters.
       but is only wired once a state-changing route uses it. (Was: Telegram's
       docs — "check the `auth_date` field"; the official SDK defaults to
       `expiresIn = 86400`.)
-- [ ] Add per-row category change from the dashboard — same two constraints as the
+- [x] Add per-row category change from the dashboard — same two constraints as the
       task above if they haven't landed yet; category itself is a closed set from
       `categories.py`, so the escaping risk here is the note, not the category
 - [ ] Make the dashboard render correctly in both light and dark themes

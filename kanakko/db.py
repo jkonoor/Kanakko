@@ -342,6 +342,34 @@ def soft_delete_transaction(
     return row[0] if row else None
 
 
+def set_transaction_category(
+    conn: psycopg.Connection, user_id: int, txn_id: int, category: str
+) -> int | None:
+    """Set the category of one live transaction, scoped to `user_id` (§5, §13).
+
+    The dashboard's per-row category change (task 101): corrects the most-often-
+    wrong field on an already-confirmed entry. Scoped to `user_id` so one user
+    cannot relabel another's row by guessing an id (§1); the row is chosen from
+    `active_transactions`, so a deleted or foreign id yields no `txn_id` and the
+    UPDATE matches nothing, returning `None` rather than a stray write. The caller
+    validates `category` against the closed set (`categories.py`) before this runs.
+    Mirrors `soft_delete_transaction`. Returns the updated `txn_id`, or `None`.
+    Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transactions SET category = %s"
+            " WHERE txn_id = ("
+            "   SELECT txn_id FROM active_transactions"
+            "   WHERE user_id = %s AND txn_id = %s"
+            " )"
+            " RETURNING txn_id",
+            (category, user_id, txn_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:
     """True if `user_id` has any live transaction logged since `since` (§6, §12).
 

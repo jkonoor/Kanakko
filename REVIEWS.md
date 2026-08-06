@@ -12,6 +12,80 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `e6775fc` — validate Mini App initData HMAC (§13, Phase 4 tasks 95-96)
+
+**Status: ⚠️ CHANGES REQUESTED** — one finding to resolve (verify against the
+Telegram primary source) before the dashboard route is wired to this validator.
+
+Scope: new `kanakko/webapp.py` (`validate_init_data`), new
+`tests/test_webapp.py`, and the task 95/96 ticks in `TASKS.md`.
+
+### What I checked
+
+- **Full suite** — `uv run pytest -q` → **130 passed** (was 125). Matches the
+  commit message.
+- **The HMAC algorithm matches §13.** `secret_key = hmac.new(b"WebAppData",
+  token, sha256)` (key `"WebAppData"`, message = bot token) and `expected =
+  hmac.new(secret_key, data_check_string, sha256).hexdigest()`. That is exactly
+  the order §13 (lines 260-264) and the task specify. Comparison is
+  `hmac.compare_digest`, not `==` (CLAUDE.md / §13). Fails closed with
+  `RuntimeError` on unset `TELEGRAM_BOT_TOKEN` before any comparison — same
+  posture as `tg.py:29-31`. Secret comes from `os.environ`, no literal token.
+- **The guard reddens for the reason it exists.** Replaced `if not
+  hmac.compare_digest(...)` with `if False:` and reran
+  `tests/test_webapp.py` → `test_tampered_field_is_rejected` and
+  `test_signature_from_a_different_token_is_rejected` both **FAILED** (2 failed,
+  3 passed). Restored the file. The two rejection tests genuinely gate the
+  comparison — not a surface-form assertion.
+- **Test quality.** Tests assert the effect: a byte-flipped signed `user` id
+  (keeping the original hash) raises, a payload re-signed with a different token
+  raises, a missing `hash` raises, and no-token raises `RuntimeError`. The
+  tamper test verifies `forged != init_data` before asserting, so it can't
+  silently pass on a no-op replace.
+- **`parse_qsl(..., keep_blank_values=True)`** decodes percent-encoding, so the
+  data-check-string is built from decoded values (correct), and a legitimately
+  empty field still round-trips. `hash` is `pop`-ped out before the check.
+- **Not yet wired.** `grep -rn validate_init_data kanakko/` finds no caller —
+  the dashboard route is a later, still-unchecked task. So the finding below is
+  not breaking anything in a live path *today*; it must be settled before the
+  route lands.
+
+### Findings
+
+**1. (medium) The `signature` field is not excluded from the data-check-string
+— `kanakko/webapp.py:47-49`.** The code removes only `hash` from `fields`, then
+includes every remaining field. Telegram Bot API 8.0+ adds a `signature`
+parameter to `initData` (for its separate Ed25519 third-party validation), and
+Telegram computes the HMAC `hash` with `signature` **excluded** from the
+data-check-string. If a real client sends `initData` containing `signature`,
+this validator folds it into the check string, recomputes a hash that does not
+match Telegram's, and raises `InitDataError` on a legitimate payload — the
+dashboard rejects real users. It fails *closed* (rejects rather than admits), so
+this is an availability bug, not an auth bypass.
+
+`UNVERIFIED`: WebFetch to `core.telegram.org` is not permitted in this review
+sandbox, so I could not confirm the current wording against the primary source.
+The claim above is from prior knowledge of the Bot API 8.0 changelog; confirm at
+`https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app`
+before acting. **Suggested fix (if confirmed):** `fields.pop("signature",
+None)` alongside the `hash` pop, and add one test with a `signature` field
+present in the signed payload that still verifies. §13 in `docs/DECISIONS.md`
+describes only "sort the received fields" and doesn't mention `signature`; if
+the exclusion is required, that's a spec gap worth a `TASKS.md` note, not a code
+workaround.
+
+### Not findings (checked, fine)
+
+- No `float`, no DB access, no timezone math in this diff — none of the usual
+  silent-wrongness surfaces apply here.
+- No `auth_date` freshness / replay check — the in-file `ponytail:` comment
+  (`webapp.py:59-61`) acknowledges this; §13 requires only the HMAC and the
+  validator doesn't mutate state, so a `max_age` guard is a defensible deferral.
+- The `ponytail:` comment sits after `return fields`; it's a comment, so no dead
+  code executes. Style only.
+
+---
+
 ## 2026-08-06 — `9519735` — guard a 23:50-IST last-day transaction lands in that month's report (Phase 3, task 91)
 
 **Status: ✅ DONE** — no blocking issues.

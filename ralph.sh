@@ -52,9 +52,11 @@ for f in TASKS.md REVIEWS.md prompts/dev.md prompts/qa.md; do
 done
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+if [[ "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "develop" ]]; then
   cat >&2 <<'EOF'
-Refusing to run on the deploy branch.
+Refusing to run on main or develop.
+
+develop is the deploy branch — a push to it builds an image and redeploys.
 
 Ralph converges over many iterations rather than being correct at each one, so
 it belongs on a branch you can throw away:

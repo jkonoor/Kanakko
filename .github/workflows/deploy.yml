@@ -3,8 +3,8 @@ name: deploy
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:        # first deploy runs from a branch, before main has the code
+    branches: [develop]     # develop is the deploy branch; main is not deployed
+  workflow_dispatch:
 
 # Never let two deploys overlap; a half-pulled image is worse than a slow one.
 # Deliberately not cancel-in-progress — cancelling mid-deploy leaves Dokploy

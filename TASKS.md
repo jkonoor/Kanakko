@@ -33,7 +33,7 @@ the plan's order and it matters.
 
 - [x] Add `kanakko/categories.py` — the expense and income lists from `docs/DECISIONS.md` §11, plus helpers that emit the JSON-schema enum and the Telegram keyboard from the same constant
 - [x] Add `kanakko/money.py` — Decimal parsing/formatting for ₹ amounts, rejecting float anywhere
-- [ ] Add a check covering parse → store → sum-by-category using `Decimal`
+- [x] Add a check covering parse → store → sum-by-category using `Decimal`
 - [ ] Add `kanakko/parse.py` — OpenRouter call with `response_format` JSON schema and `require_parameters: true`, per `docs/DECISIONS.md` §2
 - [ ] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
 - [ ] Add Pydantic validation of the parse result plus exactly one retry on schema failure

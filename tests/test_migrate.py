@@ -14,7 +14,9 @@ from glob import glob
 import psycopg
 import pytest
 
+from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.migrate import MIGRATIONS, migrate
+from kanakko.money import parse_amount
 
 
 def pg_bin(name: str) -> str | None:
@@ -96,4 +98,55 @@ def test_schema_stores_money_exactly(conn):
         cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (txn_id,))
         cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
         assert cur.fetchone() == (0,)
+    conn.rollback()
+
+
+def test_parse_store_sum_by_category_stays_exact(conn):
+    """The whole money path — parse → store → SUM(amount) GROUP BY category.
+
+    The amounts are chosen so a `float` pipeline would drift: 0.10 + 0.20 + 0.30
+    is 0.6000000000000001 in binary floating point, and 10.10 + 20.20 + 0.05 is
+    30.349999999999998. Through `parse_amount` (Decimal) into `NUMERIC(12, 2)`
+    and back through Postgres SUM, both come back exact. A column that had become
+    float, or a Python-side float sum, reddens the equality — and summing over
+    `active_transactions` (never `transactions`, DECISIONS §6) means a
+    soft-deleted row must not land in a category total.
+    """
+    migrate(conn)
+    food, groceries = EXPENSE_CATEGORIES[0], EXPENSE_CATEGORIES[1]
+    entries = [
+        (food, "₹0.10"),
+        (food, "0.20"),
+        (food, "0.30"),
+        (groceries, "10.10"),
+        (groceries, "20.20"),
+        (groceries, "0.05"),
+    ]
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (2) RETURNING user_id")
+        (user_id,) = cur.fetchone()
+        for category, raw in entries:
+            cur.execute(
+                "INSERT INTO transactions (user_id, amount, type, category, occurred_on)"
+                " VALUES (%s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
+                (user_id, parse_amount(raw), category),
+            )
+        # A soft-deleted Food row must not reach the Food total.
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, occurred_on)"
+            " VALUES (%s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
+            (user_id, parse_amount("999.99"), food),
+        )
+        (deleted_txn,) = cur.fetchone()
+        cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (deleted_txn,))
+
+        cur.execute(
+            "SELECT category, SUM(amount) FROM active_transactions"
+            " WHERE user_id = %s GROUP BY category",
+            (user_id,),
+        )
+        totals = dict(cur.fetchall())
+
+    assert totals == {food: Decimal("0.60"), groceries: Decimal("30.35")}
+    assert all(isinstance(total, Decimal) for total in totals.values())
     conn.rollback()

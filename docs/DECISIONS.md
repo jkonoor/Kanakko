@@ -317,6 +317,42 @@ Does not affect the architecture.
 
 ---
 
+## 15. The webhook verifies its origin, and fails closed
+
+**Decided:** `/webhook` requires Telegram's `secret_token`.
+
+- The secret is registered with Telegram on `setWebhook` and arrives on every
+  request in the **`X-Telegram-Bot-Api-Secret-Token`** header (verified against
+  the Bot API docs, 2026-08-06).
+- Env key **`TELEGRAM_WEBHOOK_SECRET`**. **Required**, not optional — compose
+  declares it with `:?` like the other keys, and the endpoint returns **403**
+  when the header is absent or does not match.
+- **Fails closed:** if the secret is unset, every request is rejected. An unset
+  secret must never mean "accept everything" — that is the exact failure that
+  looks fine in development and silently ships an open endpoint.
+- Compared with `hmac.compare_digest`, not `==`, same as `initData` (§13).
+- Telegram's allowed alphabet is narrower than URL-safe base64: **`A-Za-z0-9_-`
+  only, 1–256 characters.** A generator using `.` or `~` produces a token
+  `setWebhook` rejects.
+
+**Why this needs to exist at all:** §1 decided no user-facing auth and §13
+solved the dashboard with `initData`, but neither covers the webhook, and §14
+only chose webhook over long polling. The endpoint is a public URL. Once the
+Confirm handler writes rows, an unauthenticated POST forges a transaction in
+the ledger — and a finance tracker whose numbers can be written by strangers is
+worse than no tracker, because it is trusted.
+
+**Why not an allowlist of Telegram's IP ranges:** it is a second thing to keep
+current, it breaks when Telegram changes ranges, and it does not authenticate —
+it only narrows. The secret is one header comparison and Telegram's own
+documented mechanism.
+
+**Rejected:** accepting unauthenticated updates until the bot goes live. The
+handler that makes it dangerous is the next task in the queue, and "we'll add
+auth before launch" is how it ships without.
+
+---
+
 ## Deliberately deferred
 
 Each gets a `ponytail:` comment in the code naming its ceiling and upgrade path.

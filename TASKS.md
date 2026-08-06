@@ -39,19 +39,8 @@ the plan's order and it matters.
 - [x] Add Pydantic validation of the parse result plus exactly one retry on schema failure
 - [x] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
 - [x] Add the Telegram webhook endpoint and update dispatch
-- [ ] `[human]` Verify the webhook's origin — `docs/DECISIONS.md` decides
-      user-facing auth (§1 "no auth", §13 Mini App `initData`) but is silent on the
-      webhook itself (confirmed: §14 decides webhook-over-polling only; no
-      `secret_token`/origin decision exists). `/webhook` is public, so once handlers
-      write rows a forged update forges a transaction. Telegram's `secret_token` →
-      `X-Telegram-Bot-Api-Secret-Token` header is the fix, but its first step is a
-      **new DECISIONS §line** (env key name, whether the secret is required in
-      Phase 1) — spec authorship the loop must not do — plus a `setWebhook`
-      reconfiguration carrying the secret, a credentials/deployment action.
-      Marked `[human]`: a person decides it in DECISIONS and sets the secret;
-      the loop then wires the header check + guard that a wrong/absent secret is
-      rejected. Safe to defer past task 48 (render confirm card writes no rows);
-      must land before task 49 (Handle Confirm), the first handler that writes.
+- [ ] Reject `/webhook` with 403 unless `X-Telegram-Bot-Api-Secret-Token` matches `TELEGRAM_WEBHOOK_SECRET`, compared with `hmac.compare_digest`; **fail closed when the secret is unset** — per `docs/DECISIONS.md` §15. Do this **before** the Confirm handler: that is the commit where a forged update starts writing rows
+- [ ] Add `TELEGRAM_WEBHOOK_SECRET` to `.env.example` and to compose's shared app env with `:?`, alongside the other required keys
 - [x] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
 - [x] Add `kanakko/db.py` — connection + the confirm-flow persistence: `save_pending`
       (parsed row keyed by the card's message id) and `confirm_pending` (read →

@@ -399,6 +399,79 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     assert texted == []
 
 
+def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
+    """`/undo` is a command, not a transaction — it must skip the parse path.
+
+    Routing it to `handle_text` would feed "/undo" to the parser as if it were a
+    transaction. The command is intercepted before that, and `/undo@bot` (the form
+    Telegram sends in groups) resolves the same way. A plain text message still
+    routes to `handle_text`.
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    undone, texted = [], []
+    monkeypatch.setattr(app_module, "handle_undo", lambda conn, msg: undone.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+
+    def text(body):
+        return {"message": {"message_id": 1, "chat": {"id": 42}, "text": body}}
+
+    client.post("/webhook", json=text("/undo"), headers=AUTH)
+    assert len(undone) == 1 and texted == []
+
+    client.post("/webhook", json=text("/undo@KanakkoBot"), headers=AUTH)
+    assert len(undone) == 2  # the @bot suffix still routes to undo
+
+    client.post("/webhook", json=text("spent 500 on food"), headers=AUTH)
+    assert len(texted) == 1 and len(undone) == 2  # ordinary text still parses
+
+
+def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
+    """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
+
+    Drives the real `undo_last` against Postgres; only the Telegram send is
+    stubbed. Asserts the row is gone from `active_transactions` (§6) and the reply
+    names the removed amount via `format_amount` — an exact `Decimal`, not a float
+    (§9).
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909, amount="250.00")
+    txn_id = app_module.confirm_pending(conn, user_id, 909)
+    assert isinstance(txn_id, int)
+    sent = {}
+    monkeypatch.setattr(
+        app_module, "send_message", lambda chat_id, text, reply_markup=None: sent.update(chat_id=chat_id, text=text)
+    )
+
+    removed = app_module.handle_undo(
+        conn, TextMessage(chat_id=12345, message_id=1, text="/undo")
+    )
+    assert removed is not None and removed["amount"] == Decimal("250.00")
+    assert sent["chat_id"] == 12345
+    assert "₹250.00" in sent["text"]  # §9: exact amount named in the reply
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,))
+        assert cur.fetchone() == (0,)  # §6: soft-deleted, gone from the view
+    conn.rollback()
+
+
+def test_handle_undo_with_nothing_to_undo_replies_and_stores_nothing(conn, monkeypatch):
+    """`/undo` with no live transaction replies "Nothing to undo." and returns None."""
+    migrate(conn)
+    sent = {}
+    monkeypatch.setattr(
+        app_module, "send_message", lambda chat_id, text, reply_markup=None: sent.update(text=text)
+    )
+
+    result = app_module.handle_undo(
+        conn, TextMessage(chat_id=98765, message_id=1, text="/undo")
+    )
+    assert result is None
+    assert sent["text"] == "Nothing to undo."
+    conn.rollback()
+
+
 def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypatch):
     """A Cancel tap deletes its pending row, stores nothing, and answers the tap (§5).
 

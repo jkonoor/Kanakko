@@ -143,6 +143,42 @@ def set_pending_category(
     return txn
 
 
+def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
+    """Soft-delete the user's most recent confirmed transaction, return its fields (§5, §6).
+
+    `/undo` corrects the last entry: it sets `deleted_at` on the newest live row
+    rather than hard-deleting it, so the ledger stays recoverable (§6). The row is
+    chosen from `active_transactions` — the view that already hides soft-deleted
+    rows — so a *second* `/undo` walks back to the previous entry instead of
+    re-deleting the one just removed (reading `transactions` directly would keep
+    latching onto the already-deleted newest row). Scoped by `user_id` (§1).
+    Returns the removed row's fields for the confirmation reply, or `None` when
+    there is no live transaction to undo. Does not commit — the caller owns the
+    transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transactions SET deleted_at = now()"
+            " WHERE txn_id = ("
+            "   SELECT txn_id FROM active_transactions"
+            "   WHERE user_id = %s ORDER BY created_at DESC, txn_id DESC LIMIT 1"
+            " )"
+            " RETURNING amount, type, category, note, occurred_on",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    amount, type_, category, note, occurred_on = row
+    return {
+        "amount": amount,
+        "type": type_,
+        "category": category,
+        "note": note,
+        "occurred_on": occurred_on,
+    }
+
+
 def cancel_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int
 ) -> int | None:

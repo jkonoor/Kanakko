@@ -14,6 +14,7 @@ from kanakko.db import (
     get_or_create_user,
     save_pending,
     set_pending_category,
+    undo_last,
 )
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
@@ -185,6 +186,91 @@ def test_set_pending_category_is_scoped_to_the_user(conn):
         )
         (parsed,) = cur.fetchone()
     assert parsed["category"] == EXPENSE_CATEGORIES[0]  # B's row untouched
+    conn.rollback()
+
+
+def _confirm(conn, user_id: int, message_id: int, amount: str) -> int:
+    save_pending(conn, user_id, message_id, _txn(amount))
+    return confirm_pending(conn, user_id, message_id)
+
+
+def test_undo_soft_deletes_the_most_recent_and_returns_it(conn):
+    """`/undo` sets `deleted_at` on the newest live row and reports its fields (§5, §6).
+
+    The row is soft-deleted, not hard-deleted — it vanishes from
+    `active_transactions` (§6) but still exists in `transactions` with a
+    `deleted_at`, keeping the ledger recoverable. Older entries are untouched, and
+    the returned amount is an exact `Decimal` (§9) for the confirmation message.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 50)
+    _confirm(conn, user_id, 101, "100.00")
+    newest = _confirm(conn, user_id, 102, "250.00")
+
+    removed = undo_last(conn, user_id)
+    assert removed is not None
+    assert removed["amount"] == Decimal("250.00")  # §9: exact Decimal, the newest
+    assert removed["type"] == "expense"
+    assert removed["category"] == EXPENSE_CATEGORIES[0]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT deleted_at FROM transactions WHERE txn_id = %s", (newest,))
+        (deleted_at,) = cur.fetchone()
+        assert deleted_at is not None  # soft-deleted, still present in transactions
+        cur.execute(
+            "SELECT amount FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        assert cur.fetchall() == [(Decimal("100.00"),)]  # only the older row is live
+    conn.rollback()
+
+
+def test_undo_walks_back_through_history(conn):
+    """A second `/undo` removes the *previous* entry, never re-deletes the newest (§6).
+
+    Because `undo_last` chooses from `active_transactions`, which hides the row the
+    first `/undo` soft-deleted, the second `/undo` picks the next-newest. Reading
+    `transactions` directly would keep latching onto the already-deleted newest row
+    and the older ones would be unreachable — so this reddens the moment the SELECT
+    stops going through the view.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 51)
+    _confirm(conn, user_id, 101, "100.00")
+    _confirm(conn, user_id, 102, "250.00")
+
+    first = undo_last(conn, user_id)
+    second = undo_last(conn, user_id)
+    assert first["amount"] == Decimal("250.00")  # newest first
+    assert second["amount"] == Decimal("100.00")  # then the previous one, not a repeat
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,))
+        assert cur.fetchone() == (0,)  # both walked back
+        assert undo_last(conn, user_id) is None  # nothing left to undo
+    conn.rollback()
+
+
+def test_undo_with_nothing_to_undo_returns_none(conn):
+    """`/undo` for a user with no live transaction is a no-op, not an error."""
+    migrate(conn)
+    assert undo_last(conn, _seed_user(conn, 52)) is None
+    conn.rollback()
+
+
+def test_undo_is_scoped_to_the_user(conn):
+    """One user's `/undo` must not touch another user's most recent row (§1)."""
+    migrate(conn)
+    a = _seed_user(conn, 60)
+    b = _seed_user(conn, 61)
+    _confirm(conn, a, 555, "100.00")
+    _confirm(conn, b, 555, "999.99")
+
+    removed = undo_last(conn, a)
+    assert removed["amount"] == Decimal("100.00")  # A's own row, not B's newer one
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT amount FROM active_transactions WHERE user_id = %s", (b,))
+        assert cur.fetchall() == [(Decimal("999.99"),)]  # B's row still live
     conn.rollback()
 
 

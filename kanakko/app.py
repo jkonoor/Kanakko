@@ -18,7 +18,9 @@ from kanakko.db import (
     get_or_create_user,
     save_pending,
     set_pending_category,
+    undo_last,
 )
+from kanakko.money import format_amount
 from kanakko.parse import Transaction, parse_message
 from kanakko.tg import answer_callback_query, edit_message_text, send_message
 
@@ -141,6 +143,36 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     return save_pending(conn, user_id, card_message_id, txn)
 
 
+UNDO_COMMAND = "/undo"
+
+
+def _is_undo(text: str) -> bool:
+    """True when `text` is the `/undo` command — bare or `/undo@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == UNDO_COMMAND
+
+
+def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
+    """Soft-delete the user's most recent confirmed transaction and confirm it (§5, §6).
+
+    `/undo` is the correction path for a just-confirmed entry: `undo_last` sets
+    `deleted_at` on the newest live row (recoverable, §6) and returns its fields
+    so the reply names exactly what was removed. Nothing to undo — a fresh user,
+    or a `/undo` past the last row — gets a plain "Nothing to undo." Does not
+    commit — the caller owns the transaction. Returns the removed row, or `None`.
+    """
+    user_id = get_or_create_user(conn, msg.chat_id)
+    removed = undo_last(conn, user_id)
+    if removed is None:
+        send_message(msg.chat_id, "Nothing to undo.")
+        return None
+    line = f"Removed: {removed['type'].capitalize()} — {format_amount(removed['amount'])}"
+    if removed["category"]:
+        line += f" ({removed['category']})"
+    send_message(msg.chat_id, line)
+    return removed
+
+
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     """Confirm the pending transaction the Confirm tap carries, then acknowledge (§4).
 
@@ -232,7 +264,10 @@ async def webhook(request: Request) -> dict[str, bool]:
     # returns None on redelivery), so answering 200 after the commit is safe.
     if isinstance(action, TextMessage):
         with connect() as conn:
-            handle_text(conn, action)
+            if _is_undo(action.text):
+                handle_undo(conn, action)
+            else:
+                handle_text(conn, action)
     elif isinstance(action, ButtonPress) and action.data == CONFIRM:
         with connect() as conn:
             handle_confirm(conn, action)

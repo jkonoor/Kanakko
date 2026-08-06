@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from kanakko.db import get_or_create_user, month_summary
+from kanakko.jobs import monthly
 from kanakko.jobs.evening import IST
 from kanakko.jobs.monthly import previous_month_ist, report_text
 from kanakko.migrate import migrate
@@ -64,6 +65,22 @@ def test_month_summary_empty_month(conn):
     user = get_or_create_user(conn, 710711)
     income, expenses, top = month_summary(conn, user, date(2026, 7, 1), date(2026, 8, 1))
     assert (income, expenses, top) == (Decimal("0"), Decimal("0"), [])
+    conn.rollback()
+
+
+def test_run_logs_a_monthly_reminder_for_each_user(conn, monkeypatch):
+    """Every user the report reaches gets a `reminder_log` 'monthly' row (§12)."""
+    migrate(conn)
+    a = get_or_create_user(conn, 710800)
+    b = get_or_create_user(conn, 710801)
+    monkeypatch.setattr(monthly, "send_message", lambda tg_id, text: None)
+
+    sent = monthly.run(conn)
+
+    assert sent == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id, kind FROM reminder_log ORDER BY user_id")
+        assert cur.fetchall() == [(a, "monthly"), (b, "monthly")]
     conn.rollback()
 
 

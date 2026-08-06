@@ -31,6 +31,20 @@ def _insert(conn, user_id, created_at, deleted=False):
         )
 
 
+def _log_evening(conn, user_id, sent_at):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reminder_log (user_id, kind, sent_at) VALUES (%s, 'evening', %s)",
+            (user_id, sent_at),
+        )
+
+
+def _reminder_kinds(conn, user_id):
+    with conn.cursor() as cur:
+        cur.execute("SELECT kind FROM reminder_log WHERE user_id = %s", (user_id,))
+        return [kind for (kind,) in cur.fetchall()]
+
+
 def test_previous_evening_is_last_2100_ist():
     """The boundary is the most recent 21:00 IST — computed in IST, not UTC.
 
@@ -99,4 +113,47 @@ def test_run_nudges_only_idle_users(conn, monkeypatch):
 
     assert sent == 2
     assert set(sent_to) == {900901, 900902}  # the two idle users, not the active one
+    conn.rollback()
+
+
+def test_run_reads_last_evening_from_reminder_log(conn, monkeypatch):
+    """Suppression keys on the *actual* last evening summary, not the nominal 21:00.
+
+    The user's last evening summary went out 10 days ago (a long gap), and they
+    logged a transaction 5 days ago. Reading `reminder_log`, that activity is
+    *after* the boundary, so the nudge is suppressed. If the boundary fell back to
+    the nominal previous 21:00 (within the last day), the 5-day-old row would sit
+    *before* it and the user would be wrongly nudged — this is the flip the guard
+    pins.
+    """
+    migrate(conn)
+    boundary = previous_evening_ist()  # nominal fallback: within the last day
+    user = get_or_create_user(conn, 910910)
+
+    _log_evening(conn, user, boundary - timedelta(days=10))  # real last summary, long ago
+    _insert(conn, user, boundary - timedelta(days=5))  # after it, before the nominal 21:00
+
+    sent_to = []
+    monkeypatch.setattr(noon, "send_message", lambda tg_id, text: sent_to.append(tg_id))
+
+    sent = run(conn)
+
+    assert sent == 0
+    assert sent_to == []  # suppressed: active since the real last summary
+    conn.rollback()
+
+
+def test_run_logs_a_noon_reminder_for_each_nudged_user(conn, monkeypatch):
+    """A nudged user gets a `reminder_log` 'noon' row; a suppressed one does not (§12)."""
+    migrate(conn)
+    boundary = previous_evening_ist()
+    idle = get_or_create_user(conn, 920920)
+    active = get_or_create_user(conn, 920921)
+    _insert(conn, active, boundary + timedelta(minutes=1))
+
+    monkeypatch.setattr(noon, "send_message", lambda tg_id, text: None)
+    run(conn)
+
+    assert _reminder_kinds(conn, idle) == ["noon"]
+    assert _reminder_kinds(conn, active) == []
     conn.rollback()

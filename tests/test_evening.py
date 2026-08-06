@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from kanakko.db import day_summary, get_or_create_user
+from kanakko.jobs import evening
 from kanakko.jobs.evening import summary_text, today_ist
 from kanakko.migrate import migrate
 
@@ -59,6 +60,26 @@ def test_day_summary_empty_day(conn):
     user = get_or_create_user(conn, 700701)
     count, spent, received = day_summary(conn, user, date(2026, 8, 6))
     assert (count, spent, received) == (0, Decimal("0"), Decimal("0"))
+    conn.rollback()
+
+
+def test_run_logs_an_evening_reminder_for_each_user(conn, monkeypatch):
+    """Every user the summary reaches gets a `reminder_log` 'evening' row (§12).
+
+    The noon nudge reads these to place its suppression window, so a job that
+    silently skips the write would widen every window — asserted here.
+    """
+    migrate(conn)
+    a = get_or_create_user(conn, 700800)
+    b = get_or_create_user(conn, 700801)
+    monkeypatch.setattr(evening, "send_message", lambda tg_id, text: None)
+
+    sent = evening.run(conn)
+
+    assert sent == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id, kind FROM reminder_log ORDER BY user_id")
+        assert cur.fetchall() == [(a, "evening"), (b, "evening")]
     conn.rollback()
 
 

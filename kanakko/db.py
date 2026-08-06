@@ -290,6 +290,43 @@ def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> boo
         return cur.fetchone() is not None
 
 
+def log_reminder(conn: psycopg.Connection, user_id: int, kind: str) -> None:
+    """Record that a `kind` reminder ('noon' | 'evening' | 'monthly') was sent now (§12).
+
+    Every scheduled job writes one of these per message it sends; the noon nudge
+    reads them (`last_reminder_at`) to find the *actual* last evening summary
+    instant rather than assuming a fixed 21:00. `kind` is checked against the
+    table's CHECK constraint, so a typo is a hard error, not a silent no-op. Does
+    not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reminder_log (user_id, kind) VALUES (%s, %s)",
+            (user_id, kind),
+        )
+
+
+def last_reminder_at(
+    conn: psycopg.Connection, user_id: int, kind: str
+) -> datetime | None:
+    """When `user_id` was last sent a `kind` reminder, or `None` if never (§12).
+
+    The noon nudge's suppression boundary: the actual instant of the previous
+    evening summary. Reading it here means a missed or delayed summary shifts the
+    window to when the summary really went out, not the nominal 21:00 — the caller
+    falls back to that nominal boundary only when there is no logged summary yet.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sent_at FROM reminder_log"
+            " WHERE user_id = %s AND kind = %s"
+            " ORDER BY sent_at DESC LIMIT 1",
+            (user_id, kind),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def cancel_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int
 ) -> int | None:

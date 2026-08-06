@@ -4,9 +4,10 @@ The report carries the previous month's income, expenses, balance, and the top
 spending categories. Like the evening summary it always sends — §12 marks only
 the noon nudge as suppressible. The previous-month range is decided once, in
 `Asia/Kolkata`: bucketing on the UTC date would cut the month at 05:30 IST and
-push the last 5.5 hours of the 31st into the wrong report (§10). The `cron`
-service runs `python -m kanakko.jobs.monthly` at 09:00 IST on the 1st; the
-crontab and the `reminder_log` write belong to later tasks.
+push the last 5.5 hours of the 31st into the wrong report (§10). Each send is
+recorded in `reminder_log` (`kind = 'monthly'`). The `cron` service runs
+`python -m kanakko.jobs.monthly` at 09:00 IST on the 1st; the crontab belongs to
+a later task.
 """
 
 import logging
@@ -14,7 +15,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from kanakko import configure_logging
-from kanakko.db import all_users, connect, month_summary
+from kanakko.db import all_users, connect, log_reminder, month_summary
 from kanakko.jobs.evening import IST
 from kanakko.money import format_amount
 from kanakko.tg import send_message
@@ -69,6 +70,7 @@ def run(conn) -> int:
     for user_id, telegram_user_id in users:
         income, expenses, top = month_summary(conn, user_id, first, next_first)
         send_message(telegram_user_id, report_text(label, income, expenses, top[:TOP_N]))
+        log_reminder(conn, user_id, "monthly")
     return len(users)
 
 

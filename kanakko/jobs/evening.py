@@ -2,10 +2,10 @@
 
 Unlike the noon nudge (suppressed when the day already has activity), this one
 always sends: it carries the day's total and entry count, so it doubles as the
-daily summary even on days you didn't act on it. The `cron` service runs
-`python -m kanakko.jobs.evening` at 21:00 `Asia/Kolkata`; the crontab and the
-`reminder_log` write belong to later tasks — this module computes the summary
-and sends it.
+daily summary even on days you didn't act on it. Each send is recorded in
+`reminder_log` (`kind = 'evening'`), which the noon nudge reads to place its
+suppression window. The `cron` service runs `python -m kanakko.jobs.evening` at
+21:00 `Asia/Kolkata`; the crontab belongs to a later task.
 """
 
 import logging
@@ -14,7 +14,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from kanakko import configure_logging
-from kanakko.db import all_users, connect, day_summary
+from kanakko.db import all_users, connect, day_summary, log_reminder
 from kanakko.money import format_amount
 from kanakko.tg import send_message
 
@@ -57,6 +57,7 @@ def run(conn) -> int:
     for user_id, telegram_user_id in users:
         count, spent, received = day_summary(conn, user_id, day)
         send_message(telegram_user_id, summary_text(count, spent, received))
+        log_reminder(conn, user_id, "evening")
     return len(users)
 
 

@@ -62,7 +62,7 @@ Created 2026-08-06 via the REST API. IDs are needed for every subsequent call.
 |---|---|---|
 | `kanakko-db` | Dokploy **Postgres** service | Managed by Dokploy, so backups are native (see below) |
 | `kanakko-web` | **Application**, Docker provider | `ghcr.io/jkonoor/kanakko:latest`, runs uvicorn. Holds the domain |
-| `kanakko-cron` | **Application**, Docker provider | Same image, command `cron -f`, `TZ=Asia/Kolkata` |
+| `kanakko-cron` | **Application**, Docker provider | Same image, command `sh /app/cron/entrypoint.sh`, `TZ=Asia/Kolkata` |
 
 `docker-compose.yml` in the repo root stays as the **local development** stack
 (`docker compose up --build`). It is no longer what gets deployed — keep the two
@@ -133,10 +133,13 @@ database backups (`backup.create`), executed by `node-schedule` *inside*
 Dokploy. There is no "run this command on a schedule" primitive.
 
 Kanakko's three reminder jobs therefore run in a **cron sidecar container** in
-the compose stack: same image as `web`, command runs `cron`, crontab holds the
-three entries. It deploys and versions with the app and needs no host access —
-which matters, because adding root crontab entries to a team-owned box for a
-personal project is not appropriate.
+the compose stack: same image as `web`, command `sh /app/cron/entrypoint.sh`
+(dumps the container env to a file the crontab sources, then execs `cron -f` —
+cron does not pass the container's env to jobs), and `cron/kanakko.crontab`
+(installed to `/etc/cron.d/kanakko`) holds the three entries. It deploys and
+versions with the app and needs no host access — which matters, because adding
+root crontab entries to a team-owned box for a personal project is not
+appropriate.
 
 Set the container `TZ=Asia/Kolkata` so the crontab's wall-clock times mean what
 they say (see DECISIONS §10).

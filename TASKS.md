@@ -87,7 +87,7 @@ the plan's order and it matters.
 - [x] Add `kanakko/jobs/noon.py` — 12:00 daily, suppressed if anything was logged since the last evening summary
 - [x] Add `kanakko/jobs/monthly.py` — 09:00 on the 1st, previous month's income, expenses, balance, top categories
 - [x] Write `reminder_log` rows from every job; make the noon suppression read it
-- [ ] Add the crontab for the `cron` service with all three entries
+- [x] Add the crontab for the `cron` service with all three entries
 - [ ] Add a check that a transaction at 23:50 IST on a month's last day lands in that month's report
 
 ## Phase 4 — Mini App dashboard

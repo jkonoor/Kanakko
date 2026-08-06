@@ -59,7 +59,11 @@ services:
 
   cron:
     build: .
-    command: cron -f
+    # Not `cron -f` directly: cron runs jobs with a stripped environment, so the
+    # entrypoint first dumps the container env to /app/cron.env (which each
+    # crontab line sources) and then execs `cron -f`. Two tokens, so Dokploy's
+    # whitespace-split command field carries it intact. See cron/entrypoint.sh.
+    command: sh /app/cron/entrypoint.sh
     environment:
       <<: *app-env
       # Not cosmetic: the crontab's wall-clock times are IST (DECISIONS §10,

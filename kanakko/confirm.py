@@ -27,6 +27,11 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
     category to name — the assert makes that precondition fail loud rather than
     render the literal `Category: None`. Plain text, no `parse_mode` — the note
     is the user's own wording and must not need Markdown/HTML escaping.
+
+    §5: the category buttons sit directly on the card, below Confirm/Cancel —
+    category is the most-often-wrong field and a closed set, so correcting it is
+    one tap (`cat:<name>`, handled by the category-press task) rather than a
+    Cancel-and-retype.
     """
     assert txn.category is not None, "null category must route to category_prompt (§3)"
     lines = [
@@ -40,7 +45,8 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
             [
                 InlineKeyboardButton("✅ Confirm", callback_data=CONFIRM),
                 InlineKeyboardButton("❌ Cancel", callback_data=CANCEL),
-            ]
+            ],
+            *category_keyboard(txn.type).inline_keyboard,
         ]
     )
     return "\n".join(lines), keyboard

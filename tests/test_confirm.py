@@ -8,6 +8,7 @@ exact `callback_data` the Confirm/Cancel handlers (tasks 56, 57) route on.
 from datetime import date
 from decimal import Decimal
 
+from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM, confirm_card
 from kanakko.parse import Transaction
 
@@ -53,3 +54,15 @@ def test_buttons_are_confirm_and_cancel_with_routing_data():
     assert [b.callback_data for b in row] == [CONFIRM, CANCEL]
     assert (CONFIRM, CANCEL) == ("confirm", "cancel")  # the dispatch's contract
     assert "Confirm" in row[0].text and "Cancel" in row[1].text
+
+
+def test_category_buttons_are_on_the_card_for_one_tap_correction():
+    # §5.1: the wrong-category fix must be one tap on the card itself, not a
+    # Cancel-and-retype. The card carries every category of the txn's type, each
+    # with `cat:<name>` routing data, below the Confirm/Cancel row. If someone
+    # drops the category buttons back off the card this reddens.
+    _, keyboard = confirm_card(_txn(type="expense", category="Food"))
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert set(f"cat:{c}" for c in EXPENSE_CATEGORIES) <= set(data)
+    # ...and they come from categories.py, not a literal list living here.
+    assert "cat:Food" in data and "cat:Bills & Utilities" in data

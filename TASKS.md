@@ -74,7 +74,7 @@ the plan's order and it matters.
 
 ## Phase 2 — Corrections
 
-- [ ] Category buttons on the confirm card, generated from `categories.py`
+- [x] Category buttons on the confirm card, generated from `categories.py`
 - [ ] Handle a category button press — update the pending row, re-render the card
 - [ ] Add `/undo` — soft-delete the most recent confirmed transaction, confirm what was removed
 - [ ] Verify every read path goes through `active_transactions`, not `transactions`

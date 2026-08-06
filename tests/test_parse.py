@@ -8,9 +8,10 @@ default swallowed by compose's empty-string env var.
 """
 
 import os
+import re
 
 from kanakko.categories import schema_enum
-from kanakko.parse import MODEL_DEFAULT, build_request, parse_schema
+from kanakko.parse import MODEL_DEFAULT, build_request, parse_schema, today
 
 
 def test_require_parameters_forces_schema_aware_provider():
@@ -42,3 +43,21 @@ def test_model_default_survives_empty_env(monkeypatch):
     assert build_request("x")["model"] == MODEL_DEFAULT
     monkeypatch.setenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
     assert build_request("x")["model"] == "anthropic/claude-sonnet-5"
+
+
+def _system_content(body):
+    return next(m["content"] for m in body["messages"] if m["role"] == "system")
+
+
+def test_current_kolkata_date_is_injected_into_the_prompt():
+    # §10: without today's date the model guesses "yesterday"/"last Friday".
+    # The date must reach the system prompt verbatim.
+    system = _system_content(build_request("spent 500 yesterday", today_str="2026-08-06"))
+    assert "2026-08-06" in system
+
+
+def test_today_reads_the_kolkata_clock():
+    # today() is what production feeds the prompt — it must be a real Kolkata
+    # date, not a naive UTC one, and in YYYY-MM-DD form.
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())
+    assert today() in _system_content(build_request("x"))

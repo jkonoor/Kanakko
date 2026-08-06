@@ -18,10 +18,16 @@ the caller — that is a separate task.
 
 import json
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from kanakko.categories import schema_enum
+
+# §10: one function returns the timezone; a per-user column replaces the constant
+# later without touching call sites.
+KOLKATA = ZoneInfo("Asia/Kolkata")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # §2: default model is claude-opus-5. `or` (not get's default) because compose
@@ -56,12 +62,29 @@ def parse_schema() -> dict:
     }
 
 
-def build_request(message: str, model: str | None = None) -> dict:
-    """The OpenRouter request body for parsing `message`."""
+def today() -> str:
+    """Current date in `Asia/Kolkata` as YYYY-MM-DD (§10)."""
+    return datetime.now(KOLKATA).strftime("%Y-%m-%d")
+
+
+def build_request(
+    message: str, model: str | None = None, today_str: str | None = None
+) -> dict:
+    """The OpenRouter request body for parsing `message`.
+
+    §10: today's `Asia/Kolkata` date is injected into the system prompt so the
+    model can resolve "yesterday"/"last Friday" instead of guessing. `today_str`
+    is injectable for deterministic tests; production reads the wall clock.
+    """
+    system = (
+        f"{_SYSTEM_PROMPT} Today's date is {today_str or today()} "
+        "(Asia/Kolkata). Resolve any relative date in the message "
+        "(\"yesterday\", \"last Friday\") against it."
+    )
     return {
         "model": model or os.environ.get("OPENROUTER_MODEL") or MODEL_DEFAULT,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": message},
         ],
         "response_format": {

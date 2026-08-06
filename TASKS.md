@@ -35,7 +35,7 @@ the plan's order and it matters.
 - [x] Add `kanakko/money.py` — Decimal parsing/formatting for ₹ amounts, rejecting float anywhere
 - [x] Add a check covering parse → store → sum-by-category using `Decimal`
 - [x] Add `kanakko/parse.py` — OpenRouter call with `response_format` JSON schema and `require_parameters: true`, per `docs/DECISIONS.md` §2
-- [ ] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
+- [x] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
 - [ ] Add Pydantic validation of the parse result plus exactly one retry on schema failure
 - [ ] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
 - [ ] Add the Telegram webhook endpoint and update dispatch

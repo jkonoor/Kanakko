@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.db import confirm_pending, save_pending
+from kanakko.db import confirm_pending, get_or_create_user, save_pending
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 
@@ -34,6 +34,28 @@ def _txn(amount: str = "1234.56") -> Transaction:
             "note": "lunch at cafe",
         }
     )
+
+
+def test_get_or_create_user_is_idempotent(conn):
+    """Two messages from one Telegram user resolve to one `users` row.
+
+    The second call must return the *same* internal id and create no duplicate —
+    a plain INSERT (no `ON CONFLICT`) would raise a unique violation on the second
+    message, and an unconditional insert would fork the user into two ids.
+    """
+    migrate(conn)
+    first = get_or_create_user(conn, 90210)
+    second = get_or_create_user(conn, 90210)
+    other = get_or_create_user(conn, 90211)
+
+    assert isinstance(first, int)
+    assert second == first
+    assert other != first
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 90210")
+        assert cur.fetchone() == (1,)
+    conn.rollback()
 
 
 def test_confirm_writes_the_transaction_and_clears_pending(conn):

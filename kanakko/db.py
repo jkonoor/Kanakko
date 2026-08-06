@@ -27,6 +27,31 @@ def connect() -> psycopg.Connection:
     return psycopg.connect(dsn)
 
 
+def get_or_create_user(conn: psycopg.Connection, telegram_user_id: int) -> int:
+    """Resolve `telegram_user_id` to its internal `users.user_id`, creating it once.
+
+    Every table keys on the internal `user_id` (§1), so the message handler turns
+    the Telegram id it sees into that id here. `ON CONFLICT DO NOTHING` makes a
+    second message from the same user a no-op insert rather than a unique
+    violation; the `UNION ALL … LIMIT 1` then returns the existing row on that
+    path. Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "WITH ins AS ("
+            "  INSERT INTO users (telegram_user_id) VALUES (%s)"
+            "  ON CONFLICT (telegram_user_id) DO NOTHING RETURNING user_id"
+            ")"
+            " SELECT user_id FROM ins"
+            " UNION ALL"
+            " SELECT user_id FROM users WHERE telegram_user_id = %s"
+            " LIMIT 1",
+            (telegram_user_id, telegram_user_id),
+        )
+        (user_id,) = cur.fetchone()
+    return user_id
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:

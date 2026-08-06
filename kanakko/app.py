@@ -5,9 +5,14 @@ import logging
 import os
 from dataclasses import dataclass
 
+import psycopg
 from fastapi import FastAPI, HTTPException, Request
 
 from kanakko import __version__
+from kanakko.confirm import confirm_card
+from kanakko.db import get_or_create_user, save_pending
+from kanakko.parse import parse_message
+from kanakko.tg import send_message
 
 app = FastAPI(title="Kanakko", version=__version__)
 log = logging.getLogger(__name__)
@@ -83,6 +88,29 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             data=callback["data"],
         )
     return None
+
+
+def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int:
+    """Parse a typed message and send its confirm card (§2, §4) — first half of
+    the core loop, split off from Handle Confirm.
+
+    Resolve the user, parse the text into a `Transaction`, send the confirm card,
+    and store the parsed row keyed by the *sent card's* message id — the id the
+    Confirm/Cancel tap carries back (§1). The card is sent *before* the pending
+    row is written because that message id doesn't exist until Telegram assigns
+    it; a send that fails leaves no pending row, which is the safe direction (a
+    dead card the user can retry, never a Confirm with nothing to confirm).
+
+    In a private chat the chat id is the user's Telegram id, so it doubles as the
+    `telegram_user_id`. Does not commit — the caller owns the transaction.
+    Returns the new `pending_id`.
+    """
+    user_id = get_or_create_user(conn, msg.chat_id)
+    txn = parse_message(msg.text)
+    text, keyboard = confirm_card(txn)
+    sent = send_message(msg.chat_id, text, reply_markup=keyboard)
+    card_message_id = sent["result"]["message_id"]
+    return save_pending(conn, user_id, card_message_id, txn)
 
 
 @app.post("/webhook")

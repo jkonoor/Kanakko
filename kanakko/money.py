@@ -40,6 +40,11 @@ def parse_amount(value: str | int | Decimal) -> Decimal:
     except InvalidOperation:
         raise ValueError(f"not a valid amount: {value!r}") from None
 
+    # Decimal("nan") is a *valid* Decimal and quantizes without raising, so it
+    # slips past the InvalidOperation net above — but any comparison against it
+    # (the `<= 0` below) then signals InvalidOperation uncaught. Reject here.
+    if not amount.is_finite():
+        raise ValueError(f"not a valid amount: {value!r}")
     if amount <= 0:
         raise ValueError(f"amount must be positive: {value!r}")
     if amount > MAX_AMOUNT:
@@ -74,7 +79,7 @@ def demo() -> None:
         else:
             raise AssertionError(f"float/bool accepted: {bad!r}")
 
-    for bad in ("0", "-5", "abc", "", "1e12"):
+    for bad in ("0", "-5", "abc", "", "1e12", "nan", "NaN"):
         try:
             parse_amount(bad)
         except ValueError:

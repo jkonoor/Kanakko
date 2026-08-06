@@ -50,8 +50,14 @@ def test_strips_symbol_and_commas():
     assert parse_amount("  ₹ 42 ") == Decimal("42.00")
 
 
-@pytest.mark.parametrize("bad", ["0", "-5", "abc", "", "   ", "₹"])
+@pytest.mark.parametrize(
+    "bad", ["0", "-5", "abc", "", "   ", "₹", "nan", "NaN", "-nan"]
+)
 def test_rejects_non_positive_and_garbage(bad):
+    # "nan" is the sharp one: Decimal("nan") is valid and quantizes without
+    # raising, so without the is_finite guard this leaks an uncaught
+    # decimal.InvalidOperation (an ArithmeticError, not ValueError) out of the
+    # single door every amount is supposed to pass through.
     with pytest.raises(ValueError):
         parse_amount(bad)
 

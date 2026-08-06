@@ -18,9 +18,21 @@ returned, not what they were assumed to return.
 new `tests/test_money.py`, one ticked box in `TASKS.md`. `git show --stat HEAD`
 confirms exactly those three files. Judged against `docs/DECISIONS.md` §9.
 
-**Status: ⚠️ CHANGES REQUESTED** — one input-validation hole in the money
-entry point (a documented `ValueError` path actually raises an uncaught
-`decimal.InvalidOperation`). The §9 precision guarantee itself is intact.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+input-validation hole in the money entry point (a documented `ValueError` path
+actually raised an uncaught `decimal.InvalidOperation`). The §9 precision
+guarantee itself was intact.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`. `parse_amount` now
+> rejects non-finite Decimals — `if not amount.is_finite(): raise ValueError`
+> — after quantize and before the `<= 0` comparison that was signalling the
+> uncaught `InvalidOperation`. So `"nan"`/`"NaN"`/`"-nan"` now surface as the
+> documented `ValueError` through the single door, not as an `ArithmeticError`.
+> `test_rejects_non_positive_and_garbage` gained the three `nan` spellings and
+> `demo()` gained `"nan"`/`"NaN"`; both fail for the reason they exist —
+> reverting the `is_finite` guard reddens exactly the three `nan` cases
+> (`3 failed, 13 passed`, each `decimal.InvalidOperation` at the `<= 0` line),
+> restoring greens them. `uv run pytest -q` → `37 passed` (was 34; +3).
 
 ### What I checked (and what it returned)
 

@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `10ca6c0` — `auth_date` freshness guard for initData (§13, task 100 prerequisite)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `validate_init_data` gains optional `max_age`/`now` params — with `max_age`
+set, a missing/malformed `auth_date` or one older than `max_age` raises
+`InitDataError`, checked *after* the HMAC verifies. Read-only `/app/data` route
+left unchanged (no `max_age`). This is the prerequisite split carved off task
+100; the recent-list + per-row delete + note-escaping remainder stays open in
+`TASKS.md`.
+
+### What I checked
+
+- **Diff read end to end** (`git show HEAD`): `kanakko/webapp.py:78-86`, the three
+  new tests, and the `TASKS.md` split note.
+- **Ordering is correct — freshness runs after the HMAC** (`webapp.py:75-86`). The
+  `max_age` branch sits below the `compare_digest` check, so `auth_date` is only
+  trusted once the signature verifies. A forged `auth_date` can't slip a stale
+  payload through, and can't be used to probe timing before the constant-time
+  compare. Matches the docstring claim (`webapp.py:53-55`) and Telegram's
+  documented replay defence.
+- **Fails closed** (`webapp.py:80-83`). Missing `auth_date` → `KeyError`; empty
+  or non-numeric → `ValueError` (`parse_qsl` keeps blanks, `int("")` raises);
+  out-of-range → `OverflowError`/`OSError`. All four are caught and re-raised as
+  `InitDataError`. No path returns `fields` with `max_age` set but the check
+  skipped.
+- **Timezone-correct**: `datetime.fromtimestamp(..., timezone.utc)` and
+  `datetime.now(timezone.utc)` — both aware, so the subtraction can't raise on a
+  naive/aware mismatch and the comparison is a true UTC delta. `now` is injectable
+  for tests.
+- **Boundary**: `now - auth_date > max_age` uses `>`, so exactly-`max_age` still
+  passes ("older than" raises) — consistent with the wording.
+- **Read-only route untouched** (`app.py:95`): `/app/data` still calls
+  `validate_init_data` with no `max_age`, so a stale-but-genuine HMAC keeps
+  loading the user's *own* data — the deliberate, documented behaviour
+  (`app.py:88-89`). No mutating route exists yet, so nothing is left unguarded.
+- **`uv run pytest tests/test_webapp.py -q`** → `27 passed`. **Full suite
+  `uv run pytest -q`** → `152 passed`.
+- **Revert-and-red verified myself** (not trusting the commit message): commented
+  out the `if now - auth_date > max_age: raise` branch → `1 failed, 26 passed`,
+  the single failure being `test_stale_auth_date_is_rejected`. Restored the file
+  (`git diff --stat kanakko/webapp.py` clean). The guard fails for the reason it
+  exists.
+
+### Findings
+
+None blocking. Two notes, neither a defect:
+
+- The guard is defined but **not yet wired** to any mutating route — by design,
+  since no such route exists yet. The box is correctly left open in `TASKS.md`
+  with an explicit "the mutation route this task adds MUST call
+  `validate_init_data(..., max_age=timedelta(hours=24))`". When the delete route
+  lands, that call is the thing to verify; the guard here is inert until then.
+- A *future* `auth_date` (negative `now - auth_date`) passes the check. Not a
+  finding — it's HMAC-trusted (Telegram sets it) and matches the official SDK,
+  which only bounds staleness, not future-dating.
+
+Task box honestly left unticked (prerequisite split, not the whole of task 100).
+No `float` on any amount path, no secret in the diff, categories untouched.
+
 ## 2026-08-06 — `914e029` — Weekly summary section on the dashboard (§13, task 99)
 
 **Status: ✅ DONE** — no blocking issues.

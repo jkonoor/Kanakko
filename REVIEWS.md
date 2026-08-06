@@ -22,8 +22,23 @@ the `conn` fixture moved to `tests/conftest.py` (one definition, shared with
 `test_migrate`). `TASKS.md`: db.py ticked, task 56 left open with remaining work
 recorded.
 
-**Status: ⚠️ CHANGES REQUESTED** — one latent cross-tenant defect in
-`confirm_pending`; everything else is sound and the money guard bites.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+latent cross-tenant defect in `confirm_pending`; everything else is sound and
+the money guard bites.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`. `confirm_pending` now
+> takes a `user_id` and its SELECT is `WHERE user_id = %s AND telegram_message_id
+> = %s`, matching `save_pending`'s scoping — a user's Confirm can no longer latch
+> onto another user's identically-numbered pending card. New guard
+> `test_confirm_is_scoped_to_the_user`: A (seeded first, so the *older* row) and B
+> both hold a pending card on message id 555 with different amounts; A confirms
+> and must get their own ₹100 with only A's pending row cleared. A is deliberately
+> the older row, so the fallback `ORDER BY created_at DESC, pending_id DESC` picks
+> B's newer row — the test only passes when the `user_id` clause resolves A's tap
+> to A's row. Verified it earns its place: dropping the clause back to
+> `WHERE telegram_message_id = %s` reddens exactly this test (A latches onto B's
+> ₹999.99 row); restoring greens it. `uv run pytest -q` → `65 passed` (was 64).
+> No production caller yet (task 63 wires it), so the signature change is safe.
 
 ### What I checked
 

@@ -24,11 +24,11 @@ def _seed_user(conn, telegram_user_id: int) -> int:
     return user_id
 
 
-def _txn() -> Transaction:
+def _txn(amount: str = "1234.56") -> Transaction:
     return Transaction.model_validate(
         {
             "type": "expense",
-            "amount": "1234.56",
+            "amount": amount,
             "category": EXPENSE_CATEGORIES[0],
             "date": "2026-08-05",
             "note": "lunch at cafe",
@@ -50,7 +50,7 @@ def test_confirm_writes_the_transaction_and_clears_pending(conn):
     pending_id = save_pending(conn, user_id, 555, _txn())
     assert isinstance(pending_id, int)
 
-    txn_id = confirm_pending(conn, 555)
+    txn_id = confirm_pending(conn, user_id, 555)
     assert isinstance(txn_id, int)
 
     with conn.cursor() as cur:
@@ -82,8 +82,8 @@ def test_confirm_is_idempotent_on_redelivery(conn):
     user_id = _seed_user(conn, 11)
     save_pending(conn, user_id, 777, _txn())
 
-    first = confirm_pending(conn, 777)
-    second = confirm_pending(conn, 777)
+    first = confirm_pending(conn, user_id, 777)
+    second = confirm_pending(conn, user_id, 777)
     assert isinstance(first, int)
     assert second is None
 
@@ -96,5 +96,38 @@ def test_confirm_is_idempotent_on_redelivery(conn):
 def test_confirm_unknown_message_returns_none(conn):
     """Confirming a card with no pending row is a no-op, not an error."""
     migrate(conn)
-    assert confirm_pending(conn, 999_999) is None
+    assert confirm_pending(conn, 42, 999_999) is None
+    conn.rollback()
+
+
+def test_confirm_is_scoped_to_the_user(conn):
+    """One user's Confirm must not write another user's identically-numbered card.
+
+    Telegram message ids repeat per chat (§1), so users A and B can both have a
+    live pending card on message id 555. A confirms *their own* card and must get
+    exactly their own amount (₹100), with only their pending row cleared.
+
+    A is seeded *first*, so their pending row is the older one — the fallback
+    `ORDER BY created_at DESC, pending_id DESC` picks B's newer row, not A's.
+    Keyed on the message id alone, A's Confirm would therefore latch onto B's
+    row: write B's ₹999.99 and delete B's pending, leaving A's live. Scoping the
+    SELECT by `user_id` is the only thing that makes A's tap resolve to A's row —
+    so this test reddens the moment that clause is dropped.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 20)
+    b = _seed_user(conn, 21)
+    save_pending(conn, a, 555, _txn("100.00"))
+    save_pending(conn, b, 555, _txn("999.99"))
+
+    txn_id = confirm_pending(conn, a, 555)
+    assert isinstance(txn_id, int)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT amount, user_id FROM active_transactions WHERE txn_id = %s", (txn_id,)
+        )
+        assert cur.fetchone() == (Decimal("100.00"), a)  # A's own amount, under A
+        cur.execute("SELECT user_id FROM pending_transactions WHERE telegram_message_id = 555")
+        assert cur.fetchone() == (b,)  # B's pending row still live, A's cleared
     conn.rollback()

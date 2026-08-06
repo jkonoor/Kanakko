@@ -46,8 +46,15 @@ def save_pending(
     return pending_id
 
 
-def confirm_pending(conn: psycopg.Connection, telegram_message_id: int) -> int | None:
-    """Write the pending row for `telegram_message_id` to `transactions`, clear it.
+def confirm_pending(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int
+) -> int | None:
+    """Write user's pending row for `telegram_message_id` to `transactions`, clear it.
+
+    Scoped by `user_id` because Telegram message ids repeat per chat, not
+    globally (§1): keying on the message id alone would let one user's Confirm
+    write another user's pending transaction. `save_pending` stores `user_id`;
+    this reverses it with the same scoping.
 
     The read → insert → delete run in one transaction so a crash can never store
     a transaction while leaving its pending row live (a later double confirm), nor
@@ -57,15 +64,15 @@ def confirm_pending(conn: psycopg.Connection, telegram_message_id: int) -> int |
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "SELECT pending_id, user_id, parsed FROM pending_transactions"
-            " WHERE telegram_message_id = %s"
+            "SELECT pending_id, parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s"
             " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
-            (telegram_message_id,),
+            (user_id, telegram_message_id),
         )
         row = cur.fetchone()
         if row is None:
             return None
-        pending_id, user_id, parsed = row
+        pending_id, parsed = row
         txn = Transaction.model_validate(parsed)
         cur.execute(
             "INSERT INTO transactions"

@@ -21,7 +21,7 @@ import hmac
 import html
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import parse_qsl
 
@@ -33,13 +33,26 @@ class InitDataError(Exception):
     """`initData` was missing, malformed, or its HMAC did not verify."""
 
 
-def validate_init_data(init_data: str) -> dict[str, str]:
+def validate_init_data(
+    init_data: str,
+    max_age: timedelta | None = None,
+    now: datetime | None = None,
+) -> dict[str, str]:
     """Verify a Mini App `initData` query string and return its fields.
 
     `init_data` is the raw `window.Telegram.WebApp.initData` string (a URL query
     string). Returns the decoded fields (including the still-JSON-encoded `user`)
     on success. Raises `InitDataError` if the `hash` is absent or does not match,
     and `RuntimeError` if `TELEGRAM_BOT_TOKEN` is unset.
+
+    `max_age` opts into an `auth_date` freshness check (Telegram's documented
+    replay defence; the official SDK defaults to 24h). The read-only dashboard
+    leaves it `None` — a stale-but-valid HMAC only reveals the user's own data —
+    but a *state-mutating* route (per-row delete, category change) must pass one,
+    or a captured `initData` is a delete button that works forever. When set, a
+    missing or malformed `auth_date`, or one older than `max_age`, raises
+    `InitDataError`; the check runs only after the HMAC verifies, so `auth_date`
+    is trusted. `now` defaults to the current instant (injectable for tests).
     """
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -61,11 +74,16 @@ def validate_init_data(init_data: str) -> dict[str, str]:
 
     if not hmac.compare_digest(expected, received_hash):
         raise InitDataError("initData hash mismatch")
-    return fields
 
-    # ponytail: no auth_date freshness check — §13 requires only the HMAC, and
-    # replay of a stolen initData needs a stolen device. Add a max_age guard here
-    # if the dashboard ever mutates state on GET (tasks 100/101 do — see REVIEWS.md).
+    if max_age is not None:
+        now = now or datetime.now(timezone.utc)
+        try:
+            auth_date = datetime.fromtimestamp(int(fields["auth_date"]), timezone.utc)
+        except (KeyError, ValueError, OverflowError, OSError):
+            raise InitDataError("initData auth_date is missing or malformed") from None
+        if now - auth_date > max_age:
+            raise InitDataError("initData is stale")
+    return fields
 
 
 def user_id_from_init_data(fields: dict[str, str]) -> int:

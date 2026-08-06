@@ -90,6 +90,37 @@ def test_signature_field_stays_in_the_data_check_string(monkeypatch):
     assert fields["signature"] == "Ed25519_sig_from_telegram"
 
 
+def test_stale_auth_date_is_rejected(monkeypatch):
+    """A valid HMAC whose `auth_date` predates `max_age` is rejected (§13, task 100).
+
+    The replay defence for the state-mutating routes: `FIELDS`'s `auth_date` is
+    1700000000 (2023), so a `now` two days later with a 24h window is stale, even
+    though the signature is genuine. Without this, a captured `initData` is a
+    delete button that works forever.
+    """
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    now = datetime.fromtimestamp(1700000000, timezone.utc) + timedelta(days=2)
+    with pytest.raises(InitDataError):
+        validate_init_data(_sign(FIELDS), max_age=timedelta(hours=24), now=now)
+
+
+def test_fresh_auth_date_passes(monkeypatch):
+    """The same genuine payload verifies while its `auth_date` is inside `max_age`."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    now = datetime.fromtimestamp(1700000000, timezone.utc) + timedelta(hours=1)
+    fields = validate_init_data(_sign(FIELDS), max_age=timedelta(hours=24), now=now)
+    assert fields["user"] == '{"id":42,"first_name":"Ann"}'
+
+
+def test_missing_auth_date_fails_closed_when_max_age_set(monkeypatch):
+    """With `max_age` set, a payload that carries no `auth_date` is rejected, not
+    admitted — the freshness check fails closed (§13)."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    no_date = {"user": '{"id":42,"first_name":"Ann"}'}
+    with pytest.raises(InitDataError):
+        validate_init_data(_sign(no_date), max_age=timedelta(hours=24))
+
+
 def test_missing_hash_is_rejected(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     with pytest.raises(InitDataError):

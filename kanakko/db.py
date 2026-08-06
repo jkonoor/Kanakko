@@ -272,6 +272,27 @@ def month_summary(
     return income, expenses, top
 
 
+def totals(conn: psycopg.Connection, user_id: int) -> tuple[Decimal, Decimal]:
+    """All-time `(income, expenses)` for `user_id`'s live rows (§6, §9, §13).
+
+    The dashboard's headline numbers: every confirmed, un-undone transaction ever
+    logged, so balance is `income - expenses`. Reads `active_transactions`, so a
+    soft-deleted row never re-enters the totals (§6). Both sums come back as
+    `NUMERIC` → `Decimal` (never float, §9); a user with no rows yields
+    `(0.00, 0.00)`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT"
+            " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
+            " FROM active_transactions WHERE user_id = %s",
+            (user_id,),
+        )
+        income, expenses = cur.fetchone()
+    return income, expenses
+
+
 def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:
     """True if `user_id` has any live transaction logged since `since` (§6, §12).
 

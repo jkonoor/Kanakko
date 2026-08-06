@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
 from kanakko import __version__, configure_logging
@@ -18,13 +19,23 @@ from kanakko.db import (
     confirm_pending,
     connect,
     get_or_create_user,
+    month_summary,
     save_pending,
     set_pending_category,
+    totals,
     undo_last,
 )
 from kanakko.money import format_amount
 from kanakko.parse import Transaction, parse_message
 from kanakko.tg import answer_callback_query, edit_message_text, send_message
+from kanakko.webapp import (
+    InitDataError,
+    current_month_ist,
+    dashboard_html,
+    validate_init_data,
+    user_id_from_init_data,
+    SHELL_HTML,
+)
 
 configure_logging()
 log = logging.getLogger(__name__)
@@ -52,6 +63,47 @@ def _origin_is_verified(request: Request) -> bool:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok", "version": __version__}
+
+
+@app.get("/app", response_class=HTMLResponse)
+def mini_app_shell() -> str:
+    """Serve the Mini App bootstrap page (§13) — no data, no secret, no auth."""
+    return SHELL_HTML
+
+
+TMA_PREFIX = "tma "
+
+
+@app.get("/app/data", response_class=HTMLResponse)
+def mini_app_data(request: Request) -> str:
+    """The dashboard fragment for the authenticated user (§13): totals, balance,
+    current-month figures.
+
+    The bootstrap sends `initData` in the `Authorization: tma <initData>` header
+    (Telegram's documented scheme). Validation *is* the authentication — a valid
+    HMAC proves the payload came from Telegram and names the real user (§13), so
+    there is no login. A missing, malformed, or forged payload is a 401; an unset
+    `TELEGRAM_BOT_TOKEN` fails closed as a 500 (loud misconfig, not a bypass).
+    Read-only, so no `auth_date` freshness check is needed yet — the replay
+    concern arrives with the per-row mutations of tasks 100/101 (see REVIEWS.md).
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(header[len(TMA_PREFIX):])
+        telegram_user_id = user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+    with connect() as conn:
+        user_id = get_or_create_user(conn, telegram_user_id)
+        income, expenses = totals(conn, user_id)
+        first, next_first = current_month_ist()
+        m_income, m_expenses, _top = month_summary(conn, user_id, first, next_first)
+    return dashboard_html(
+        income, expenses, first.strftime("%B %Y"), m_income, m_expenses
+    )
 
 
 @dataclass(frozen=True)

@@ -238,6 +238,40 @@ def day_summary(
     return count, spent, received
 
 
+def month_summary(
+    conn: psycopg.Connection, user_id: int, first_day: date, next_first_day: date
+) -> tuple[Decimal, Decimal, list[tuple[str, Decimal]]]:
+    """`(income, expenses, top_categories)` for `user_id`'s live rows in the month (§6, §9, §12).
+
+    The range is half-open `[first_day, next_first_day)` on `occurred_on` — when
+    the money moved — so a 23:50 IST entry on the month's last day lands in that
+    month (the caller computes both boundaries in `Asia/Kolkata`, §10). Reads
+    `active_transactions`, so a soft-deleted row never re-enters the totals (§6).
+    The two sums come back as `NUMERIC` → `Decimal` (never float, §9). Top
+    categories are the month's expense categories with their totals, biggest
+    first — the caller decides how many to show.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT"
+            " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
+            " FROM active_transactions"
+            " WHERE user_id = %s AND occurred_on >= %s AND occurred_on < %s",
+            (user_id, first_day, next_first_day),
+        )
+        income, expenses = cur.fetchone()
+        cur.execute(
+            "SELECT category, sum(amount) FROM active_transactions"
+            " WHERE user_id = %s AND occurred_on >= %s AND occurred_on < %s"
+            " AND type = 'expense'"
+            " GROUP BY category ORDER BY sum(amount) DESC, category",
+            (user_id, first_day, next_first_day),
+        )
+        top = cur.fetchall()
+    return income, expenses, top
+
+
 def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:
     """True if `user_id` has any live transaction logged since `since` (§6, §12).
 

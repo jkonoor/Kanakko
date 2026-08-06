@@ -31,7 +31,7 @@ the plan's order and it matters.
 
 ## Phase 1 — The core loop
 
-- [ ] Add `kanakko/categories.py` — the expense and income lists from `docs/DECISIONS.md` §11, plus helpers that emit the JSON-schema enum and the Telegram keyboard from the same constant
+- [x] Add `kanakko/categories.py` — the expense and income lists from `docs/DECISIONS.md` §11, plus helpers that emit the JSON-schema enum and the Telegram keyboard from the same constant
 - [ ] Add `kanakko/money.py` — Decimal parsing/formatting for ₹ amounts, rejecting float anywhere
 - [ ] Add a check covering parse → store → sum-by-category using `Decimal`
 - [ ] Add `kanakko/parse.py` — OpenRouter call with `response_format` JSON schema and `require_parameters: true`, per `docs/DECISIONS.md` §2

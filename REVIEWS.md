@@ -12,6 +12,76 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `9d7046b` — add `kanakko/money.py` (₹ amounts as `Decimal`, float refused)
+
+**Scope:** New `kanakko/money.py` (`parse_amount`, `format_amount`, `demo`),
+new `tests/test_money.py`, one ticked box in `TASKS.md`. `git show --stat HEAD`
+confirms exactly those three files. Judged against `docs/DECISIONS.md` §9.
+
+**Status: ⚠️ CHANGES REQUESTED** — one input-validation hole in the money
+entry point (a documented `ValueError` path actually raises an uncaught
+`decimal.InvalidOperation`). The §9 precision guarantee itself is intact.
+
+### What I checked (and what it returned)
+
+- `uv run pytest -q` → **34 passed** (was 21). Real, not a claim.
+- **Guard earns its place:** removed the `isinstance(value, bool) or
+  isinstance(value, float)` block and re-ran `tests/test_money.py` →
+  `test_float_is_refused_at_the_door` failed with `DID NOT RAISE TypeError`
+  (12 passed, 1 failed). Restored → 13 passed. The float/bool guard is load-
+  bearing.
+- `uv run python -m kanakko.money` → `money demo ok`.
+- **§9 exactness:** confirmed `parse_amount("0.1") + parse_amount("0.2") ==
+  Decimal("0.30")` and the sum-by-category path returns a `Decimal`. No `float`
+  anywhere in the module. `bool` (int subclass) is correctly excluded.
+- **Boundary:** `parse_amount("9999999999.99")` == `MAX_AMOUNT`;
+  `"10000000000"` and `"1e12"` rejected as over-`NUMERIC(12,2)`. Correct.
+- **False-tick check:** the `money.py` box is ticked and the code delivers it;
+  the *separate* "parse → store → sum-by-category" box is correctly left
+  unticked (store path not built). No false tick.
+- Adversarial inputs: `"inf"`, `"+inf"`, `"Infinity"`, `"snan"`, `"1e-5"`,
+  empty/whitespace, `"-5"`, `"abc"` all → `ValueError` (good). **But see below.**
+
+### Findings
+
+**1. (medium) `parse_amount("nan"/"NaN"/"-nan")` raises an uncaught
+`decimal.InvalidOperation`, not the documented `ValueError`.**
+`kanakko/money.py:39-43`.
+
+- Scenario: `parse_amount("nan")`. `Decimal("nan")` is a *valid* Decimal (a
+  quiet NaN), and `Decimal("nan").quantize(_PAISE, ...)` returns `NaN`
+  **without raising**, so it slips past the `except InvalidOperation → ValueError`
+  net on line 40-41. Execution reaches `if amount <= 0:` (line 43), and a
+  `<=` comparison against a NaN `Decimal` *signals* `InvalidOperation`, which
+  is uncaught and propagates out of the function.
+- Why it matters: the docstring promises "Raises `ValueError` if the value is
+  not a number," and `parse_amount` is billed as the single door every amount
+  passes through. A caller doing `try: parse_amount(x) except ValueError:` to
+  reject bad input will **not** catch this — it surfaces as an unhandled
+  `decimal.InvalidOperation` (an `ArithmeticError`, not `ValueError`), i.e. a
+  crashed handler / 500 instead of a clean "invalid amount." The garbage-
+  rejection test (`test_rejects_non_positive_and_garbage`) claims to cover
+  garbage but omits `"nan"`, so the hole is green.
+- Verified live: `parse_amount("nan")` / `"NaN"` / `"-nan"` →
+  `decimal.InvalidOperation`; `"snan"`, `"+inf"`, `"Infinity"` → `ValueError`
+  (those fail loudly in `quantize`, NaN does not).
+- Suggested fix: after quantize, reject non-finite explicitly, e.g.
+  `if not amount.is_finite(): raise ValueError(f"not a valid amount: {value!r}")`,
+  and add `"nan"`, `"NaN"` to the garbage parametrize so the guard fails for
+  the reason it exists.
+
+### Non-findings (checked, deliberately not flagged)
+
+- `format_amount` uses Western thousands grouping (`₹1,000,000.00`) while
+  `parse_amount` accepts Indian grouping on input. `docs/DECISIONS.md` gives no
+  display-grouping requirement and its only example (`₹1,234.50`) is identical
+  in both systems — cosmetic, not a finding.
+- `parse_amount(Decimal(0.1))` (a Decimal built from a float elsewhere) is
+  accepted but quantized to `0.10` — the float itself is refused at the door;
+  a Decimal input is rounded to paise as designed. No precision leak.
+
+---
+
 ## 2026-08-06 — `b948736` — add `kanakko/categories.py`, the closed category set defined once
 
 **Scope:** New `kanakko/categories.py` (the §11 expense/income lists as one

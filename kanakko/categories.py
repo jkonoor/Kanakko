@@ -32,6 +32,10 @@ CATEGORIES_BY_TYPE = {"expense": EXPENSE_CATEGORIES, "income": INCOME_CATEGORIES
 # Union across both types, order-preserving, deduped ("Other" is in both lists).
 ALL_CATEGORIES = tuple(dict.fromkeys(EXPENSE_CATEGORIES + INCOME_CATEGORIES))
 
+# callback_data prefix for a category button. The keyboard emits it and the
+# webhook dispatch routes on it — one definition so the two can't drift.
+CATEGORY_PREFIX = "cat:"
+
 
 def schema_enum() -> list[str]:
     """The `enum` for the parse schema's `category` field (DECISIONS §2, §3)."""
@@ -46,7 +50,10 @@ def keyboard(txn_type: str) -> InlineKeyboardMarkup:
     """
     cats = CATEGORIES_BY_TYPE[txn_type]
     rows = [
-        [InlineKeyboardButton(c, callback_data=f"cat:{c}") for c in cats[i : i + 2]]
+        [
+            InlineKeyboardButton(c, callback_data=f"{CATEGORY_PREFIX}{c}")
+            for c in cats[i : i + 2]
+        ]
         for i in range(0, len(cats), 2)
     ]
     return InlineKeyboardMarkup(rows)

@@ -110,6 +110,39 @@ def confirm_pending(
     return txn_id
 
 
+def set_pending_category(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int, category: str
+) -> Transaction | None:
+    """Set `category` on the user's pending row for `telegram_message_id` (§5).
+
+    The correction path for the most-often-wrong field: a `cat:<name>` tap
+    re-writes the pending row's category and returns the updated `Transaction`
+    so the handler can re-render the card. Scoped by `user_id` like the confirm/
+    cancel reads — message ids repeat per chat (§1). Round-trips through the
+    `Transaction` model, so `category` is re-validated against the closed set
+    (§11) and the amount stays a string on the way back to JSONB (§9). Returns
+    `None` when there is no pending row (a stale card). Does not commit — the
+    caller owns the transaction.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT pending_id, parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s"
+            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        pending_id, parsed = row
+        txn = Transaction.model_validate({**parsed, "category": category})
+        cur.execute(
+            "UPDATE pending_transactions SET parsed = %s WHERE pending_id = %s",
+            (Jsonb(txn.model_dump(mode="json")), pending_id),
+        )
+    return txn
+
+
 def cancel_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int
 ) -> int | None:

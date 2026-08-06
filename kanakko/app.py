@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from kanakko import __version__
+from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import CANCEL, CONFIRM, category_prompt, confirm_card
 from kanakko.db import (
     cancel_pending,
@@ -16,9 +17,10 @@ from kanakko.db import (
     connect,
     get_or_create_user,
     save_pending,
+    set_pending_category,
 )
-from kanakko.parse import parse_message
-from kanakko.tg import answer_callback_query, send_message
+from kanakko.parse import Transaction, parse_message
+from kanakko.tg import answer_callback_query, edit_message_text, send_message
 
 app = FastAPI(title="Kanakko", version=__version__)
 
@@ -176,6 +178,36 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     return pending_id
 
 
+def handle_category(conn: psycopg.Connection, press: ButtonPress) -> Transaction | None:
+    """Apply a `cat:<name>` tap to the pending row, then re-render the card (§5).
+
+    Category is the most-often-wrong field, so correcting it is one tap: the tap
+    carries the card's message id and the chosen category, `set_pending_category`
+    re-writes the pending row (scoped to this user, §1), and we edit the same card
+    in place to reflect it — now a full confirm card, so a card that started as
+    the null-category picker gains its Confirm/Cancel buttons.
+
+    An unknown category (a forged callback the keyboard never emits) is ignored
+    rather than 500ing — a raise here would make Telegram redeliver the bad tap
+    forever. A stale card whose pending row is gone answers with a note and edits
+    nothing. Does not commit — the caller owns the transaction. Returns the
+    updated `Transaction`, or `None` when there was nothing to update.
+    """
+    category = press.data.removeprefix(CATEGORY_PREFIX)
+    if category not in ALL_CATEGORIES:
+        answer_callback_query(press.callback_query_id, "Unknown category")
+        return None
+    user_id = get_or_create_user(conn, press.chat_id)
+    txn = set_pending_category(conn, user_id, press.message_id, category)
+    if txn is None:
+        answer_callback_query(press.callback_query_id, "That card's gone")
+        return None
+    text, keyboard = confirm_card(txn)
+    edit_message_text(press.chat_id, press.message_id, text, reply_markup=keyboard)
+    answer_callback_query(press.callback_query_id, f"Category: {category}")
+    return txn
+
+
 @app.post("/webhook")
 async def webhook(request: Request) -> dict[str, bool]:
     """Receive a Telegram update and route it (§14).
@@ -207,4 +239,7 @@ async def webhook(request: Request) -> dict[str, bool]:
     elif isinstance(action, ButtonPress) and action.data == CANCEL:
         with connect() as conn:
             handle_cancel(conn, action)
+    elif isinstance(action, ButtonPress) and action.data.startswith(CATEGORY_PREFIX):
+        with connect() as conn:
+            handle_category(conn, action)
     return {"ok": True}

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
 from kanakko.app import WEBHOOK_SECRET_HEADER, ButtonPress, TextMessage, app, dispatch
-from kanakko.categories import EXPENSE_CATEGORIES
+from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import get_or_create_user, save_pending
 from kanakko.migrate import migrate
@@ -366,10 +366,11 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     _set_secret(monkeypatch)
     opened = []
     monkeypatch.setattr(app_module, "connect", lambda: opened.append(True) or _FakeConn())
-    confirmed, cancelled, texted = [], [], []
+    confirmed, cancelled, texted, categorised = [], [], [], []
     monkeypatch.setattr(app_module, "handle_confirm", lambda conn, press: confirmed.append(press))
     monkeypatch.setattr(app_module, "handle_cancel", lambda conn, press: cancelled.append(press))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(app_module, "handle_category", lambda conn, press: categorised.append(press))
 
     def press(data):
         return {
@@ -388,8 +389,13 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     assert len(cancelled) == 1  # it routed to the Cancel handler
     assert len(opened) == 2  # and opened its own connection
 
+    client.post("/webhook", json=press(f"{CATEGORY_PREFIX}Food"), headers=AUTH)
+    assert len(categorised) == 1  # a cat: tap routes to the category handler
+    assert len(confirmed) == 1 and len(cancelled) == 1  # not to Confirm/Cancel
+    assert len(opened) == 3  # and opened its own connection
+
     client.post("/webhook", json={"channel_post": {"text": "x"}}, headers=AUTH)
-    assert len(opened) == 2  # an ignored update opens nothing
+    assert len(opened) == 3  # an ignored update opens nothing
     assert texted == []
 
 
@@ -441,6 +447,91 @@ def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     assert isinstance(first, int)
     assert second is None  # nothing left to cancel
     assert acks == ["Discarded ❌", "Already gone"]  # spinner cleared both times
+    conn.rollback()
+
+
+def test_handle_category_updates_the_pending_row_and_re_renders_the_card(conn, monkeypatch):
+    """A `cat:<name>` tap sets the category and edits the picker into a full card (§5).
+
+    Seeds a null-category pending row (the picker case) keyed on the sent card.
+    Tapping a category must (1) write that category to the pending row so a later
+    Confirm stores it, and (2) edit the *same* message into a confirm card — one
+    now carrying Confirm/Cancel, which the null-category picker lacked. Drives the
+    real `set_pending_category` against Postgres; only Telegram I/O is stubbed.
+    """
+    migrate(conn)
+    user_id = get_or_create_user(conn, 12345)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "spent 500 somewhere",
+        }
+    )
+    save_pending(conn, user_id, 909, txn)
+    edited = {}
+    acked = {}
+    monkeypatch.setattr(
+        app_module,
+        "edit_message_text",
+        lambda chat_id, message_id, text, reply_markup=None: edited.update(
+            chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+        ),
+    )
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+
+    chosen = EXPENSE_CATEGORIES[0]
+    result = app_module.handle_category(
+        conn,
+        ButtonPress(
+            chat_id=12345, message_id=909, callback_query_id="cbq1", data=f"{CATEGORY_PREFIX}{chosen}"
+        ),
+    )
+    assert result is not None and result.category == chosen
+    assert acked == {"cbq": "cbq1", "text": f"Category: {chosen}"}
+
+    # The picker was edited into a full confirm card (Confirm/Cancel now present).
+    assert edited["chat_id"] == 12345 and edited["message_id"] == 909
+    cbs = [b.callback_data for row in edited["reply_markup"].inline_keyboard for b in row]
+    assert CONFIRM in cbs and CANCEL in cbs
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == chosen  # the row now carries the chosen category
+    conn.rollback()
+
+
+def test_handle_category_ignores_a_forged_unknown_category(conn, monkeypatch):
+    """A `cat:` callback the keyboard never emits is acked and ignored, not 500ed.
+
+    A raise on an unknown category would make Telegram redeliver the bad tap
+    forever (the same trap task 72 fixed for unparseable text). The pending row
+    must be left untouched and nothing edited.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    edits = []
+    monkeypatch.setattr(
+        app_module, "edit_message_text", lambda *a, **k: edits.append(a)
+    )
+    monkeypatch.setattr(app_module, "answer_callback_query", lambda cbq, text=None: None)
+
+    result = app_module.handle_category(
+        conn,
+        ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data="cat:Bogus"),
+    )
+    assert result is None
+    assert edits == []  # nothing re-rendered
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == EXPENSE_CATEGORIES[0]  # unchanged
     conn.rollback()
 
 

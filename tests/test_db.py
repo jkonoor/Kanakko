@@ -9,7 +9,12 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.db import confirm_pending, get_or_create_user, save_pending
+from kanakko.db import (
+    confirm_pending,
+    get_or_create_user,
+    save_pending,
+    set_pending_category,
+)
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 
@@ -119,6 +124,67 @@ def test_confirm_unknown_message_returns_none(conn):
     """Confirming a card with no pending row is a no-op, not an error."""
     migrate(conn)
     assert confirm_pending(conn, 42, 999_999) is None
+    conn.rollback()
+
+
+def test_set_pending_category_updates_the_row(conn):
+    """A category tap re-writes the pending row's category and returns the txn (§5).
+
+    The stored `parsed` must carry the new category so the eventual Confirm writes
+    it; the returned `Transaction` is what the handler re-renders. The amount is
+    untouched and still a JSON string (§9) — a botched update that dropped it or
+    turned it into a number would fail the `Transaction` round-trip.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 30)
+    save_pending(conn, user_id, 555, _txn("250.00"))
+
+    new_cat = EXPENSE_CATEGORIES[3]
+    txn = set_pending_category(conn, user_id, 555, new_cat)
+    assert txn is not None
+    assert txn.category == new_cat
+    assert txn.amount == Decimal("250.00")  # amount survives the update
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parsed FROM pending_transactions WHERE telegram_message_id = 555"
+        )
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == new_cat
+    assert parsed["amount"] == "250.00"  # §9: still a string, not a float
+    conn.rollback()
+
+
+def test_set_pending_category_unknown_message_returns_none(conn):
+    """Setting a category on a card with no pending row is a no-op, not an error."""
+    migrate(conn)
+    assert set_pending_category(conn, 42, 999_999, EXPENSE_CATEGORIES[0]) is None
+    conn.rollback()
+
+
+def test_set_pending_category_is_scoped_to_the_user(conn):
+    """One user's category tap must not rewrite another user's identical card (§1).
+
+    A and B both hold a pending card on message id 555. A is seeded first (the
+    older row), so the fallback `ORDER BY … DESC` picks B's newer row — only the
+    `user_id` clause makes A's tap resolve to A's row. Dropping it reddens this.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 40)
+    b = _seed_user(conn, 41)
+    save_pending(conn, a, 555, _txn("100.00"))
+    save_pending(conn, b, 555, _txn("999.99"))
+
+    set_pending_category(conn, a, 555, EXPENSE_CATEGORIES[3])
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = 555",
+            (b,),
+        )
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == EXPENSE_CATEGORIES[0]  # B's row untouched
     conn.rollback()
 
 

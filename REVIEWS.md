@@ -22,12 +22,21 @@ three files (+47/-5). Judged against `docs/DECISIONS.md` §10 (current
 `Asia/Kolkata` date injected into **every** LLM prompt; timezone read through one
 function for the multi-user path) and the CLAUDE.md guard conventions.
 
-**Status: ⚠️ CHANGES REQUESTED** — the shipped code is correct and matches §10,
-but one of the two new guards asserts a surface form (date *format*) while
-claiming to verify the behaviour that actually matters (the zone is
-`Asia/Kolkata`, not UTC). It stays green when the zone is broken. Per this
-repo's own rule — "a guard that reports safety it doesn't provide is worse than
-no guard" — that is an open finding.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — the
+shipped code was already correct and matches §10, but one of the two new guards
+asserted a surface form (date *format*) while claiming to verify the behaviour
+that actually matters (the zone is `Asia/Kolkata`, not UTC). It stayed green
+when the zone was broken.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`.
+> `test_today_reads_the_kolkata_clock` now monkeypatches `parse.datetime` to a
+> frozen `FrozenDatetime` whose `now(tz)` returns `2026-08-06 20:00 UTC`
+> converted into `tz` — an instant where UTC (`2026-08-06`) and IST
+> (`2026-08-07`) fall on different calendar days — and asserts
+> `today() == "2026-08-07"`. The format regex is kept. Verified it earns its
+> place: mutating `KOLKATA = ZoneInfo("Asia/Kolkata")` → `ZoneInfo("UTC")` now
+> reddens exactly this test (`today()` returns `2026-08-06`, `AssertionError`);
+> restoring greens it. `uv run pytest -q` → `44 passed`.
 
 ### What I checked (and what it returned)
 

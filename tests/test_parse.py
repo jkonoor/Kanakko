@@ -9,7 +9,9 @@ default swallowed by compose's empty-string env var.
 
 import os
 import re
+from datetime import datetime, timezone
 
+from kanakko import parse
 from kanakko.categories import schema_enum
 from kanakko.parse import MODEL_DEFAULT, build_request, parse_schema, today
 
@@ -56,8 +58,18 @@ def test_current_kolkata_date_is_injected_into_the_prompt():
     assert "2026-08-06" in system
 
 
-def test_today_reads_the_kolkata_clock():
-    # today() is what production feeds the prompt — it must be a real Kolkata
-    # date, not a naive UTC one, and in YYYY-MM-DD form.
+def test_today_reads_the_kolkata_clock(monkeypatch):
+    # today() must resolve in Asia/Kolkata, not UTC. Pin an instant where the two
+    # zones fall on different calendar days: 2026-08-06 20:00 UTC is already
+    # 2026-08-07 01:30 IST. A naive-UTC today() would return 2026-08-06; the
+    # Kolkata one returns 2026-08-07. This reddens the moment KOLKATA is wrong.
+    fixed = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime:
+        @staticmethod
+        def now(tz=None):
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr(parse, "datetime", FrozenDatetime)
+    assert today() == "2026-08-07"
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())
-    assert today() in _system_content(build_request("x"))

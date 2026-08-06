@@ -20,11 +20,11 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-API = "https://doc-panel.innogenio.com/api"
-WEB = "xvcTr0x3RmHLzUHAuH1Mn"
-CRON = "ZW25YvpB8Edv-nCfh6Jwz"
-POSTGRES = "y8iECURcqfeVsYkaNkcCt"
-WEBHOOK_URL = "https://kanakko-web-kmeizk-a87806-49-12-44-133.sslip.io/webhook"
+API = "https://<dokploy-host>/api"
+WEB = "<web-app-id>"
+CRON = "<cron-app-id>"
+POSTGRES = "<postgres-id>"
+WEBHOOK_URL = "https://<app-domain>/webhook"
 
 # DECISIONS §15: Telegram accepts A-Za-z0-9_- only, 1-256 chars. A secret with
 # a `.` or `~` is silently refused by setWebhook, leaving the bot with no

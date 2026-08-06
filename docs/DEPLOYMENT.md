@@ -1,25 +1,23 @@
-# Deployment — Innogenio `doc-panel` Dokploy
+# Deployment — Dokploy
 
-Facts gathered 2026-08-05 from the Innogenio DevOps repo
-(`~/Innogenio/unassigned/DevOps/DevOps/docs/dokploy/`) and verified against the
-live API. That repo is the upstream source of truth for the instance; this file
-records only what Kanakko needs and what was learned first-hand.
+Verified against the live Dokploy API (v0.29.7). Host-specific values —
+hostnames, IPs and resource IDs — live in `deploy.local.env`, which is
+gitignored; the placeholders below stand in for them.
 
 ## Instance
 
 | | |
 |---|---|
-| Dashboard | `https://doc-panel.innogenio.com/` |
-| Host | `doc-panel-dokploy` — 49.12.44.133 |
-| API base | `https://doc-panel.innogenio.com/api` |
+| Dashboard | `https://<dokploy-host>/` |
+| Host | `<dokploy-host>` |
+| API base | `https://<dokploy-host>/api` |
 | Auth | header `x-api-key: $DOKPLOY_DOC_PANEL_TOKEN` |
 | Firewall | Hetzner Cloud Firewall at the edge; 80/443 public, SSH restricted |
 | Under the hood | Docker Swarm + Traefik |
 
-> **This instance is owned by the wider DevOps team**, not by this project.
-> Confirm before changing projects, domains, environment variables, remote
-> servers, or deployments. Use the `doc-panel` token only — never an
-> `ops-panel` or `saron` token against this host.
+> **The instance is shared and not owned by this project.** Confirm before
+> changing projects, domains, environment variables or deployments, and use
+> only the token issued for it.
 
 The token lives in the operator's shell profile. **Never commit it.** Check
 presence without printing the value:
@@ -28,9 +26,8 @@ presence without printing the value:
 env | awk -F= '/^DOKPLOY_/ {print $1"=<set>"}' | sort
 ```
 
-Existing projects on this instance (do not disturb): `Innogenio`,
-`fixed-asset`, `shared-mariadb`, `vpn`, `CineApp`, `N8N`, `ace`, `insurance`.
-Kanakko gets its own project.
+The instance hosts unrelated projects; this one lives in its own Dokploy
+project and touches nothing else.
 
 ## Provisioned resources
 
@@ -38,11 +35,11 @@ Created 2026-08-06 via the REST API. IDs are needed for every subsequent call.
 
 | Resource | ID | Internal host / notes |
 |---|---|---|
-| Project `Kanakko` | `xa5cDzEGJUgB2MHgl0xJB` | |
-| Environment `production` | `T74aci5qFWuG_wQ9TvV4P` | `isDefault` — services attach here, not to the project |
-| `kanakko-db` (Postgres 16-alpine) | `y8iECURcqfeVsYkaNkcCt` | host **`kanakko-db-kwuz62`**, db/user `kanakko` |
-| `kanakko-web` (Application) | `xvcTr0x3RmHLzUHAuH1Mn` | appName `kanakko-web-kmeizk` |
-| `kanakko-cron` (Application) | `ZW25YvpB8Edv-nCfh6Jwz` | appName `kanakko-cron-y4qpyy` |
+| Project `Kanakko` | `<project-id>` | |
+| Environment `production` | `<environment-id>` | `isDefault` — services attach here, not to the project |
+| `kanakko-db` (Postgres 16-alpine) | `<postgres-id>` | host **`<db-internal-host>`**, db/user `kanakko` |
+| `kanakko-web` (Application) | `<web-app-id>` | appName `<web-appname>` |
+| `kanakko-cron` (Application) | `<cron-app-id>` | appName `<cron-appname>` |
 
 **API notes for v0.29.7**, learned the hard way here:
 
@@ -90,9 +87,8 @@ entry in Dokploy's global registry list:
 | Username | `jkonoor` |
 | Password | A GitHub PAT with **`read:packages`** — pull only, no write |
 
-The three global registry entries on this instance (`ghcr.io` as
-`ronyantony-ig`, `ghcr.io` as `ronyantony00`, `git.innogenio.com` as `ci-bot`)
-belong to other work and are not used here.
+The instance's global registry entries belong to other work and are not used
+here — the per-service credentials above are self-contained.
 
 ## CI/CD
 
@@ -154,12 +150,6 @@ Dokploy's backup system does exactly what Kanakko needs, so don't hand-roll a
 bucket `dokploy-backup`, provider `AWS`. Either reuse it or create a Kanakko
 destination — confirm with the DevOps team which is appropriate.
 
-> **Documentation discrepancy found 2026-08-05, worth fixing upstream:**
-> `docs/dokploy/backups.md` line 7 states *"`doc-panel.innogenio.com` has no
-> backups configured"*, while `docs/dokploy/README.md` says scheduled S3
-> backups *are* configured on this instance. The API confirms at least one
-> destination exists. The two docs disagree; treat neither as authoritative
-> until reconciled.
 
 ### The compose-backup gotcha no longer applies — keep it in mind anyway
 

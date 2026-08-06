@@ -81,6 +81,8 @@ the plan's order and it matters.
 
 ## Phase 3 — Scheduled jobs
 
+- [ ] Configure logging at startup so `log.info` actually emits — `logging.getLogger(__name__)` with nothing configured means Python's last-resort handler drops everything below WARNING, so every `log.info` in the app is silently discarded under uvicorn. Verified live: a real Telegram delivery produced uvicorn access lines but no `dispatched …` line. Add a check that an INFO record reaches a handler. Do this **before** the jobs below — their only evidence of having run is a log line
+
 - [ ] Add `kanakko/jobs/evening.py` — 21:00 daily, unconditional, day's total and entry count
 - [ ] Add `kanakko/jobs/noon.py` — 12:00 daily, suppressed if anything was logged since the last evening summary
 - [ ] Add `kanakko/jobs/monthly.py` — 09:00 on the 1st, previous month's income, expenses, balance, top categories

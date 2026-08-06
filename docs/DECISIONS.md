@@ -288,9 +288,9 @@ rectangles.
 
 ---
 
-## 14. Hosting: Innogenio `doc-panel` Dokploy
+## 14. Hosting: a shared, self-hosted Dokploy instance
 
-**Decided:** Deploy to `doc-panel.innogenio.com` (company Dokploy instance),
+**Decided:** Deploy to `<dokploy-host>` (shared Dokploy instance),
 with permission. Telegram **webhook** rather than long polling, since HTTPS is
 available there anyway and the Mini App requires it regardless.
 

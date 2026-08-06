@@ -26,7 +26,7 @@ Design complete, implementation not started. See
 | Data access | Plain SQL via `psycopg`, numbered `.sql` migrations — no ORM |
 | Dashboard | Telegram Mini App, auth via `initData` HMAC — no login |
 | Scheduling | Cron sidecar container (noon nudge, 9pm summary, 1st-of-month report) |
-| Hosting | Innogenio `doc-panel` Dokploy instance |
+| Hosting | Self-hosted Dokploy (shared instance) |
 
 Deliberately absent: ORM, Celery, Redis, charting library, conversation state
 machine, login system. Each is noted in `docs/DECISIONS.md` with the condition

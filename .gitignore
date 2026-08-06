@@ -10,3 +10,4 @@ venv/
 *.db
 *.sqlite3
 .DS_Store
+deploy.local.env

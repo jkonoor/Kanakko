@@ -2170,7 +2170,7 @@ the word `POSTGRES_PASSWORD` in the commit message prose. No secret added.
 | pyyaml is dev-only | `sed -n '1,25p' pyproject.toml` | absent from `[project].dependencies`, present in `[dependency-groups].dev` |
 | Compose still parses | `yaml.safe_load` on the real file | `services` = `cron, db, web`; `web` → `['127.0.0.1:8000:8000']`, `db`/`cron` → `None` |
 | Files in commit | `git show --name-only --format= HEAD` | `REVIEWS.md`, `pyproject.toml`, `tests/test_compose.py`, `uv.lock` |
-| `DECISIONS.md` §14 supports the loopback rationale | `sed -n '291,320p' docs/DECISIONS.md` | "Innogenio `doc-panel` Dokploy … company Dokploy instance" — shared host, rationale holds |
+| `DECISIONS.md` §14 supports the loopback rationale | `sed -n '291,320p' docs/DECISIONS.md` | "shared Dokploy instance … company Dokploy instance" — shared host, rationale holds |
 
 **Mutation battery.** I mutated the real `docker-compose.yml`, ran the single
 guard, and restored from an in-memory copy; `diff` against a `/tmp` backup was
@@ -2530,7 +2530,7 @@ strictly worse than the `/telegram/webhook` exposure the guard was written for.
 
 Failure scenario, concretely: Phase 3 or a debugging pass adds
 `ports: - 5432:5432` under `db`. `uv run pytest` → `14 passed`. The file is
-pasted into Dokploy on `doc-panel` (49.12.44.133). Postgres answers on
+pasted into Dokploy on `doc-panel` (<host-ip>). Postgres answers on
 `0.0.0.0:5432` behind a Hetzner firewall whose documented posture is 80/443
 public and SSH restricted — so possibly closed at the edge, but the host's other
 tenants are inside it. Nothing errors, and the one file that is supposed to

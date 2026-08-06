@@ -12,6 +12,60 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `262fc0d` — add `kanakko/parse.py` (OpenRouter call + schema)
+
+**Scope:** New `kanakko/parse.py` (parse schema, request body, thin httpx call)
+and `tests/test_parse.py` (4 body/schema checks, no network); `TASKS.md` line 37
+ticked. Judged against `docs/DECISIONS.md` §2 (OpenRouter, `response_format`
+json_schema, `require_parameters: true`, default `claude-opus-5`), §9 (money is
+`Decimal`/`NUMERIC`, no float), §11 (categories from one source), and the
+CLAUDE.md conventions. `git show --stat HEAD` confirms exactly those three files
+(+142/-1). The commit explicitly defers date injection (task 38), Pydantic
+validation + retry (task 39), and the nullable-category refinement (task 40) —
+all three boxes remain unchecked, so their absence is out of scope, not a
+finding.
+
+**Status: ✅ DONE** — the module does what task 37 asked and matches §2; the
+guards fail for the reasons they exist. No blocking findings.
+
+### What I checked (and what it returned)
+
+- **Whole suite green.** `uv run pytest -q` → `42 passed, 1 warning`. The lone
+  warning is the pre-existing Starlette/httpx deprecation, unrelated to this diff.
+- **Every §2/§9/§11 lever exercised directly** (script driving the real code):
+  - `require_parameters` → `True`; `response_format.json_schema.strict` → `True`;
+    `response_format.type` → `json_schema`. Matches §2.
+  - `amount` schema type → `string` (§9: a JSON number would decode to `float`
+    and lose paise; a string survives to `money.parse_amount`).
+  - `category` enum → `schema_enum()` exactly (`== True`), so the model cannot
+    invent a category (§11); no literal category strings in `parse.py`.
+  - `required` → `['type','amount','category','date','note']`,
+    `additionalProperties` → `False`. Consistent with the current pre-task-40
+    schema (category still required; §3's nullable refinement is task 40).
+  - No confidence score anywhere in the schema (§3). Confirmed.
+- **The empty-env model-default guard genuinely guards (the revert-verified
+  one).** With `OPENROUTER_MODEL=""`, `build_request()['model']` → `claude-opus-5`;
+  the naive `os.environ.get("OPENROUTER_MODEL", MODEL_DEFAULT)` returns `''` for
+  the same input — so the guard reddens on the exact bug it names. Unset → default;
+  `anthropic/claude-sonnet-5` → passes through. `model or env or MODEL_DEFAULT` is
+  correct.
+- **`call()` fails closed without a key.** With `OPENROUTER_API_KEY` unset,
+  `call('x')` raises `RuntimeError("OPENROUTER_API_KEY is not set")` before any
+  network I/O. Key is read from env and sent as a `Bearer` header — no secret in
+  the repo, fixture, or compose.
+
+### Notes (non-blocking, for the tasks that own them)
+
+- The schema requires `date` (YYYY-MM-DD) but no current date is injected yet, so
+  `call()` today would ask the model to date a transaction with no clock — this is
+  precisely task 38, deferred and unwired (no caller invokes `call()` until the
+  webhook, task 41). Not a finding; flagged so task 38 isn't lost.
+- `call()`'s POST/parse path has no test (no network by design). Its only logic is
+  the key-missing raise (verified above) and a standard OpenRouter response
+  unwrap; validation of the returned body is task 39. Acceptable for this scope.
+
+---
+
 ## 2026-08-06 — `1271d4a` — cover parse → store → sum-by-category with `Decimal`
 
 **Scope:** Test-only commit. Adds `test_parse_store_sum_by_category_stays_exact`

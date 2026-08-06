@@ -59,6 +59,33 @@ def test_month_summary_buckets_by_ist_month_and_excludes_deleted(conn):
     conn.rollback()
 
 
+def test_last_day_2350_ist_lands_in_that_months_report(conn):
+    """A 23:50-IST entry on the month's last day belongs to that month, not the next (§10, §12).
+
+    Exercises `previous_month_ist` and `month_summary` together — the range that
+    the real report buckets on. The upper bound is the *first of next month*,
+    exclusive, so the last day (Jul 31) must satisfy `occurred_on < Aug 1`. The
+    trap is the natural "end of month" mistake — computing the range as
+    `[first, last_day_of_month]`, which drops the 31st's money out of the report
+    silently. 23:50 IST on Jul 31 is 18:20 UTC the same date; `occurred_on` is a
+    `DATE` the parse pins in IST, so the last-day bucket is Jul 31 regardless of
+    time. The report runs 09:00 IST on Aug 1.
+    """
+    migrate(conn)
+    run_time = datetime(2026, 8, 1, 9, 0, tzinfo=IST)  # 09:00 IST on the 1st
+    first, next_first = previous_month_ist(run_time)
+    assert (first, next_first) == (date(2026, 7, 1), date(2026, 8, 1))
+
+    user = get_or_create_user(conn, 711000)
+    _insert(conn, user, Decimal("250.00"), "expense", date(2026, 7, 31), "Food")  # 23:50 IST, last day
+
+    income, expenses, top = month_summary(conn, user, first, next_first)
+
+    assert expenses == Decimal("250.00")  # the last day's spend is in July's report, not lost
+    assert top == [("Food", Decimal("250.00"))]
+    conn.rollback()
+
+
 def test_month_summary_empty_month(conn):
     """A month with no entries is (0, 0.00, []) — the unconditional report still sends."""
     migrate(conn)

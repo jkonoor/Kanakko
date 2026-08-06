@@ -12,6 +12,71 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `f5fbf8e` — evening summary job, 21:00 daily unconditional (Phase 3, task 86)
+
+**Status: ✅ DONE** — no blocking issues. `day_summary` reads
+`active_transactions`, sums come back `Decimal`, the day boundary is bucketed in
+`Asia/Kolkata`, and all three new guards fail for the reason they exist
+(verified by revert-and-red, below). One non-blocking observation on batch
+resilience is recorded for when the fan-out is finalized (tasks 89/90).
+
+**Scope reviewed.** `git show HEAD` only: `kanakko/db.py` (`all_users`,
+`day_summary`), `kanakko/jobs/{__init__,evening}.py` (new), `tests/test_evening.py`
+(new), `tests/test_read_paths.py` (glob→rglob), `TASKS.md` (box ticked). No other
+production behaviour changed; no new dependency (`zoneinfo`, `datetime`, `decimal`
+are stdlib).
+
+**What I ran.**
+
+- `uv run pytest -q` → **106 passed**, 1 warning. Matches the commit claim (was 102).
+- **Revert-and-red on all three guards** (edited the two source files, reran, then
+  restored — `git status` clean afterward):
+  - `today_ist` → `now.date()` (UTC): `test_today_ist_buckets_in_kolkata` **failed**
+    (`date(2026,8,7)` expected, `date(2026,8,6)` got for 22:00 UTC).
+  - `day_summary` `FROM active_transactions` → `FROM transactions`:
+    `test_day_summary_buckets_by_ist_date_and_excludes_deleted` **failed** (deleted
+    ₹500 folded back into spend) *and* the read-path guard **failed** flagging
+    `db.py:231`. The `rglob` widening genuinely reaches `kanakko/jobs/` too.
+- **Money type on the empty day** (the project's most-guarded invariant): threw a
+  throwaway test at the real-Postgres `conn` fixture — `day_summary` on a day with
+  no rows returns `type(spent) is Decimal` and `type(received) is Decimal`, not
+  `int`. `coalesce(sum(...), 0)` stays `NUMERIC` → `Decimal`. Removed the temp test.
+
+**Spec fit (`docs/DECISIONS.md` §6, §9, §10, §12).**
+
+- §12: evening summary is unconditional — `summary_text` returns a message even for
+  `count == 0`, and `run` sends to every user regardless of activity. Carries the
+  day's total and entry count. ✅
+- §9: amounts never touch `float`. `day_summary` sums are `Decimal`; `format_amount`
+  takes `Decimal`. The `count == 0` branch returns before `format_amount`, so the
+  empty-day `Decimal("0")` is never formatted anyway. ✅
+- §6: the only ledger read is through `active_transactions`; `all_users` reads
+  `users` (not a ledger read, correctly outside the view). ✅
+- §10: day boundary computed once in `today_ist` via `Asia/Kolkata`; `occurred_on`
+  is a `DATE` column and `day` is compared as a plain IST-derived date, so no UTC
+  bucketing sneaks in. ✅
+- No confidence score, no ORM/Celery/Redis, categories untouched. ✅
+
+**Non-blocking observation (not a defect in the committed scope).**
+
+- `kanakko/jobs/evening.py:59-64` — `run` calls `send_message` in a bare loop with
+  no per-user isolation. `send_message` does `raise_for_status`, so the first user
+  who has blocked the bot (Telegram 403) or is otherwise unreachable will abort the
+  whole batch; every user ordered after them silently gets no summary, and `main`'s
+  "sent to N user(s)" line never logs because the exception propagates. This is the
+  kind of silent partial-failure the project cares about, but it is arguably out of
+  task 86's stated scope (the commit defers the `reminder_log` write to task 89 and
+  the crontab to task 90, both of which touch this loop). **Suggested fix when the
+  fan-out is finalized:** wrap the per-user body in `try/except`, log-and-continue
+  on send failure, and count only the successes. No test exercises `run`/`main`
+  today; a test that makes one user's `send_message` raise and asserts the others
+  still receive theirs would pin this once the behaviour exists.
+
+**Verdict.** The committed scope is correct, matches §12, and every new guard
+earns its place. ✅ DONE.
+
+---
+
 ## 2026-08-06 — `c217c8d` — configure logging at startup so `kanakko` `log.info` emits (Phase 3, task 84)
 
 **Status: ✅ DONE** — no blocking issues. Adds `kanakko.configure_logging()`

@@ -12,6 +12,61 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `6ac1790` — show category buttons when the parse returned no category (§3, task 73)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope:** When `parse_message` returns `category: null`, `handle_text` now
+renders a category picker (`category_prompt`) instead of the Confirm/Cancel
+confirm card; the pending row is still written keyed by the sent message id.
+`confirm_card` gains an `assert txn.category is not None` backstop.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (app.py, confirm.py, categories.py
+  usage, test_webhook.py, TASKS.md tick).
+- `uv run pytest` → **84 passed, 1 warning** (the pre-existing httpx
+  deprecation warning only). Full suite green.
+- `uv run pytest tests/test_webhook.py` → 18 passed.
+- **Verified the new guard bites:** replaced line 135–136 of `app.py` with an
+  unconditional `text, keyboard = confirm_card(txn)` and re-ran
+  `test_handle_text_shows_category_buttons_when_category_is_null` →
+  **1 failed** (the null category reaches `confirm_card` and trips its assert /
+  sends Confirm not `cat:`). Restored `app.py` via `git checkout`; suite green
+  again. The test is a real check, not a rubber stamp.
+- Confirmed routing completeness: `grep` shows the only production caller of
+  `confirm_card` is `app.py:135`, correctly guarded by `txn.category is None`;
+  `category_prompt` is likewise only reached from there. No path lets a null
+  category into `confirm_card` in production.
+- Confirmed `category_keyboard(txn.type)` cannot `KeyError`: `parse.py:123`
+  types `type: Literal["expense", "income"]`, both keys of `CATEGORIES_BY_TYPE`.
+- Spec fit: §3 ("`category: null` → show the category buttons") — matches.
+  Categories sourced only from `categories.py` (imported `keyboard`), no literal
+  category strings. `amount` still non-nullable, `category` nullable, no
+  confidence score introduced. No money/timezone/soft-delete surface touched.
+
+### Findings
+
+None blocking. Three low-severity observations, all recoverable / out of the
+task's scope — recorded, not requested:
+
+1. **No Cancel on the picker** (`confirm.py:49` `category_prompt`). The picker
+   offers only the `cat:` buttons — a user who spots a wrong *amount* at this
+   point cannot abort directly; they must pick any category and Cancel on the
+   resulting confirm card (task 78, not yet built). §5 allows Cancel-and-retype;
+   this adds one tap to that path. Acceptable for now since task 78 owns the
+   post-pick card; worth a Cancel button if that card doesn't materialise.
+2. **Date line dropped** (`confirm.py:58–61`). `category_prompt` shows
+   type/amount/note but not `Date:` (the confirm card shows it). No data loss —
+   the parsed date is persisted in the pending row and shown on task 78's card.
+   Cosmetic.
+3. **`assert` stripped under `python -O`** (`confirm.py:31`). The assert is a
+   fail-loud backstop, not the real guard — the routing in `app.py:135` is what
+   actually keeps a null out of `confirm_card`, and that is not an assert. So
+   `-O` weakens only the redundant backstop, not the behaviour. No action needed.
+
+---
+
 ## 2026-08-06 — `0667bfc` — reject an unparseable message with a rephrase prompt (§3, task 72)
 
 **Scope:** `handle_text` now catches the `ValidationError` that `parse_message`

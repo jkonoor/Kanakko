@@ -12,6 +12,49 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `ead8aab` — category buttons directly on the confirm card (§5, task 77)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope:** `confirm_card` now appends `category_keyboard(txn.type)`'s rows below
+the Confirm/Cancel row, so the wrong-category fix is one tap on the card. Pure
+rendering change; the category-press handler that mutates the pending row is the
+next (still-unticked) task.
+
+### What I checked (commands run)
+
+- `git show HEAD` — full diff (confirm.py, test_confirm.py, TASKS.md tick).
+- `uv run pytest -q` → **85 passed, 1 warning** (the pre-existing httpx
+  deprecation only). Matches the commit's claim (was 84, +1).
+- **Verified the new guard bites:** replaced `kanakko/confirm.py` with its
+  `HEAD~1` version (`git show HEAD~1:kanakko/confirm.py`) and re-ran
+  `tests/test_confirm.py` → **1 failed** on
+  `test_category_buttons_are_on_the_card_for_one_tap_correction` (the assertion
+  that every `cat:<name>` for the txn type is present in the keyboard). Restored
+  the file; suite green again. The guard reddens for the reason it exists —
+  dropping the category buttons off the card — not on a surface form.
+- **Spec fit against §5.1:** DECISIONS §5 explicitly replaces the field editor
+  with, first item, "Category buttons directly on the confirm card." The change
+  implements exactly that. No conversation state machine introduced (§5 "Why").
+- **Categories sourced from `categories.py` only:** `confirm.py` imports
+  `keyboard as category_keyboard`; no literal category string in the module. The
+  keyboard's `cat:<name>` data is generated from `EXPENSE_CATEGORIES` /
+  `INCOME_CATEGORIES`, so the card can never offer a category the schema rejects.
+- **No spec-critical surfaces touched:** amount still renders via
+  `format_amount` (no float), no `active_transactions`/timezone/money path in
+  scope, no confidence score, `category` nullability untouched. The
+  `assert txn.category is not None` precondition still routes null categories to
+  `category_prompt` (§3).
+- Confirmed `git status` clean after the revert experiment; no stray edits left.
+
+### Findings
+
+None. The change is minimal, matches §5.1, keeps categories single-sourced, and
+ships a guard that genuinely fails without the fix. The category-press handler is
+correctly left as the next unticked task, so nothing is falsely ticked.
+
+---
+
 ## 2026-08-06 — `6ac1790` — show category buttons when the parse returned no category (§3, task 73)
 
 **Status: ✅ DONE** — no blocking issues.

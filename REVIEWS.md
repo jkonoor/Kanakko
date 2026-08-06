@@ -12,6 +12,64 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `cbc3a9d` — validate parse result with Pydantic + one retry (§2, task 39)
+
+**Scope:** Adds a `Transaction` Pydantic model and `parse_message()` to
+`kanakko/parse.py`, which validates the model's JSON and retries exactly once on
+a schema failure. 6 new tests in `tests/test_parse.py`; `TASKS.md` line 39 ticked.
+Diff +162/-8 across three files, no production code beyond `parse.py`.
+
+**Status: ✅ DONE** — no blocking issues. The commit does what §2 asks (one
+Pydantic validation + one retry), keeps `amount` on the `Decimal` rail through
+the single §9 door, and correctly defers nullable-category to task 40. I
+reproduced both defects the new tests exist to catch and confirmed they go red.
+
+### What I checked (and what it returned)
+
+- **`git show HEAD`** — confirmed scope: `parse.py`, `test_parse.py`, `TASKS.md` only.
+- **`uv run pytest`** → `50 passed, 1 warning`. **`uv run pytest tests/test_parse.py -v`**
+  → all 12 pass (6 new).
+- **Float coercion probe** (`/tmp/probe.py`, direct `Transaction.model_validate`):
+  `amount: 500.5` (JSON float) → **rejected**; `amount: "500.50"` → `Decimal('500.50')`;
+  `amount: 500` (JSON int) → `Decimal('500.00')` (exact, no paise lost);
+  `date: "not-a-date"` → **rejected**. The §9 leak is closed: a provider that
+  ignores strict mode and returns a bare number can't launder a lost-precision
+  float into a `Decimal`.
+- **Revert-verified the two guards actually bite:**
+  - Replaced the retry's `except` body with `raise` → `test_schema_failure_is_retried_exactly_once`,
+    `test_two_failures_raise_and_do_not_loop`, `test_float_amount_is_refused_not_coerced`,
+    `test_non_json_content_is_retried` all **failed** (4 red). Restored → green.
+  - Made `_amount_is_exact` return `value` unchanged (bypassing `parse_amount`, letting
+    Pydantic coerce float→Decimal) → `test_float_amount_is_refused_not_coerced` and
+    `test_two_failures_raise_and_do_not_loop` **failed** (2 red). Restored → 12 green.
+  Both commit-message revert claims hold.
+- **Spec fit:** §2 caveat (strict mode best-effort per provider → one Pydantic
+  validation + single retry) is implemented literally. No confidence score
+  (§3) — `Transaction` has no such field. `category` stays required, matching the
+  commit's own note that nullability is task 40; not a finding since that task is
+  unchecked. `extra="forbid"` mirrors the schema's `additionalProperties: false`.
+- **Retry classification** matches the docstring: `ValidationError`/`json.JSONDecodeError`
+  retried; `httpx.HTTPError` and a missing key (`KeyError`/`IndexError` from
+  `response.json()["choices"][0]...`) propagate un-retried
+  (`test_http_error_is_not_retried` confirms the HTTP case, 1 call, no retry).
+
+### Findings
+
+None blocking. Two non-issues noted for the record:
+
+- **Int amount accepted despite the schema declaring `amount` a string.** A JSON
+  integer (`500`) decodes to `int`, which `parse_amount` accepts exactly →
+  `Decimal('500.00')`. No paise are lost (an int has no fractional part), so this
+  is harmless resilience, not a §9 violation. Only `float` loses precision, and
+  that path is rejected. No change needed.
+- **`response.json()` raising `JSONDecodeError` is treated as a schema failure.**
+  If OpenRouter's *outer* HTTP body (not just the model `content`) is malformed,
+  `call()` raises `JSONDecodeError` before reaching `json.loads(content)`, so it
+  gets retried once like a bad-content failure rather than propagating as a
+  transport error. Retrying once is harmless and rare; not worth a guard.
+
+---
+
 ## 2026-08-06 — `8ee86b9` — rewrite `test_today_reads_the_kolkata_clock` to verify the zone, not the format
 
 **Scope:** test-only follow-up. Rewrites the one guard flagged ⚠️ on `b21aa45`

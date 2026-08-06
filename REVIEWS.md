@@ -12,6 +12,60 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `914e029` — Weekly summary section on the dashboard (§13, task 99)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `webapp.current_week_ist` (new); `dashboard_html` gains
+`week_income`/`week_expenses` params and a "This week" section; `app.mini_app_data`
+reuses `month_summary` for the week range; the task-99 tick in `TASKS.md`; new
+tests in `tests/test_webapp.py`.
+
+### What I actually ran
+
+- `uv run pytest -q` → **149 passed, 1 warning** (matches the commit claim; was
+  147). Warning is Starlette's testclient/`httpx` deprecation, unrelated.
+- `uv run pytest tests/test_webapp.py -q` → **24 passed**.
+- **Week boundary guard, break-and-red (verified myself):** re-ran the
+  `current_week_ist` body with `.astimezone(IST)` removed against the test's input
+  `datetime(2026, 8, 9, 19:00 UTC)` (= Mon 00:30 IST). Broken form returns
+  `2026-08-03`; the guard `test_current_week_ist_buckets_in_kolkata` asserts
+  `2026-08-10`, so it reddens for the reason it exists — the 5.5h slide that would
+  drop Monday's opening entries into last week.
+
+### Spec / convention checks
+
+- **§13 scope.** `docs/DECISIONS.md:278` lists a weekly summary in the dashboard
+  contents; task 97 landed the monthly block, task 99 adds the weekly counterpart.
+  Tick is honest — the "This week" section renders and figures are real.
+- **Money invariant (§9).** Week balance is `week_income - week_expenses`, exact
+  `Decimal` subtraction; both figures flow from `month_summary` as `NUMERIC` →
+  `Decimal`. No float touches the path.
+- **Soft-delete (§6).** The week reuses `db.month_summary`, which reads
+  `active_transactions` (db.py:259, 265) — a deleted row can't re-enter the week's
+  totals.
+- **IST boundaries (§10).** `current_week_ist` converts to IST before taking
+  `weekday()`, and `month_summary`'s range is half-open `[monday, next_monday)` on
+  `occurred_on` (a date) — matches the week's date pair exactly. Weeks start Monday
+  (Mon=0), consistent with the docstring.
+- **No new dependency (§13).** Route discards the week's `top` categories and
+  renders figures only; no charting library, no import added beyond
+  `current_week_ist`.
+
+### Non-blocking note
+
+- The route integration test (`tests/test_webapp.py:273`) only asserts the
+  "This week" *section* is present, not that its figures are bucketed on the week
+  range against dated data. Low risk: the boundary logic is unit-tested with a
+  fixed `now`, the rendering-distinctness of week vs month balances is covered
+  (`test_dashboard_html_week_and_month_balances_are_distinct`), and `month_summary`'s
+  date-range bucketing is already exercised via the month path. The route wiring
+  is plain plumbing. Not worth a blocking finding; if a future change touches the
+  week-range wiring, an integration assertion on the week figure would catch a
+  silent swap.
+
+---
+
 ## 2026-08-06 — `e51d214` — Category breakdown as sorted CSS percentage bars (§13, task 98)
 
 **Status: ✅ DONE** — no blocking issues. One low-severity robustness note below.

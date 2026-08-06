@@ -92,8 +92,8 @@ the plan's order and it matters.
 
 ## Phase 4 — Mini App dashboard
 
-- [ ] Add `initData` HMAC validation — `HMAC-SHA256(bot_token, "WebAppData")` as the secret key, per `docs/DECISIONS.md` §13
-- [ ] Add a check that a forged or tampered `initData` payload is rejected
+- [x] Add `initData` HMAC validation — `HMAC-SHA256(bot_token, "WebAppData")` as the secret key, per `docs/DECISIONS.md` §13
+- [x] Add a check that a forged or tampered `initData` payload is rejected
 - [ ] Add the dashboard route rendering totals, balance, and current-month figures
 - [ ] Add the category breakdown as a sorted list with CSS percentage bars — no charting library
 - [ ] Add the weekly and monthly summary sections

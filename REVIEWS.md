@@ -12,6 +12,87 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `3ac705b` — per-row category change from the dashboard (§13, task 101)
+
+**Status: ✅ DONE** — one low-severity finding below, non-blocking.
+
+Scope: closes task 101. `db.set_transaction_category` (user-scoped category
+UPDATE through the `active_transactions` subquery, mirroring
+`soft_delete_transaction`), `POST /app/category` (mutation route,
+`initData` validated with a 24h freshness window + scoped to the signed user +
+`category ∈ ALL_CATEGORIES`), `webapp._category_select` / `recent_list` (the
+per-row native `<select>` + `change` handler + `.cat-select` CSS), six new tests,
+and the `TASKS.md` tick.
+
+### What I checked
+
+- **Full test suite** — `uv run pytest -q` → **165 passed, 1 warning in 5.52s**
+  (webapp file alone: 40 passed). Matches the commit's claim.
+- **Diff read end to end** (`git show HEAD`): `kanakko/app.py:161-205`,
+  `kanakko/db.py:345-372`, `kanakko/webapp.py:180-230,304,328-337`, the six new
+  tests, the `TASKS.md` tick.
+- **Both new guards fail for the reason they exist (revert-and-red, run myself):**
+  - Removed `if category not in ALL_CATEGORIES` from the route → 
+    `test_category_route_rejects_an_unknown_category` **FAILED** (a forged
+    `"Bribes"` reached the DB and returned 204 instead of 400). Restored.
+  - Dropped `max_age=timedelta(hours=24)` from *this* route's
+    `validate_init_data` call → `test_category_route_rejects_a_stale_init_data`
+    **FAILED** (2023 `auth_date` with a valid HMAC returned 204 instead of 401).
+    Restored.
+- **Spec fit, verified in code, not assumed:**
+  - Write goes to base `transactions` but the row is *chosen* from
+    `active_transactions` scoped to `user_id` (`db.py:361-367`) — a
+    deleted/foreign id yields no `txn_id`, `WHERE txn_id = (NULL)` matches nothing,
+    returns `None` → 404. Same shape as the delete route. No read bypasses the view.
+  - Money path untouched — this route only rewrites the `category` TEXT column;
+    `amount`/`type` are never touched, so income/expense totals (which filter by
+    `type`) can't shift. No `float` anywhere.
+  - Categories sourced only from `categories.py` (`ALL_CATEGORIES`,
+    `CATEGORIES_BY_TYPE`); no literal category strings introduced.
+  - Note/category rendering stays HTML-escaped; the `<select>` option text is
+    `html.escape`d.
+- **Cross-user scoping, run live:** `test_category_route_cannot_change_another_users_row`
+  passes (404, row unchanged) — reproduced the intent by reading the subquery.
+
+### Findings
+
+**F1 (LOW, non-blocking) — the route validates `category` against the union
+`ALL_CATEGORIES`, not the transaction's per-type set, so a forged body can put an
+income-only category on an expense (and vice-versa).**
+`kanakko/app.py:192` (`if category not in ALL_CATEGORIES`) and
+`kanakko/db.py:345` (the DB function never sees the row's `type`).
+
+Verified live: I inserted an `expense` row and POSTed
+`{"id": …, "category": "Salary"}` (income-only, never offered for an expense in
+the `<select>`) with a fresh `initData` → **STATUS 204, STORED "Salary"**. The
+UI never surfaces this (the `<select>` only lists `CATEGORIES_BY_TYPE[type]`), so
+it is reachable only by a hand-crafted request, not by normal use.
+
+Failure scenario: `month_summary` builds the expense breakdown as
+`... WHERE type='expense' GROUP BY category` (`db.py:264-268`). An expense
+relabeled "Salary" then shows up as a **"Salary" slice inside the expense
+breakdown** for that user. Bounded harm: it stays within the closed set, it is
+the user's own data only (cross-user is blocked), and the income/expense *totals*
+are unaffected because they filter on `type`, which this route never changes.
+That is why it is LOW, not blocking.
+
+Suggested fix: validate against the row's own type. Either look up the type and
+check `category in CATEGORIES_BY_TYPE[type]`, or fold the check into
+`set_transaction_category` with `... AND type = (SELECT type FROM
+active_transactions WHERE txn_id = %s ...)` so a type-mismatched category matches
+no row and returns `None` → 404. A test that POSTs an income category to an
+expense and asserts 400/404 + unchanged row would fail today.
+
+### Nits (not findings)
+
+- The `&` in "Bills & Utilities" round-trips correctly: the server emits
+  `<option>Bills &amp; Utilities</option>`, and a browser reports the *decoded*
+  text ("Bills & Utilities") as `option.value`, which is in `ALL_CATEGORIES`. No
+  test exercises this specific category, but it is a fixed set and the escaping is
+  purely a rendering concern, so it is low value.
+
+---
+
 ## 2026-08-06 — `f5d2a4f` — recent-transactions list + per-row soft delete (§13, task 100)
 
 **Status: ✅ DONE** — no blocking issues.

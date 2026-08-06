@@ -14,11 +14,64 @@ returned, not what they were assumed to return.
 
 ## 2026-08-06 — `e6775fc` — validate Mini App initData HMAC (§13, Phase 4 tasks 95-96)
 
-**Status: ⚠️ CHANGES REQUESTED** — one finding to resolve (verify against the
-Telegram primary source) before the dashboard route is wired to this validator.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED — finding 1 was WRONG, do not apply
+it.** The review did the right thing by tagging its claim `UNVERIFIED` and
+asking for primary-source confirmation. That confirmation was done (attended,
+with web access the review sandbox lacks) and it **refutes** the finding. The
+code was already correct; the suggested fix would have broken it.
 
 Scope: new `kanakko/webapp.py` (`validate_init_data`), new
 `tests/test_webapp.py`, and the task 95/96 ticks in `TASKS.md`.
+
+### Resolution of finding 1 (`signature` exclusion) — 2026-08-06, attended
+
+**Verdict: `signature` must STAY in the data-check-string for the bot-token
+HMAC path. `fields.pop("signature", None)` is a defect, not a fix.**
+
+Telegram has *two* validation paths and only one of them excludes `signature`:
+
+| Path | Key | Excluded from data-check-string |
+|---|---|---|
+| Bot-token HMAC (what `validate_init_data` implements) | `HMAC-SHA256(bot_token, "WebAppData")` | `hash` **only** |
+| Third-party Ed25519 (not implemented here) | Telegram's public key | `hash` **and** `signature` |
+
+Evidence, in order of authority:
+
+1. **`core.telegram.org/bots/webapps`** states the exclusion *only* for the
+   Ed25519 path — "Append all received fields **(except _hash_ and
+   _signature_)**" — and says nothing of the sort for the HMAC path, which it
+   describes as "a chain of all received fields, sorted alphabetically". The
+   docs' silence on the HMAC path is what makes this finding so easy to reach;
+   the asymmetry is the answer, not an omission.
+2. **The official SDK has both paths in one file** —
+   `Telegram-Mini-Apps/telegram-apps`, `packages/init-data-node/src/validation.ts`
+   (read via the GitHub API, 2026-08-06): the Ed25519 routine skips `hash` and
+   `signature` (L94-100); the bot-token HMAC routine skips **only** `hash` and
+   pushes every other field, `signature` included, into `pairs` (L251-264).
+
+**Consequence had it been applied:** any Bot API 8.0+ client sends `signature`,
+so the validator would have recomputed a hash Telegram never produced and
+raised `InitDataError` on every legitimate payload — the dashboard rejecting
+100% of real users. It fails closed, so it would have been loud rather than a
+bypass, but it is the exact availability bug the finding set out to prevent.
+
+**What landed instead:** no production change (the code was already right), plus
+`tests/test_webapp.py::test_signature_field_stays_in_the_data_check_string` —
+a payload signed *with* a `signature` field must verify. Confirmed it earns its
+place: re-applying `fields.pop("signature", None)` makes it fail with
+`InitDataError: initData hash mismatch` (1 failed, 5 passed); restored, 6 passed.
+
+**For the next iteration: this finding is closed. Do not re-open it, and do not
+add the `signature` pop.** The test above is what will stop you.
+
+### Still open from this review (carried forward, not blocking)
+
+`auth_date` freshness is still unchecked, and the review correctly called that a
+defensible deferral *while the validator does not mutate state*. Tasks 100 and
+101 (per-row soft delete, per-row category change from the dashboard) **do**
+mutate state, which makes a captured `initData` a replay token valid forever.
+The same official SDK defaults to `expiresIn = 86400` (24h) for this reason.
+Add the `max_age` guard as part of whichever of those tasks lands first.
 
 ### What I checked
 

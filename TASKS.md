@@ -49,14 +49,18 @@ the plan's order and it matters.
       travels as a JSON string and returns through the §9 door (`parse_amount`),
       so a float can't reach the ledger; `confirm_pending` returns `None` on a
       redelivered tap so a confirm never double-writes.
+- [x] Add `kanakko/tg.py` — the Telegram-send client split out of Handle Confirm:
+      `answer_callback_query`, `send_message`, `edit_message_text`, raw httpx
+      against the Bot API (mirroring `parse.call()`), token from
+      `TELEGRAM_BOT_TOKEN`, fails closed when unset. `reply_markup` accepts the
+      `InlineKeyboardMarkup` `confirm_card` returns and serialises it via
+      `.to_dict()`. Tested without network (`tests/test_tg.py`).
 - [ ] Handle Confirm — wire the `ButtonPress(data=CONFIRM)` handler in `app.py`:
-      call `db.confirm_pending`, then acknowledge over Telegram. **Blocked on a
-      Telegram-send client** (`answerCallbackQuery` + edit/send message) that does
-      not exist yet — no send code anywhere in `kanakko/`. The DB write itself is
-      done (`kanakko/db.py`, task above). Reaching this handler also needs the
+      call `db.confirm_pending`, then acknowledge over Telegram with
+      `kanakko/tg.py` (the send client now exists, task above). Still needs the
       not-yet-built message handler that parses a text message and calls
-      `db.save_pending` to create the pending row. Split out the Telegram-send
-      client as its own task before wiring these handlers.
+      `db.save_pending` to create the pending row — split that out too before
+      wiring these handlers.
 - [ ] Handle Cancel — discard the pending row, acknowledge
 - [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing
 - [ ] Show category buttons instead of the confirm card when `category` came back null

@@ -12,6 +12,48 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `1df19ba` — dashboard follows the Telegram light/dark theme (§13, task 102)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: closes task 102. A CSS-only change to `SHELL_HTML` — binds `body`
+background/text and the secondary text classes (`.label`, `.txn-note`) to
+Telegram's injected `--tg-theme-*` vars with light-theme fallbacks, drops the
+`.txn-note` `opacity` dimming in favour of the hint colour, and adds one guard
+test. No Python/SQL/route logic touched; nothing on the money, timezone,
+soft-delete, or `initData` paths.
+
+### What I checked
+
+- **Webapp suite** — `uv run pytest tests/test_webapp.py -q` → **41 passed**
+  (was 40). New test included.
+- **The diff itself** — `git show HEAD`. Only `body` gains
+  `background: var(--tg-theme-bg-color, #fff)` /
+  `color: var(--tg-theme-text-color, #000)`; `.label, .txn-note` bind to
+  `--tg-theme-hint-color`; `.txn-note` loses `opacity: .7`. Fallbacks are the
+  prior light-theme values, so a plain-browser open is unchanged.
+- **Contrast of secondary text** — `.label` (webapp.py:144) is the stat
+  *descriptor*, not the amount; the amount value stays at primary
+  `--tg-theme-text-color`. Dimming labels/notes to the hint colour is the right
+  side of the pair. `.del`/`.cat-select` use `color: inherit`, so they follow
+  the themed body text. `.bar` track stays theme-neutral grey — fine in both
+  modes.
+- **Guard specificity** — the two asserted substrings (`var(--tg-theme-bg-color`,
+  `var(--tg-theme-text-color`) appear nowhere else in the response (`.fill` uses
+  `--tg-theme-button-color`), so they pin *this* binding.
+- **Guard actually reddens** — temporarily reverted the binding to hardcoded
+  `#fff`/`#000` and ran
+  `test_shell_body_follows_the_telegram_theme` → **1 failed**; restored the file
+  (`git diff --stat` clean). Confirms the commit's claim rather than trusting it.
+
+### Findings
+
+None. A headless test can't observe a rendered pixel, so asserting the var
+binding (the mechanism that makes the page dark) is the correct level to guard
+at, and it fails for the reason it exists.
+
+---
+
 ## 2026-08-06 — `3ac705b` — per-row category change from the dashboard (§13, task 101)
 
 **Status: ✅ DONE** — one low-severity finding below, non-blocking.

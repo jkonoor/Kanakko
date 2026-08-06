@@ -18,6 +18,7 @@ literal.
 
 import hashlib
 import hmac
+import html
 import json
 import os
 from datetime import date, datetime, timedelta
@@ -112,20 +113,53 @@ def _stat(label: str, amount: Decimal) -> str:
     )
 
 
+def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
+    """This month's expense categories as a sorted list with CSS percentage bars (§13).
+
+    `categories` is `(name, amount)` biggest-first (straight from
+    `db.month_summary`'s `top`); `total` is the month's expenses, the denominator
+    each bar's width is a share of. No charting library — the bar is a `<div>`
+    whose inline `width` is the category's percentage of `total`, exact `Decimal`
+    arithmetic so no float touches an amount (§9). Category names are HTML-escaped:
+    they come from the fixed `categories.py` set today, but escaping keeps the
+    fragment safe if a user-named category ever reaches it. An empty month, or a
+    `total` of 0, yields no section.
+    """
+    if not categories or total <= 0:
+        return ""
+    rows = []
+    for name, amount in categories:
+        pct = amount / total * 100  # Decimal / Decimal — never float
+        rows.append(
+            '<div class="cat">'
+            f'<div class="cat-head"><span>{html.escape(name)}</span>'
+            f'<span>{format_amount(amount)}</span></div>'
+            f'<div class="bar"><div class="fill" style="width:{pct:.1f}%"></div></div>'
+            "</div>"
+        )
+    return (
+        '<section class="breakdown"><h2>Spending by category</h2>'
+        + "".join(rows)
+        + "</section>"
+    )
+
+
 def dashboard_html(
     income: Decimal,
     expenses: Decimal,
     month_label: str,
     month_income: Decimal,
     month_expenses: Decimal,
+    top: list[tuple[str, Decimal]],
 ) -> str:
-    """The dashboard fragment: all-time totals + balance, then this month (§13).
+    """The dashboard fragment: all-time totals + balance, this month, category bars (§13).
 
     Balance is `income - expenses` — exact `Decimal` subtraction, can be negative.
-    Server-rendered so every later section (category bars, recent list) stays
-    Python + CSS with no charting library (§13). Only formatted amounts and a
-    strftime month label are interpolated — no user-controlled string reaches the
-    markup here, so there is nothing to escape yet.
+    Server-rendered so every section (category bars, recent list) stays Python +
+    CSS with no charting library (§13). `top` is the month's expense categories
+    biggest-first, rendered as percentage-of-month-expenses bars. Only formatted
+    amounts, a strftime month label, and escaped category names are interpolated,
+    so no user-controlled string reaches the markup unescaped.
     """
     return (
         "<h1>Kanakko</h1>"
@@ -139,6 +173,7 @@ def dashboard_html(
         + _stat("Income", month_income)
         + _stat("Expenses", month_expenses)
         + "</section>"
+        + category_bars(top, month_expenses)
     )
 
 
@@ -153,6 +188,13 @@ SHELL_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kanakko</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+.stat, .cat-head { display: flex; justify-content: space-between; }
+.cat { margin: 8px 0; }
+.bar { background: rgba(128,128,128,.2); border-radius: 4px; height: 8px; overflow: hidden; }
+.fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; }
+</style>
 </head>
 <body>
 <div id="app">Loading…</div>

@@ -100,9 +100,9 @@ def mini_app_data(request: Request) -> str:
         user_id = get_or_create_user(conn, telegram_user_id)
         income, expenses = totals(conn, user_id)
         first, next_first = current_month_ist()
-        m_income, m_expenses, _top = month_summary(conn, user_id, first, next_first)
+        m_income, m_expenses, top = month_summary(conn, user_id, first, next_first)
     return dashboard_html(
-        income, expenses, first.strftime("%B %Y"), m_income, m_expenses
+        income, expenses, first.strftime("%B %Y"), m_income, m_expenses, top
     )
 
 

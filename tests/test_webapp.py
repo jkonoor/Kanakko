@@ -20,6 +20,7 @@ from kanakko.app import app
 from kanakko.migrate import migrate
 from kanakko.webapp import (
     InitDataError,
+    category_bars,
     current_month_ist,
     dashboard_html,
     user_id_from_init_data,
@@ -128,13 +129,43 @@ def test_dashboard_html_shows_rupee_amounts_and_exact_balance():
     """Balance is exact `Decimal` subtraction — the money invariant (§9)."""
     html = dashboard_html(
         Decimal("20000.00"), Decimal("500.50"), "August 2026",
-        Decimal("0.30"), Decimal("0.10"),
+        Decimal("0.30"), Decimal("0.10"), [],
     )
     assert "₹20,000.00" in html  # all-time income
     assert "₹500.50" in html  # all-time expenses
     assert "₹19,499.50" in html  # all-time balance, to the paise
     assert "₹0.20" in html  # this month's balance: 0.30 - 0.10, no float drift
     assert "August 2026" in html
+
+
+def test_category_bars_are_sorted_shares_of_month_expenses():
+    """Each bar's width is the category's exact percentage of the month's expenses
+    (§9, §13). A float denominator would drift these; `Decimal` arithmetic pins
+    75.0% / 25.0% exactly. Bars appear biggest-first, as `month_summary` returns them.
+    """
+    top = [("Food", Decimal("300.00")), ("Transport", Decimal("100.00"))]
+    bars = category_bars(top, Decimal("400.00"))
+    assert "width:75.0%" in bars  # 300 / 400
+    assert "width:25.0%" in bars  # 100 / 400
+    assert bars.index("Food") < bars.index("Transport")  # biggest first
+    assert "₹300.00" in bars and "₹100.00" in bars
+
+
+def test_category_bars_empty_when_no_expenses():
+    """No expense categories, or a zero total, renders nothing — no divide-by-zero."""
+    assert category_bars([], Decimal("0")) == ""
+    assert category_bars([("Food", Decimal("0"))], Decimal("0")) == ""
+
+
+def test_dashboard_html_renders_the_category_breakdown():
+    """The breakdown section reaches the fragment `dashboard_html` builds (§13)."""
+    html = dashboard_html(
+        Decimal("1000"), Decimal("400"), "August 2026",
+        Decimal("1000"), Decimal("400"),
+        [("Food", Decimal("400.00"))],
+    )
+    assert "Spending by category" in html
+    assert "width:100.0%" in html  # the sole category is all the spending
 
 
 def test_current_month_ist_buckets_in_kolkata():
@@ -201,6 +232,8 @@ def test_dashboard_route_renders_totals_and_current_month(conn, monkeypatch):
     assert "₹800.00" in body  # all-time expenses
     assert "₹19,500.00" in body  # this month's balance: 20000 - 500
     assert "₹500.00" in body  # this month's expenses (the 300 is last month)
+    assert "Spending by category" in body  # the category breakdown (task 98)
+    assert "width:100.0%" in body  # Food is this month's only expense category
 
 
 def test_dashboard_route_rejects_a_forged_payload(conn, monkeypatch):

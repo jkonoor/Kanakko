@@ -1,20 +1,23 @@
 # Working on Kanakko
 
-How to build, run, and test this project, and the conventions any change must
-follow. Read this before writing code.
+How to build, run, and test this project.
 
-The **specification is [`docs/DECISIONS.md`](docs/DECISIONS.md)** and the build
-order is [`docs/PLAN.md`](docs/PLAN.md). Those two files are the authority. If
-the code and the spec disagree, the spec is right and the code is a bug.
+**Conventions and rules live in [`CLAUDE.md`](CLAUDE.md)** — read it before
+writing code. It is loaded automatically in every session, and it is
+authoritative on money, timezones, guards, dependencies, and secrets. This file
+deliberately does not repeat it: two copies of a rule eventually disagree.
+
+The specification is [`docs/DECISIONS.md`](docs/DECISIONS.md); the build order
+is [`docs/PLAN.md`](docs/PLAN.md); the queue is [`TASKS.md`](TASKS.md).
 
 ## Commands
 
 ```bash
-uv sync                      # install dependencies
-uv run uvicorn kanakko.app:app --reload   # run locally
-uv run pytest                # run the checks
-docker compose up --build    # full stack (web + db + cron)
-uv run python -m kanakko.migrate   # apply pending migrations (needs DATABASE_URL)
+uv sync                                    # install dependencies
+uv run uvicorn kanakko.app:app --reload    # run locally
+uv run pytest                              # run the checks
+docker compose up --build                  # full stack (web + db + cron)
+uv run python -m kanakko.migrate           # apply pending migrations (needs DATABASE_URL)
 ```
 
 ## Layout
@@ -32,52 +35,24 @@ prompts/            Ralph loop prompts (not application code)
 tests/              pytest
 ```
 
-## Conventions
-
-**Money is `Decimal` and `NUMERIC(12,2)`. Never `float`.** Anything that
-touches an amount gets a check. This is the one area where "it's probably
-fine" is not acceptable.
-
-**All timestamps are `timestamptz` stored in UTC.** Every day/month boundary is
-computed `AT TIME ZONE 'Asia/Kolkata'`. Never store naive datetimes. Never
-bucket a report in UTC.
-
-**Reads go through the `active_transactions` view**, never `transactions`
-directly — that view is what applies the soft-delete filter, and bypassing it
-resurrects deleted rows inside totals.
-
-**Categories come from `kanakko/categories.py` and nowhere else.** The JSON
-schema `enum` and the Telegram keyboard are both generated from it. Never write
-a category string literal in another module.
-
-**Plain SQL via `psycopg`.** No ORM. No SQLAlchemy. If a query is getting
-unwieldy, it's a view, not an ORM.
-
-**No new dependency without a reason in the commit message.** The design
-deliberately excludes an ORM, Celery, Redis, and any charting library —
-see `docs/DECISIONS.md` §7, §8, §13 for why. Adding one of those back is a
-decision, not an implementation detail.
-
-**Secrets come from the environment.** Never a literal token in code, in
-`docker-compose.yml`, or in a test. `.env.example` carries keys with empty
-values.
+The image is built by `.github/workflows/deploy.yml` and runs on Dokploy as
+three services — see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Testing
 
-Not exhaustive unit coverage — a check exists where breakage would be silent:
+Not exhaustive unit coverage. A check exists where breakage would otherwise be
+**silent** — where the system keeps returning plausible answers while being
+wrong:
 
 - the money path (parse → store → sum by category), using `Decimal`
 - timezone bucketing, especially a transaction at 23:50 IST on a month's last day
 - `initData` HMAC validation, including that a forged payload is rejected
 - the noon-nudge suppression rule
 
-A test that only restates the implementation is not worth writing.
+A test that only restates the implementation is not worth writing. Neither is
+one that asserts a string when the risk is a behaviour — see **Guards and
+checks** in [`CLAUDE.md`](CLAUDE.md), which is where this project's rework has
+mostly come from.
 
-## What not to do
-
-- Don't add placeholder or stub implementations. Finish the task or leave it
-  unchecked.
-- Don't edit `docs/DECISIONS.md` to match the code. If the spec is wrong, add a
-  task saying so — a spec that drifts to match the implementation is not a spec.
-- Don't edit a migration that has already been applied. Add a new one.
-- Don't deploy. Deployment is manual and human-run (`docs/DEPLOYMENT.md`).
+When fixing a bug, confirm the check earns its place: temporarily revert the
+fix, watch the check fail, then restore it.

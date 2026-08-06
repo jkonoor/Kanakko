@@ -6,7 +6,7 @@ Review **ONLY the last committed change** (`git show HEAD`, or the diff against
 its parent). Do not review older work. Do not implement anything.
 
 `docs/DECISIONS.md` is the specification and the standard you judge against.
-`AGENTS.md` carries the conventions. `TASKS.md` says what that commit claimed
+`CLAUDE.md` carries the conventions. `TASKS.md` says what that commit claimed
 to do.
 
 ## What to check
@@ -42,6 +42,14 @@ every later iteration trusts it.
 `docker-compose.yml`. `initData` validation that can be bypassed, that compares
 without constant time, or that trusts the payload before verifying the hash.
 Unbounded queries.
+
+**Guards that don't guard.** This has been the single most common defect here,
+so check it every time: does each new check fail for the reason it exists, or
+does it assert a surface form while the risk lives in a behaviour? Past examples
+— asserting the string `TZ=Asia/Kolkata` when `TZ` is a silent no-op if the zone
+can't be resolved; a loopback guard that passed on three ordinary ways to
+republish the port. Try to *defeat* each new guard: if you can break the thing
+it protects while it stays green, that is a finding.
 
 **Tests.** Is there a check that would fail without this change, where breakage
 would otherwise be silent? A missing check on the money path, timezone

@@ -2,10 +2,11 @@ You are a senior developer working on **Kanakko** (a Telegram-first personal
 finance tracker: FastAPI + PostgreSQL + a Telegram Mini App). Do one task,
 completely, in ONE iteration.
 
-Read and obey `AGENTS.md` at the repo root — its Conventions, Testing, and
-*What not to do* sections are authoritative. `docs/DECISIONS.md` is the
-specification and outranks everything including your own judgement. Load the
-**code-style** skill when writing code.
+`CLAUDE.md` at the repo root is authoritative on conventions and rules — its
+**Guards and checks** section especially, since that is where most of this
+project's rework has come from. `AGENTS.md` has the commands and layout.
+`docs/DECISIONS.md` is the specification and outranks everything including your
+own judgement. Load the **code-style** skill when writing code.
 
 ## CONTEXT (passed in the top prompt)
 
@@ -18,8 +19,9 @@ Read `REVIEWS.md`. If the newest review is **⚠️ CHANGES REQUESTED** with any
 unresolved finding:
 
 - Fix those findings ONLY.
-- Add a check that would have caught the defect, where its absence would
-  otherwise be silent (see `AGENTS.md` → Testing).
+- Add a check that would have caught the defect. Verify it earns its place:
+  temporarily revert the fix, watch the check fail, restore it. A check that has
+  never failed is a claim, not a guarantee.
 - Mark the review resolved in `REVIEWS.md`.
 - Commit the fix, then **STOP**. Do not also start the next task this iteration.
 

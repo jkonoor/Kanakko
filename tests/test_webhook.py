@@ -6,11 +6,39 @@ guard, since Telegram redelivers any update it did not get a 2xx for, so a
 malformed body or an ignored update must not turn into a retry storm.
 """
 
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 
-from kanakko.app import ButtonPress, TextMessage, app, dispatch
+from kanakko import app as app_module
+from kanakko.app import WEBHOOK_SECRET_HEADER, ButtonPress, TextMessage, app, dispatch
+from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
+from kanakko.confirm import CANCEL, CONFIRM
+from kanakko.db import get_or_create_user, save_pending
+from kanakko.migrate import migrate
+from kanakko.parse import Transaction
 
 client = TestClient(app)
+
+SECRET = "s3cret-webhook-token_ABC"
+AUTH = {WEBHOOK_SECRET_HEADER: SECRET}
+
+
+class _FakeConn:
+    """Stand-in for a psycopg connection used as a `with connect() as conn` block."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _set_secret(monkeypatch, value=SECRET):
+    if value is None:
+        monkeypatch.delenv("TELEGRAM_WEBHOOK_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", value)
 
 
 def test_text_message_is_dispatched_with_its_fields():
@@ -43,24 +71,598 @@ def test_irrelevant_updates_are_ignored():
     assert dispatch({}) is None
 
 
-def test_webhook_returns_200_for_a_text_update():
+def test_webhook_returns_200_for_a_text_update(monkeypatch):
+    _set_secret(monkeypatch)
+    # A handled text update returns 200; connect/handle_text are stubbed so this
+    # exercises the routing, not a live DB. A handler exception is deliberately
+    # left to 500 so Telegram redelivers a transiently-failed transaction.
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: None)
+    response = client.post(
+        "/webhook",
+        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_webhook_returns_200_for_an_ignored_update(monkeypatch):
+    _set_secret(monkeypatch)
+    response = client.post(
+        "/webhook", json={"channel_post": {"text": "spam"}}, headers=AUTH
+    )
+    assert response.status_code == 200
+
+
+def test_webhook_returns_200_for_a_malformed_body(monkeypatch):
+    # Not JSON. A 500 here would make Telegram redeliver this forever.
+    _set_secret(monkeypatch)
+    response = client.post(
+        "/webhook",
+        content=b"not json",
+        headers={"content-type": "application/json", **AUTH},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_webhook_rejects_a_missing_secret_header(monkeypatch):
+    # §15 — a forged POST without Telegram's secret_token gets 403, and its
+    # body never reaches dispatch.
+    _set_secret(monkeypatch)
     response = client.post(
         "/webhook",
         json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
     )
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.status_code == 403
 
 
-def test_webhook_returns_200_for_an_ignored_update():
-    response = client.post("/webhook", json={"channel_post": {"text": "spam"}})
-    assert response.status_code == 200
-
-
-def test_webhook_returns_200_for_a_malformed_body():
-    # Not JSON. A 500 here would make Telegram redeliver this forever.
+def test_webhook_rejects_a_wrong_secret(monkeypatch):
+    _set_secret(monkeypatch)
     response = client.post(
-        "/webhook", content=b"not json", headers={"content-type": "application/json"}
+        "/webhook",
+        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+        headers={WEBHOOK_SECRET_HEADER: "not-the-secret"},
     )
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.status_code == 403
+
+
+def test_webhook_fails_closed_when_the_secret_is_unset(monkeypatch):
+    # §15 — an unset secret must never mean "accept everything". Even a request
+    # presenting an empty token (which would match an empty secret under ==)
+    # is rejected.
+    _set_secret(monkeypatch, value=None)
+    response = client.post(
+        "/webhook",
+        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+        headers={WEBHOOK_SECRET_HEADER: ""},
+    )
+    assert response.status_code == 403
+
+
+def test_handle_text_keys_the_pending_row_on_the_sent_card(conn, monkeypatch):
+    """The parsed message is stored keyed by the confirm card's message id (§1, §4).
+
+    Confirm/Cancel taps carry back the *card's* message id, so `save_pending` must
+    key on that — not on the user's inbound message id. The fake send returns a
+    different id (909) from the inbound message (1), so keying on the wrong one
+    reddens the `== 909` assert. Parse and send are stubbed — no network.
+    """
+    migrate(conn)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "spent 500 on food",
+        }
+    )
+    monkeypatch.setattr(app_module, "parse_message", lambda text: txn)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(app_module, "send_message", fake_send)
+
+    pending_id = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on food")
+    )
+    assert isinstance(pending_id, int)
+    assert sent["chat_id"] == 12345  # the card goes back to the sender
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT telegram_message_id, u.telegram_user_id, parsed"
+            " FROM pending_transactions p JOIN users u USING (user_id)"
+            " WHERE pending_id = %s",
+            (pending_id,),
+        )
+        card_message_id, telegram_user_id, parsed = cur.fetchone()
+    assert card_message_id == 909  # the card's id, not the inbound message's (1)
+    assert telegram_user_id == 12345  # chat id resolved to a users row
+    assert parsed["amount"] == "500.00"  # §9: stored as a string, not a float
+    conn.rollback()
+
+
+def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkeypatch):
+    """No parseable amount → rephrase prompt, no pending row, no 500 (§3).
+
+    `parse_message` raises `ValidationError` after its retry when the amount can't
+    be read. `handle_text` must catch that, ask the user to rephrase, and store
+    nothing — not let it propagate to a 500 that Telegram redelivers forever.
+    """
+    migrate(conn)
+
+    def raise_validation(text):
+        # A real amount-less parse: parse_amount rejects the empty amount, which
+        # surfaces as the ValidationError parse_message re-raises after its retry.
+        Transaction.model_validate(
+            {
+                "type": "expense",
+                "amount": "",
+                "category": EXPENSE_CATEGORIES[0],
+                "date": "2026-08-06",
+                "note": text,
+            }
+        )
+
+    monkeypatch.setattr(app_module, "parse_message", raise_validation)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(app_module, "send_message", fake_send)
+
+    result = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="how's it going")
+    )
+    assert result is None  # nothing to confirm
+    assert sent["text"] == app_module.REPHRASE_PROMPT
+    assert sent["reply_markup"] is None  # a rephrase prompt, not a confirm card
+
+    user_id = get_or_create_user(conn, 12345)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pending_transactions WHERE user_id = %s", (user_id,)
+        )
+        (pending_count,) = cur.fetchone()
+    assert pending_count == 0  # §3: an unparseable message stores nothing
+    conn.rollback()
+
+
+def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypatch):
+    """A null category shows the category picker, not a confirm card (§3).
+
+    `category: null` means the model couldn't tell, so instead of a card reading
+    `Category: None` the user gets the closed set as `cat:<name>` buttons and a
+    pending row is still stored (keyed by the sent card's id) for the eventual
+    category press to update. The picker keyboard is *not* the Confirm/Cancel one:
+    its buttons carry `cat:` callback_data, which is what this asserts — routing a
+    null-category card through `confirm_card` would send Confirm/Cancel instead and
+    would also trip its `assert txn.category is not None`.
+    """
+    migrate(conn)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "spent 500 somewhere",
+        }
+    )
+    monkeypatch.setattr(app_module, "parse_message", lambda text: txn)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(app_module, "send_message", fake_send)
+
+    pending_id = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 somewhere")
+    )
+    assert isinstance(pending_id, int)  # the row is still stored for the picker to update
+
+    buttons = sent["reply_markup"].inline_keyboard
+    cbs = [b.callback_data for row in buttons for b in row]
+    assert all(c.startswith("cat:") for c in cbs)  # the category picker, not Confirm/Cancel
+    assert CONFIRM not in cbs and CANCEL not in cbs
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT telegram_message_id, parsed FROM pending_transactions"
+            " WHERE pending_id = %s",
+            (pending_id,),
+        )
+        card_message_id, parsed = cur.fetchone()
+    assert card_message_id == 909  # keyed on the sent picker's id
+    assert parsed["category"] is None  # stored null, for the category press to fill in
+    conn.rollback()
+
+
+def _seed_pending(conn, chat_id, card_message_id, amount="100.00"):
+    user_id = get_or_create_user(conn, chat_id)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": amount,
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "lunch",
+        }
+    )
+    return user_id, save_pending(conn, user_id, card_message_id, txn)
+
+
+def test_handle_confirm_writes_the_ledger_row_and_acknowledges(conn, monkeypatch):
+    """A Confirm tap moves its pending row into the ledger and answers the tap (§4).
+
+    Drives the real `confirm_pending` against Postgres; only the Telegram ack is
+    stubbed. Asserts the amount lands as an exact `Decimal` (§9) through the
+    `active_transactions` view (§6), and that the callback query is answered.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    acked = {}
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+
+    txn_id = app_module.handle_confirm(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
+    )
+    assert isinstance(txn_id, int)
+    assert acked == {"cbq": "cbq1", "text": "Saved ✅"}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT amount FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        rows = cur.fetchall()
+    assert rows == [(Decimal("100.00"),)]  # §9: exact Decimal, one row
+    conn.rollback()
+
+
+def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
+    """Telegram redelivers taps; a second Confirm must not double-write (§4)."""
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    acks = []
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+    )
+    press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
+
+    first = app_module.handle_confirm(conn, press)
+    second = app_module.handle_confirm(conn, press)
+    assert isinstance(first, int)
+    assert second is None  # nothing left to confirm
+    assert acks == ["Saved ✅", "Already saved"]  # spinner cleared both times
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        (count,) = cur.fetchone()
+    assert count == 1  # not two
+    conn.rollback()
+
+
+def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
+    """CONFIRM routes to handle_confirm, CANCEL to handle_cancel — never crossed.
+
+    Each button tap opens exactly one connection; an ignored update opens none.
+    Routing CANCEL to handle_confirm would corrupt the ledger, so the split is
+    asserted both ways. `connect` and the handlers are stubbed; no Postgres.
+    """
+    _set_secret(monkeypatch)
+    opened = []
+    monkeypatch.setattr(app_module, "connect", lambda: opened.append(True) or _FakeConn())
+    confirmed, cancelled, texted, categorised = [], [], [], []
+    monkeypatch.setattr(app_module, "handle_confirm", lambda conn, press: confirmed.append(press))
+    monkeypatch.setattr(app_module, "handle_cancel", lambda conn, press: cancelled.append(press))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(app_module, "handle_category", lambda conn, press: categorised.append(press))
+
+    def press(data):
+        return {
+            "callback_query": {
+                "id": "cbq1",
+                "data": data,
+                "message": {"message_id": 909, "chat": {"id": 42}},
+            }
+        }
+
+    client.post("/webhook", json=press(CONFIRM), headers=AUTH)
+    assert len(confirmed) == 1 and len(cancelled) == 0 and len(opened) == 1
+
+    client.post("/webhook", json=press(CANCEL), headers=AUTH)
+    assert len(confirmed) == 1  # CANCEL did not route to the Confirm handler
+    assert len(cancelled) == 1  # it routed to the Cancel handler
+    assert len(opened) == 2  # and opened its own connection
+
+    client.post("/webhook", json=press(f"{CATEGORY_PREFIX}Food"), headers=AUTH)
+    assert len(categorised) == 1  # a cat: tap routes to the category handler
+    assert len(confirmed) == 1 and len(cancelled) == 1  # not to Confirm/Cancel
+    assert len(opened) == 3  # and opened its own connection
+
+    client.post("/webhook", json={"channel_post": {"text": "x"}}, headers=AUTH)
+    assert len(opened) == 3  # an ignored update opens nothing
+    assert texted == []
+
+
+def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
+    """`/undo` is a command, not a transaction — it must skip the parse path.
+
+    Routing it to `handle_text` would feed "/undo" to the parser as if it were a
+    transaction. The command is intercepted before that, and `/undo@bot` (the form
+    Telegram sends in groups) resolves the same way. A plain text message still
+    routes to `handle_text`.
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    undone, texted = [], []
+    monkeypatch.setattr(app_module, "handle_undo", lambda conn, msg: undone.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+
+    def text(body):
+        return {"message": {"message_id": 1, "chat": {"id": 42}, "text": body}}
+
+    client.post("/webhook", json=text("/undo"), headers=AUTH)
+    assert len(undone) == 1 and texted == []
+
+    client.post("/webhook", json=text("/undo@KanakkoBot"), headers=AUTH)
+    assert len(undone) == 2  # the @bot suffix still routes to undo
+
+    client.post("/webhook", json=text("spent 500 on food"), headers=AUTH)
+    assert len(texted) == 1 and len(undone) == 2  # ordinary text still parses
+
+
+def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
+    """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
+
+    Drives the real `undo_last` against Postgres; only the Telegram send is
+    stubbed. Asserts the row is gone from `active_transactions` (§6) and the reply
+    names the removed amount via `format_amount` — an exact `Decimal`, not a float
+    (§9).
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909, amount="250.00")
+    txn_id = app_module.confirm_pending(conn, user_id, 909)
+    assert isinstance(txn_id, int)
+    sent = {}
+    monkeypatch.setattr(
+        app_module, "send_message", lambda chat_id, text, reply_markup=None: sent.update(chat_id=chat_id, text=text)
+    )
+
+    removed = app_module.handle_undo(
+        conn, TextMessage(chat_id=12345, message_id=1, text="/undo")
+    )
+    assert removed is not None and removed["amount"] == Decimal("250.00")
+    assert sent["chat_id"] == 12345
+    assert "₹250.00" in sent["text"]  # §9: exact amount named in the reply
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,))
+        assert cur.fetchone() == (0,)  # §6: soft-deleted, gone from the view
+    conn.rollback()
+
+
+def test_handle_undo_with_nothing_to_undo_replies_and_stores_nothing(conn, monkeypatch):
+    """`/undo` with no live transaction replies "Nothing to undo." and returns None."""
+    migrate(conn)
+    sent = {}
+    monkeypatch.setattr(
+        app_module, "send_message", lambda chat_id, text, reply_markup=None: sent.update(text=text)
+    )
+
+    result = app_module.handle_undo(
+        conn, TextMessage(chat_id=98765, message_id=1, text="/undo")
+    )
+    assert result is None
+    assert sent["text"] == "Nothing to undo."
+    conn.rollback()
+
+
+def test_a_redelivered_undo_does_not_soft_delete_a_second_row(conn, monkeypatch):
+    """The same `/undo`, redelivered, must remove exactly one transaction (§14, §6).
+
+    Telegram redelivers any update it did not answer 2xx for, and `/undo` has no
+    per-message anchor (unlike Confirm/Cancel), so without the `update_id` dedup a
+    redelivery would soft-delete a *second* real row and silently drop it from
+    every total. Two confirmed rows, then the identical `/undo` update POSTed
+    twice: exactly one must survive in `active_transactions`, not zero. Drives the
+    real webhook and `undo_last` against Postgres; only the Telegram send is
+    stubbed. Reverting the webhook's `claim_update` guard reddens this
+    (`assert 1 == 0` — both rows gone).
+    """
+    migrate(conn)
+    uid, _ = _seed_pending(conn, chat_id=555, card_message_id=11, amount="250.00")
+    app_module.confirm_pending(conn, uid, 11)
+    _seed_pending(conn, chat_id=555, card_message_id=12, amount="100.00")
+    app_module.confirm_pending(conn, uid, 12)
+
+    monkeypatch.setattr(app_module, "send_message", lambda *a, **k: None)
+    # connect() yields the shared test connection; __exit__ must not close it, so
+    # the first delivery's claim is visible to the redelivery on the same session.
+    class _Reuse:
+        def __enter__(self):
+            return conn
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse())
+    _set_secret(monkeypatch)
+
+    update = {
+        "update_id": 4242,
+        "message": {"message_id": 7, "chat": {"id": 555}, "text": "/undo"},
+    }
+    client.post("/webhook", json=update, headers=AUTH)  # first delivery
+    client.post("/webhook", json=update, headers=AUTH)  # redelivery, same update_id
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE user_id = %s", (uid,))
+        assert cur.fetchone() == (1,)  # one undone, one preserved — not both
+    conn.rollback()
+
+
+def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypatch):
+    """A Cancel tap deletes its pending row, stores nothing, and answers the tap (§5).
+
+    Drives the real `cancel_pending` against Postgres; only the Telegram ack is
+    stubbed. Asserts the pending row is gone and no ledger row was written.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    acked = {}
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+
+    pending_id = app_module.handle_cancel(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
+    )
+    assert isinstance(pending_id, int)
+    assert acked == {"cbq": "cbq1", "text": "Discarded ❌"}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pending_transactions WHERE user_id = %s", (user_id,)
+        )
+        (pending_count,) = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        (ledger_count,) = cur.fetchone()
+    assert pending_count == 0  # the pending row is gone
+    assert ledger_count == 0  # §5: Cancel writes nothing to the ledger
+    conn.rollback()
+
+
+def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
+    """Telegram redelivers taps; a second Cancel must still ack, not error (§5)."""
+    migrate(conn)
+    _seed_pending(conn, chat_id=12345, card_message_id=909)
+    acks = []
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+    )
+    press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
+
+    first = app_module.handle_cancel(conn, press)
+    second = app_module.handle_cancel(conn, press)
+    assert isinstance(first, int)
+    assert second is None  # nothing left to cancel
+    assert acks == ["Discarded ❌", "Already gone"]  # spinner cleared both times
+    conn.rollback()
+
+
+def test_handle_category_updates_the_pending_row_and_re_renders_the_card(conn, monkeypatch):
+    """A `cat:<name>` tap sets the category and edits the picker into a full card (§5).
+
+    Seeds a null-category pending row (the picker case) keyed on the sent card.
+    Tapping a category must (1) write that category to the pending row so a later
+    Confirm stores it, and (2) edit the *same* message into a confirm card — one
+    now carrying Confirm/Cancel, which the null-category picker lacked. Drives the
+    real `set_pending_category` against Postgres; only Telegram I/O is stubbed.
+    """
+    migrate(conn)
+    user_id = get_or_create_user(conn, 12345)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "spent 500 somewhere",
+        }
+    )
+    save_pending(conn, user_id, 909, txn)
+    edited = {}
+    acked = {}
+    monkeypatch.setattr(
+        app_module,
+        "edit_message_text",
+        lambda chat_id, message_id, text, reply_markup=None: edited.update(
+            chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+        ),
+    )
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+
+    chosen = EXPENSE_CATEGORIES[0]
+    result = app_module.handle_category(
+        conn,
+        ButtonPress(
+            chat_id=12345, message_id=909, callback_query_id="cbq1", data=f"{CATEGORY_PREFIX}{chosen}"
+        ),
+    )
+    assert result is not None and result.category == chosen
+    assert acked == {"cbq": "cbq1", "text": f"Category: {chosen}"}
+
+    # The picker was edited into a full confirm card (Confirm/Cancel now present).
+    assert edited["chat_id"] == 12345 and edited["message_id"] == 909
+    cbs = [b.callback_data for row in edited["reply_markup"].inline_keyboard for b in row]
+    assert CONFIRM in cbs and CANCEL in cbs
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == chosen  # the row now carries the chosen category
+    conn.rollback()
+
+
+def test_handle_category_ignores_a_forged_unknown_category(conn, monkeypatch):
+    """A `cat:` callback the keyboard never emits is acked and ignored, not 500ed.
+
+    A raise on an unknown category would make Telegram redeliver the bad tap
+    forever (the same trap task 72 fixed for unparseable text). The pending row
+    must be left untouched and nothing edited.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    edits = []
+    monkeypatch.setattr(
+        app_module, "edit_message_text", lambda *a, **k: edits.append(a)
+    )
+    monkeypatch.setattr(app_module, "answer_callback_query", lambda cbq, text=None: None)
+
+    result = app_module.handle_category(
+        conn,
+        ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data="cat:Bogus"),
+    )
+    assert result is None
+    assert edits == []  # nothing re-rendered
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == EXPENSE_CATEGORIES[0]  # unchanged
+    conn.rollback()
+
+
+def test_cancel_is_scoped_to_the_user(conn):
+    """A user's Cancel can't discard another user's identically-numbered card (§1)."""
+    migrate(conn)
+    a_user, _ = _seed_pending(conn, chat_id=111, card_message_id=555, amount="100.00")
+    b_user, _ = _seed_pending(conn, chat_id=222, card_message_id=555, amount="999.99")
+
+    cancelled = app_module.cancel_pending(conn, a_user, 555)
+    assert cancelled is not None
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pending_transactions WHERE user_id = %s", (b_user,))
+        (b_remaining,) = cur.fetchone()
+    assert b_remaining == 1  # B's pending card is untouched
+    conn.rollback()

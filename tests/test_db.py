@@ -9,7 +9,13 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.db import confirm_pending, save_pending
+from kanakko.db import (
+    confirm_pending,
+    get_or_create_user,
+    save_pending,
+    set_pending_category,
+    undo_last,
+)
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 
@@ -34,6 +40,28 @@ def _txn(amount: str = "1234.56") -> Transaction:
             "note": "lunch at cafe",
         }
     )
+
+
+def test_get_or_create_user_is_idempotent(conn):
+    """Two messages from one Telegram user resolve to one `users` row.
+
+    The second call must return the *same* internal id and create no duplicate —
+    a plain INSERT (no `ON CONFLICT`) would raise a unique violation on the second
+    message, and an unconditional insert would fork the user into two ids.
+    """
+    migrate(conn)
+    first = get_or_create_user(conn, 90210)
+    second = get_or_create_user(conn, 90210)
+    other = get_or_create_user(conn, 90211)
+
+    assert isinstance(first, int)
+    assert second == first
+    assert other != first
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 90210")
+        assert cur.fetchone() == (1,)
+    conn.rollback()
 
 
 def test_confirm_writes_the_transaction_and_clears_pending(conn):
@@ -97,6 +125,152 @@ def test_confirm_unknown_message_returns_none(conn):
     """Confirming a card with no pending row is a no-op, not an error."""
     migrate(conn)
     assert confirm_pending(conn, 42, 999_999) is None
+    conn.rollback()
+
+
+def test_set_pending_category_updates_the_row(conn):
+    """A category tap re-writes the pending row's category and returns the txn (§5).
+
+    The stored `parsed` must carry the new category so the eventual Confirm writes
+    it; the returned `Transaction` is what the handler re-renders. The amount is
+    untouched and still a JSON string (§9) — a botched update that dropped it or
+    turned it into a number would fail the `Transaction` round-trip.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 30)
+    save_pending(conn, user_id, 555, _txn("250.00"))
+
+    new_cat = EXPENSE_CATEGORIES[3]
+    txn = set_pending_category(conn, user_id, 555, new_cat)
+    assert txn is not None
+    assert txn.category == new_cat
+    assert txn.amount == Decimal("250.00")  # amount survives the update
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parsed FROM pending_transactions WHERE telegram_message_id = 555"
+        )
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == new_cat
+    assert parsed["amount"] == "250.00"  # §9: still a string, not a float
+    conn.rollback()
+
+
+def test_set_pending_category_unknown_message_returns_none(conn):
+    """Setting a category on a card with no pending row is a no-op, not an error."""
+    migrate(conn)
+    assert set_pending_category(conn, 42, 999_999, EXPENSE_CATEGORIES[0]) is None
+    conn.rollback()
+
+
+def test_set_pending_category_is_scoped_to_the_user(conn):
+    """One user's category tap must not rewrite another user's identical card (§1).
+
+    A and B both hold a pending card on message id 555. A is seeded first (the
+    older row), so the fallback `ORDER BY … DESC` picks B's newer row — only the
+    `user_id` clause makes A's tap resolve to A's row. Dropping it reddens this.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 40)
+    b = _seed_user(conn, 41)
+    save_pending(conn, a, 555, _txn("100.00"))
+    save_pending(conn, b, 555, _txn("999.99"))
+
+    set_pending_category(conn, a, 555, EXPENSE_CATEGORIES[3])
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = 555",
+            (b,),
+        )
+        (parsed,) = cur.fetchone()
+    assert parsed["category"] == EXPENSE_CATEGORIES[0]  # B's row untouched
+    conn.rollback()
+
+
+def _confirm(conn, user_id: int, message_id: int, amount: str) -> int:
+    save_pending(conn, user_id, message_id, _txn(amount))
+    return confirm_pending(conn, user_id, message_id)
+
+
+def test_undo_soft_deletes_the_most_recent_and_returns_it(conn):
+    """`/undo` sets `deleted_at` on the newest live row and reports its fields (§5, §6).
+
+    The row is soft-deleted, not hard-deleted — it vanishes from
+    `active_transactions` (§6) but still exists in `transactions` with a
+    `deleted_at`, keeping the ledger recoverable. Older entries are untouched, and
+    the returned amount is an exact `Decimal` (§9) for the confirmation message.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 50)
+    _confirm(conn, user_id, 101, "100.00")
+    newest = _confirm(conn, user_id, 102, "250.00")
+
+    removed = undo_last(conn, user_id)
+    assert removed is not None
+    assert removed["amount"] == Decimal("250.00")  # §9: exact Decimal, the newest
+    assert removed["type"] == "expense"
+    assert removed["category"] == EXPENSE_CATEGORIES[0]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT deleted_at FROM transactions WHERE txn_id = %s", (newest,))
+        (deleted_at,) = cur.fetchone()
+        assert deleted_at is not None  # soft-deleted, still present in transactions
+        cur.execute(
+            "SELECT amount FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        assert cur.fetchall() == [(Decimal("100.00"),)]  # only the older row is live
+    conn.rollback()
+
+
+def test_undo_walks_back_through_history(conn):
+    """A second `/undo` removes the *previous* entry, never re-deletes the newest (§6).
+
+    Because `undo_last` chooses from `active_transactions`, which hides the row the
+    first `/undo` soft-deleted, the second `/undo` picks the next-newest. Reading
+    `transactions` directly would keep latching onto the already-deleted newest row
+    and the older ones would be unreachable — so this reddens the moment the SELECT
+    stops going through the view.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 51)
+    _confirm(conn, user_id, 101, "100.00")
+    _confirm(conn, user_id, 102, "250.00")
+
+    first = undo_last(conn, user_id)
+    second = undo_last(conn, user_id)
+    assert first["amount"] == Decimal("250.00")  # newest first
+    assert second["amount"] == Decimal("100.00")  # then the previous one, not a repeat
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,))
+        assert cur.fetchone() == (0,)  # both walked back
+        assert undo_last(conn, user_id) is None  # nothing left to undo
+    conn.rollback()
+
+
+def test_undo_with_nothing_to_undo_returns_none(conn):
+    """`/undo` for a user with no live transaction is a no-op, not an error."""
+    migrate(conn)
+    assert undo_last(conn, _seed_user(conn, 52)) is None
+    conn.rollback()
+
+
+def test_undo_is_scoped_to_the_user(conn):
+    """One user's `/undo` must not touch another user's most recent row (§1)."""
+    migrate(conn)
+    a = _seed_user(conn, 60)
+    b = _seed_user(conn, 61)
+    _confirm(conn, a, 555, "100.00")
+    _confirm(conn, b, 555, "999.99")
+
+    removed = undo_last(conn, a)
+    assert removed["amount"] == Decimal("100.00")  # A's own row, not B's newer one
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT amount FROM active_transactions WHERE user_id = %s", (b,))
+        assert cur.fetchall() == [(Decimal("999.99"),)]  # B's row still live
     conn.rollback()
 
 

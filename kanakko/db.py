@@ -27,6 +27,31 @@ def connect() -> psycopg.Connection:
     return psycopg.connect(dsn)
 
 
+def get_or_create_user(conn: psycopg.Connection, telegram_user_id: int) -> int:
+    """Resolve `telegram_user_id` to its internal `users.user_id`, creating it once.
+
+    Every table keys on the internal `user_id` (§1), so the message handler turns
+    the Telegram id it sees into that id here. `ON CONFLICT DO NOTHING` makes a
+    second message from the same user a no-op insert rather than a unique
+    violation; the `UNION ALL … LIMIT 1` then returns the existing row on that
+    path. Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "WITH ins AS ("
+            "  INSERT INTO users (telegram_user_id) VALUES (%s)"
+            "  ON CONFLICT (telegram_user_id) DO NOTHING RETURNING user_id"
+            ")"
+            " SELECT user_id FROM ins"
+            " UNION ALL"
+            " SELECT user_id FROM users WHERE telegram_user_id = %s"
+            " LIMIT 1",
+            (telegram_user_id, telegram_user_id),
+        )
+        (user_id,) = cur.fetchone()
+    return user_id
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:
@@ -83,3 +108,116 @@ def confirm_pending(
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))
     return txn_id
+
+
+def set_pending_category(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int, category: str
+) -> Transaction | None:
+    """Set `category` on the user's pending row for `telegram_message_id` (§5).
+
+    The correction path for the most-often-wrong field: a `cat:<name>` tap
+    re-writes the pending row's category and returns the updated `Transaction`
+    so the handler can re-render the card. Scoped by `user_id` like the confirm/
+    cancel reads — message ids repeat per chat (§1). Round-trips through the
+    `Transaction` model, so `category` is re-validated against the closed set
+    (§11) and the amount stays a string on the way back to JSONB (§9). Returns
+    `None` when there is no pending row (a stale card). Does not commit — the
+    caller owns the transaction.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT pending_id, parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s"
+            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        pending_id, parsed = row
+        txn = Transaction.model_validate({**parsed, "category": category})
+        cur.execute(
+            "UPDATE pending_transactions SET parsed = %s WHERE pending_id = %s",
+            (Jsonb(txn.model_dump(mode="json")), pending_id),
+        )
+    return txn
+
+
+def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
+    """Soft-delete the user's most recent confirmed transaction, return its fields (§5, §6).
+
+    `/undo` corrects the last entry: it sets `deleted_at` on the newest live row
+    rather than hard-deleting it, so the ledger stays recoverable (§6). The row is
+    chosen from `active_transactions` — the view that already hides soft-deleted
+    rows — so a *second* `/undo` walks back to the previous entry instead of
+    re-deleting the one just removed (reading `transactions` directly would keep
+    latching onto the already-deleted newest row). Scoped by `user_id` (§1).
+    Returns the removed row's fields for the confirmation reply, or `None` when
+    there is no live transaction to undo. Does not commit — the caller owns the
+    transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transactions SET deleted_at = now()"
+            " WHERE txn_id = ("
+            "   SELECT txn_id FROM active_transactions"
+            "   WHERE user_id = %s ORDER BY created_at DESC, txn_id DESC LIMIT 1"
+            " )"
+            " RETURNING amount, type, category, note, occurred_on",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    amount, type_, category, note, occurred_on = row
+    return {
+        "amount": amount,
+        "type": type_,
+        "category": category,
+        "note": note,
+        "occurred_on": occurred_on,
+    }
+
+
+def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
+    """Record `update_id` as processed; True the first time, False on a repeat (§14).
+
+    Telegram redelivers any update it did not answer 2xx for, so the webhook calls
+    this before running a handler and skips the handler when it returns False —
+    the one place that makes every handler idempotent against redelivery. It
+    matters most for `/undo`, which soft-deletes "the newest live row" with no
+    per-message anchor (Confirm/Cancel key on the card's message id): a redelivery
+    would otherwise soft-delete a *second* real transaction and drop it from every
+    total. The INSERT runs in the caller's transaction, so the claim commits with
+    the handler's writes and rolls back with them — a handler that 500s is
+    retried. Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO processed_updates (update_id) VALUES (%s)"
+            " ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
+            (update_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def cancel_pending(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int
+) -> int | None:
+    """Discard the user's pending row for `telegram_message_id`, storing nothing (§5).
+
+    Scoped by `user_id` for the same reason as `confirm_pending` — message ids
+    repeat per chat, so a Cancel keyed on the id alone could delete another
+    user's pending card. Returns the deleted `pending_id`, or `None` when there
+    is nothing to cancel (a redelivered tap Telegram already got a 200 for), so
+    the handler can tell a fresh cancel from a repeat. Does not commit — the
+    caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s RETURNING pending_id",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None

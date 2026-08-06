@@ -12,6 +12,1027 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `13d1d00` — scan string literals via `ast` so the read-path guard catches triple-quoted SQL and `JOIN` (§6, task 80)
+
+**Status: ✅ DONE** — no blocking issues. This is a test-only change
+(`tests/test_read_paths.py` + the resolution note in `REVIEWS.md`) that closes
+the two coverage gaps the `131dbe5` review flagged. The guard now fails for the
+reason it exists.
+
+**Scope reviewed.** `git show HEAD` — the diff replaces the regex-strip
+`sql_only` helper with an `ast`-based `sql_literals` generator and widens the
+match from `\bfrom\s+transactions\b` to `\b(from|join)\s+transactions\b`. No
+production code changed.
+
+**What I ran.**
+
+- `uv run pytest -q` → **101 passed**, 1 warning. Matches the commit claim.
+- Probed the new guard directly (`sql_literals` + `BYPASS` imported from the
+  test module):
+  - Triple-quoted `SELECT ... FROM transactions` → **hit** (line 4). The old
+    `re.sub(r'""".*?"""', ...)` deleted this wholesale.
+  - `SELECT * FROM active_transactions a JOIN transactions t ...` → **hit**.
+  - f-string `f"... FROM transactions WHERE id = {x}"` → **hit** — the literal
+    portion of a `JoinedStr` is still a `Constant` node, so f-string SQL is
+    covered too.
+  - Adjacent-literal concatenation split at the boundary (`"SELECT * FROM "`
+    `"transactions ..."`) → **hit** (Python folds adjacent literals into one
+    `Constant`).
+  - `SELECT * FROM active_transactions WHERE ...` → **no hit** (no false
+    positive on the view; `\btransactions\b` doesn't match `active_transactions`
+    / `pending_transactions`).
+  - `INSERT INTO transactions ...` and `UPDATE transactions SET deleted_at ...`
+    → **no hit** — writes to the base table are correctly ignored.
+- Reverted to the old logic in isolation and confirmed it **missed** both the
+  triple-quoted read and the `JOIN` read (`False`, `False`). So the two gaps
+  were real and the guard now genuinely reddens for them — not a surface-form
+  assertion.
+- Confirmed the live production surface is clean: `kanakko/db.py` reads go
+  through `active_transactions` (line 163) and the `pending_transactions` queue;
+  the only base-`transactions` references are the `INSERT` (line 103) and the
+  `UPDATE ... SET deleted_at` soft-delete write (line 161), both correct. Task
+  80 in `TASKS.md` is legitimately ticked.
+
+**Non-blocking observations (no action required).**
+
+- `+`-operator concatenation across the table-name boundary
+  (`"SELECT * FROM " + "transactions"`) is not caught, because neither
+  `Constant` contains the contiguous substring. This is a genuinely contrived
+  way to write SQL (nobody splits a table name across a `+`), so it is not a
+  realistic bypass — noting it only for completeness.
+- A bare SQL string as the *first* statement of a function would be treated as
+  a docstring and skipped, but such a string is never executed as a query, so
+  it is not a real read path.
+
+---
+
+## 2026-08-06 — `131dbe5` — guard that every production read goes through `active_transactions` (§6, task 80)
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — both
+guard-coverage gaps closed in the follow-up commit on `ralph/phase-2`.
+
+> **RESOLVED.** The guard no longer regex-strips source. It parses each module
+> with `ast` and scans the value of every string literal *except* docstrings
+> (`sql_literals`), so triple-quoted SQL — the idiomatic multi-line query form
+> that the old `re.sub(r'""".*?"""', ...)` deleted wholesale (finding 1) — now
+> reaches the scan; comments are excluded for free because they aren't string
+> nodes. The match widened from `\bfrom\s+transactions\b` to
+> `\b(from|join)\s+transactions\b` so a `... JOIN transactions t ...` that pulls
+> soft-deleted rows into the row set (finding 2) reddens too. Verified both:
+> injecting a triple-quoted `SELECT ... FROM transactions` **and** a
+> `FROM active_transactions a JOIN transactions t` into `db.py` each fail the
+> guard; removing them greens it. `uv run pytest -q` → **101 passed**.
+
+---
+
+## 2026-08-06 — `131dbe5` (original) — guard that every production read goes through `active_transactions` (§6, task 80)
+
+**Status: ⚠️ CHANGES REQUESTED** — the invariant genuinely holds today and the
+guard reddens when the *current* read is repointed, but the guard silently
+misses the two most likely ways the bypass gets reintroduced. This is the
+"guard that reports safety it doesn't provide" failure mode CLAUDE.md flags as
+the #1 recurring defect here: the box is now ticked and the next iteration will
+trust it, while a bypass written in an ordinary style walks straight past it.
+
+**Scope:** New `tests/test_read_paths.py` — a source-scan guard that strips
+docstrings/`#` comments from `kanakko/*.py` and fails on any
+`\bfrom\s+transactions\b`. `TASKS.md` tick.
+
+**What I actually checked (commands + results):**
+
+- `git show HEAD` / `--stat` — read the full diff; 2 files, +48/−1.
+- `uv run pytest -q` → **`101 passed, 1 warning in 2.69s`** (was 100).
+- **Confirmed the invariant holds.** Grepped every `FROM`/`INSERT`/`UPDATE` in
+  `kanakko/*.py`: the only ledger *read* is `undo_last`'s subquery,
+  `SELECT txn_id FROM active_transactions` (`db.py:163`); the writes target the
+  base table (`INSERT INTO transactions` `db.py:103`, `UPDATE transactions SET
+  deleted_at` `db.py:161`), which a view can't own. Correct.
+- **Verified the redden-on-repoint claim.** Edited `db.py:163` to `SELECT
+  txn_id FROM transactions` and ran `uv run pytest tests/test_read_paths.py -q`
+  → **`1 failed`** (`AssertionError` at `test_read_paths.py:44`). Restored the
+  file. So the guard does fire on the read that exists today. (The commit
+  message cites `db.py:107` for this; the actual read is `db.py:163` — `:107` is
+  the INSERT's `fetchone`. Cosmetic, not a finding.)
+- **Tried to defeat the guard** with the test's own `sql_only`/scan logic — see
+  findings below.
+
+**Findings (ranked):**
+
+### 1 — ⚠️ Triple-quoted SQL bypasses the guard silently (`tests/test_read_paths.py:38-40`)
+
+`sql_only` strips **every** triple-quoted string
+(`re.sub(r'""".*?"""', "", ...)`), on the assumption that only prose lives in
+`"""..."""`. But a multi-line SQL query written as a triple-quoted string — the
+most idiomatic way to write multi-line SQL in Python — is stripped along with
+the prose, so its `FROM transactions` never reaches the scan.
+
+Failure scenario (verified with the guard's own logic):
+
+```python
+cur.execute("""
+    SELECT sum(amount) FROM transactions WHERE user_id = %s
+""", (user_id,))
+```
+
+→ `sql_only` deletes the whole string; `scan` returns `[]`; the guard stays
+**green** on a read that resurrects soft-deleted rows inside a sum. The
+concatenated-`"..."` style `db.py` uses today is caught (I confirmed), which is
+exactly why the guard passes now — but the invariant it protects breaks the
+moment a future dashboard/report query (task 81+, the reads this guard exists
+for) is written as triple-quoted SQL. The guard's whole reason to exist is to
+catch that reintroduction, and it doesn't.
+
+Suggested fix: don't strip triple-quoted strings wholesale. Walk the module
+with `ast` and scan the values of every string literal *except* the docstring
+positions (`ast.get_docstring`), or at minimum stop stripping `"""..."""` and
+only strip `#` comments plus the leading module/function docstrings. Then
+re-verify by pasting the triple-quoted query above into a module and watching it
+redden.
+
+### 2 — ⚠️ `JOIN transactions` is not caught (`tests/test_read_paths.py:41`)
+
+The scan matches only `\bfrom\s+transactions\b`. Reading the base table through
+a join — `FROM active_transactions a JOIN transactions t ON a.txn_id = t.txn_id`
+— reads soft-deleted rows just as `FROM transactions` does (the join row set
+includes deleted `t` rows), but there is no `FROM transactions` token, so the
+guard stays green. Verified: `scan` returns `[]` for that string.
+
+Suggested fix: match `\b(from|join)\s+transactions\b` (case-insensitive), and
+re-verify by adding such a join and watching it redden.
+
+Both findings are guard-coverage gaps, not defects in production code — the
+current ledger read is correct. But a guard that passes on the idiomatic
+reintroduction of the very bypass it names is, per CLAUDE.md, "worse than no
+guard, because it stops anyone looking." Task 80 should stay open until the
+guard reddens on at least the triple-quoted case.
+
+---
+
+## 2026-08-06 — `f7fa03d` — dedup Telegram updates by `update_id` so a redelivered `/undo` can't delete a second row (§14, review b9acac9)
+
+**Status: ✅ DONE** — no blocking issues. The fix resolves the sole open finding
+from the `b9acac9` review, is root-caused in the right place (the webhook, not
+per-handler), and ships a guard that genuinely reddens without it.
+
+**Scope:** New `processed_updates` idempotency ledger
+(`migrations/002_processed_updates.sql`), `db.claim_update` (INSERT … ON CONFLICT
+DO NOTHING RETURNING), and the webhook consolidated to one connection per update
+that claims the `update_id` inside the handler's own transaction and skips the
+handler on a repeat. New regression test.
+
+**What I actually checked (commands + results):**
+
+- `git show HEAD` / `--stat` — read the full diff; 5 files, +131/−16.
+- `uv run pytest -q` → **`100 passed, 1 warning in 2.58s`** (was 99). The
+  new test runs against the throwaway Postgres cluster in `conftest.py`, not a
+  stub.
+- **Reverted the fix to confirm the guard fails for its reason.** Deleted the
+  `if isinstance(update_id, int) and not claim_update(...)` block from
+  `kanakko/app.py:279-281` and re-ran the new test:
+  `uv run pytest -q -k redelivered` →
+  **`assert (0,) == (1,)` at test_webhook.py:515** — both confirmed rows soft-
+  deleted, exactly the silent money-path loss the fix prevents. Restored the
+  file; the other two dispatch tests stayed green (they carry no `update_id`).
+  The guard asserts the **effect** (rows surviving in `active_transactions`),
+  not a surface string.
+- Traced the transaction semantics against the diff:
+  - Claim + handler share one `with connect() as conn` (`app.py:278-292`), so
+    they commit together and roll back together. A handler that raises (500)
+    unwinds the block → psycopg `__exit__` rolls back → claim gone → Telegram's
+    redelivery legitimately re-runs. A committed update conflicts on the PK →
+    `claim_update` returns False → 200 no-op. Matches the docstring's claim.
+  - The refactored `elif action.data == …` chain (`app.py:287-292`) is sound:
+    `dispatch` (`app.py:72-100`) returns only `TextMessage | ButtonPress | None`;
+    `None` returns at line 271 and `TextMessage` takes the first branch, so any
+    value reaching the `elif`s is a `ButtonPress` with a `str` `.data`. No
+    `AttributeError` risk from dropping the old `isinstance` checks.
+  - `handle_undo` (`app.py:156-174`) does the DB write before `send_message`, so
+    a send failure rolls the soft-delete back with the claim — net effect is
+    still exactly one undo across a redelivery. No regression.
+- `migrations/002_processed_updates.sql` is a new file; `001_init.sql` is
+  untouched (respects "don't edit an applied migration"). `kanakko/migrate.py`
+  applies `*.sql` in sorted filename order and records each in
+  `schema_migrations`, so 002 is picked up exactly once. `update_id` is `BIGINT
+  PRIMARY KEY` — correct width for Telegram ids and the right column for the
+  ON-CONFLICT dedup. No `float`, no amount touched, no read bypassing
+  `active_transactions`.
+
+**Non-blocking observations (no change required):**
+
+- The `§14` citation is loose: §14 is "Hosting" and only chose webhook over long
+  polling; there is no numbered decision for redelivery idempotency. The webhook
+  docstring already carried `(§14)` pre-commit, so this is consistent with
+  existing practice, and the behaviour itself is correct and well-documented in
+  the migration header. Flagging only so a future reader isn't surprised.
+- The test's `_Reuse` context manager runs both deliveries on one shared
+  connection (the second INSERT sees the first within the same transaction),
+  whereas production uses a fresh connection per delivery (the second blocks on
+  the PK until the first commits, then conflicts). Both paths dedup correctly via
+  `ON CONFLICT DO NOTHING`; the test is a faithful proxy for the app logic. The
+  true cross-transaction blocking path is a Postgres guarantee, not app code, so
+  not worth a separate test.
+- `processed_updates` grows one row per update forever; the author marked this
+  with a `ponytail:` comment and a retention-sweep upgrade path. Correct call at
+  personal scale (§8 — no Redis), and monotonic ids mean old rows never repeat.
+
+**Findings:** none blocking.
+
+---
+
+## 2026-08-06 — `b9acac9` — add `/undo`: soft-delete the last confirmed transaction (§5, §6, task 79)
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one open
+finding on the money path: a redelivered `/undo` update soft-deletes a *second*
+real transaction, silently dropping it from the user's totals. The rest of the
+commit is correct and its guards genuinely guard.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-2`. Root-caused at the
+> webhook, not per-handler: a redelivery carries the same Telegram `update_id`,
+> so the webhook now `claim_update`s that id in the handler's own transaction
+> and skips the handler when it returns False. The claim and the handler's
+> writes share one transaction, so they commit together and roll back together —
+> a handler that 500s legitimately re-runs on the redelivery, but a redelivery of
+> a *committed* update is a no-op. This fixes `/undo` (which had no per-message
+> anchor the way Confirm/Cancel do) and hardens every other handler for free
+> (§14). New migration `002_processed_updates.sql` (a `processed_updates`
+> idempotency ledger), new `db.claim_update`, webhook consolidated to one
+> connection per update. New guard `test_a_redelivered_undo_does_not_soft_delete_a_second_row`
+> seeds two confirmed rows, POSTs the identical `/undo` update twice through the
+> real webhook against Postgres, and asserts exactly one survives in
+> `active_transactions` — reverting the webhook's `claim_update` guard reddens it
+> (`assert 1 == 0`, both rows gone) while the routing tests (no `update_id`) stay
+> green. `uv run pytest -q` → **100 passed** (was 99).
+
+**Scope:** New `db.undo_last` sets `deleted_at` on the user's newest live row
+(chosen from `active_transactions`, scoped by `user_id`) and returns its fields;
+`app.handle_undo` replies naming what was removed or "Nothing to undo."; the
+webhook intercepts `/undo` (and `/undo@bot`) before `handle_text` so it never
+reaches the parser. +7 tests, TASKS.md tick.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — read the full diff. `undo_last` (`kanakko/db.py:146-181`)
+  SELECTs from `active_transactions` (§6), scopes by `user_id` (§1), orders
+  `created_at DESC, txn_id DESC` (correct: "most recent *confirmed*" = insert
+  time, not `occurred_on`), and UPDATEs the base `transactions` table to set
+  `deleted_at = now()` — a single atomic statement. Amount comes back as a
+  `NUMERIC` → `Decimal` and reaches `format_amount` unchanged; no float on the
+  path (§9). `format_amount` (`kanakko/money.py:61-63`) additionally rejects a
+  float/bool with `TypeError`, so a leak would raise, not round silently.
+- `uv run pytest -q` → **99 passed, 1 warning** (matches the commit's claim; the
+  warning is the pre-existing Starlette/httpx testclient deprecation, unrelated).
+- **Reverted the view guard** — changed `active_transactions` → `transactions`
+  in `undo_last` and ran the undo tests: `test_undo_walks_back_through_history`
+  **FAILED** (`AssertionError: Decimal('250.00') == Decimal('100.00')` — the
+  second `/undo` re-latched onto the already-deleted newest row instead of
+  walking back). Restored. The guard fails for the reason it exists.
+- **Reverted the scope guard** — dropped `WHERE user_id = %s` (and its param, to
+  keep the SQL valid) and ran `test_undo_is_scoped_to_the_user`: **FAILED**
+  (`AssertionError: Decimal('999.99') == Decimal('100.00')` — user A's `/undo`
+  removed user B's newer ₹999.99 row). Restored. Genuine §1 guard.
+- Traced routing: `_is_undo` (`app.py:150-153`) splits `text`, strips an
+  `@bot` suffix, lowercases — `/undo`, `/undo@KanakkoBot`, `/UNDO` all route to
+  `handle_undo`; ordinary text falls through to `handle_text`. `dispatch`
+  guarantees `text` is a `str`, so no `None` crash. Webhook wiring at
+  `app.py:264-268`. `test_webhook_routes_undo_to_handle_undo_not_handle_text`
+  covers all three cases.
+- `git status --short` → clean after all reverts; no residue from the
+  experiments.
+
+**Findings:**
+
+1. **(Medium — money path, silent) A redelivered `/undo` update removes a second
+   real transaction.** `kanakko/app.py:264-268`, `kanakko/db.py:146-181`.
+
+   Telegram redelivers any update it did not get a 2xx for (documented at
+   `app.py:247` and in `confirm_pending`'s docstring). Every *other* money-path
+   handler is idempotent against this: `confirm_pending` / `cancel_pending`
+   operate on a specific pending row keyed by `message_id`, so once that row is
+   consumed a redelivered tap is a no-op (returns `None`). `undo_last` has no
+   such anchor — it deletes "the newest live row", so each redelivery removes one
+   *more* row.
+
+   Scenario: user confirms ₹250 (food) and ₹100 (transport), then sends `/undo`.
+   The handler soft-deletes ₹100 and calls `send_message` (an outbound HTTP call
+   to Telegram) — if that call is slow and the webhook doesn't return 200 in
+   time, Telegram redelivers the same `/undo`, the handler runs again and
+   soft-deletes ₹250 too. The user asked to undo one entry; two are gone. Because
+   there is no user-facing un-undo, the extra row stays out of every total until
+   someone edits the DB — a monthly total quietly short by ₹250, exactly the
+   "total quietly off by a day's transactions" class this project treats as the
+   expensive kind. Soft delete makes it recoverable in principle but not by the
+   user.
+
+   No test would catch this: the routing test stubs `handle_undo`, and no test
+   drives two `undo_last` calls for one logical `/undo`. This is the first
+   money-mutating handler keyed on "the newest row" rather than a specific
+   message id, so it is the first one where redelivery deletes instead of
+   no-ops.
+
+   Suggested fix (design call for the implementer, not made here): dedup updates
+   at the webhook by Telegram `update_id` before dispatching (a general fix that
+   also hardens `handle_text`), or make `/undo` idempotent per source message —
+   e.g. anchor the undo to the triggering message so a redelivery of the *same*
+   `/undo` is a no-op rather than "delete the next one". Whichever, add a guard
+   that reddens when two deliveries of one `/undo` delete two rows.
+
+**Not findings (checked, deliberately not flagged):**
+
+- Send-before-commit (`send_message` runs inside `handle_undo`, the commit is on
+  `with connect()` exit) is the codebase-wide pattern — `handle_confirm` /
+  `handle_cancel` also ack before commit. Pre-existing, out of scope for this
+  commit.
+- `get_or_create_user` creating a row for a fresh user who types `/undo` with no
+  transactions is harmless and matches `handle_text`.
+- Reads go through `active_transactions`; the UPDATE correctly targets the base
+  `transactions` table (a view can't own the soft-delete write). Consistent with
+  §6.
+
+---
+
+## 2026-08-06 — `00561e9` — swallow "message is not modified" 400 in edit_message_text (§5, review 9a25c4f)
+
+**Status: ✅ DONE** — no blocking issues. The fix root-causes the redelivery
+loop the prior review (`9a25c4f`) flagged, in the shared send helper, with a
+guard that reddens without the fix.
+
+**Scope:** `tg.edit_message_text` now catches `httpx.HTTPStatusError`; when it's
+the Bot API 400 "message is not modified", it returns the response body as
+success instead of letting `raise_for_status` propagate a 500 that Telegram
+answers by redelivering the tap forever. A new `_is_not_modified` helper gates
+the swallow: 400-only, description-matched, and it treats a non-JSON body as
+"not the no-op" (raises). Two new tests in `test_tg.py`.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — read the full diff; the swallow lives in the shared
+  `edit_message_text` (`kanakko/tg.py:79-84`), not on the single `handle_category`
+  caller, so every future editor benefits. Root-cause fix, not symptom.
+- Traced the loop end to end: `webhook` (`app.py:242-244`) → `handle_category`
+  (`app.py:181-208`) re-writes the *same* category, `confirm_card` re-renders
+  byte-identical text+markup → `edit_message_text` → 400 not-modified. Before the
+  fix this raised out of `handle_category`, the webhook 500'd, and Telegram
+  (which redelivers any non-2xx, per the `webhook` docstring) re-sent the tap.
+  Loop confirmed real; the fix closes it and `answer_callback_query` still fires.
+- `uv run pytest -q` → **92 passed, 1 warning** (matches the commit's claim; the
+  warning is the pre-existing Starlette/httpx testclient deprecation, unrelated).
+- **Defeated the guard as required:** replaced the try/except with a plain
+  `return _call(...)` and ran `uv run pytest tests/test_tg.py -q` →
+  `test_edit_swallows_message_not_modified` **FAILED** (HTTPStatusError
+  propagates, `tests/test_tg.py:109`), 7 passed. Restored → `8 passed`. The
+  swallow guard fails for the reason it exists; the "still raises on other 400"
+  guard pins that a genuine 400 ("chat not found") is not swallowed. Working tree
+  left clean (`git status --short` empty).
+
+**Verification notes:** The test double (`_StatusResponse.raise_for_status`
+raising `HTTPStatusError`) faithfully mirrors `_call`'s real path
+(`response.raise_for_status()` then `.json()`), and the mocked `httpx.post`
+signature (`url, json, timeout`) matches the real call. `_is_not_modified`'s
+`except ValueError` correctly covers a non-JSON error body (httpx's
+`json.JSONDecodeError` subclasses `ValueError`), so a 400 with an HTML body
+raises rather than being mis-swallowed. No money, timezone, soft-delete, or
+`initData` surface is touched. No findings.
+
+---
+
+## 2026-08-06 — `9a25c4f` — handle a category button press (§5, task 78)
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+blocking finding: an ordinary re-tap of the already-selected category 500s into
+a Telegram redelivery loop — the exact trap this commit's docstring claims to
+have closed.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-2`. The identical-edit
+> 400 is now swallowed in the shared `tg.edit_message_text`, not just on the
+> category path: an `editMessageText` that Telegram answers with
+> `400 "message is not modified"` is treated as success (the message already
+> reads the way we wanted) and its body returned, instead of `raise_for_status`
+> propagating a 500 that Telegram would answer by redelivering the tap forever.
+> A different 400 (e.g. "chat not found") still propagates. Fixed in the shared
+> send helper so every future editor benefits, not only `handle_category`.
+> Two new guards in `test_tg.py`: `test_edit_swallows_message_not_modified`
+> drives the real not-modified 400 through `edit_message_text` and asserts it
+> returns rather than raises; `test_edit_still_raises_on_other_400` pins that a
+> genuine 400 is not swallowed. Verified the swallow guard earns its place:
+> reverting the try/except to a plain `return _call(...)` reddens
+> `test_edit_swallows_message_not_modified` (the `HTTPStatusError` propagates);
+> restoring greens it. `uv run pytest -q` → `92 passed` (was 90).
+
+**Scope:** New `db.set_pending_category` re-writes a pending row's category
+(scoped by `user_id`, round-tripped through the `Transaction` model) and returns
+the updated txn; new `app.handle_category` routes a `cat:<name>` tap, edits the
+card in place into a full confirm card, and answers the callback. Unknown/forged
+categories are acked and ignored. `categories.CATEGORY_PREFIX` is now one
+constant emitted by the keyboard and matched by the webhook dispatch.
+
+### What I checked (commands run)
+
+- `git show HEAD` — full diff (categories.py, db.py, app.py, test_db.py +3,
+  test_webhook.py +2 & routing, TASKS.md tick).
+- `uv run pytest -q` → **90 passed, 1 warning** (pre-existing httpx deprecation).
+  Matches the commit's "90 passed (was 85)".
+- **Verified the two claimed guards bite by reverting each:**
+  - Removed the `if category not in ALL_CATEGORIES` guard from `handle_category`
+    → `uv run pytest tests/test_webhook.py -k forged` → **1 failed**
+    (`test_handle_category_ignores_a_forged_unknown_category`). Restored.
+  - Dropped the `user_id = %s` clause from `set_pending_category`'s SELECT →
+    `uv run pytest tests/test_db.py -k scoped_to_the_user` → **2 failed**
+    (`test_set_pending_category_is_scoped_to_the_user` and, as a bonus, the
+    confirm scoping test — the fallback `ORDER BY … DESC` picks the other user's
+    row). Restored. Working tree clean, suite green again (90 passed).
+- **Spec fit against §5.1:** DECISIONS §5 replaces the field editor with, first
+  item, "Category buttons directly on the confirm card." The tap corrects the
+  most-often-wrong field in one press. No conversation state machine introduced.
+- **§9 money invariant:** round-trip is `Transaction.model_validate({**parsed,
+  "category": category})` then `model_dump(mode="json")`; `test_db.py` asserts
+  the stored `amount` is still the string `"250.00"`, not a float. Confirmed.
+- **§11 closed set:** category is re-validated by the model round-trip and by the
+  `ALL_CATEGORIES` guard. No category string literal added outside
+  `categories.py`; the `cat:` prefix is now the single `CATEGORY_PREFIX`
+  constant, emitted by `keyboard()` and matched by the dispatch — no drift.
+- **Dispatch ordering:** `CONFIRM`/`CANCEL` are exact-match branches, category is
+  `startswith(CATEGORY_PREFIX)`; `"confirm"`/`"cancel"` don't start with `"cat:"`,
+  so no collision. Confirmed by reading the four `elif` branches in `webhook`.
+
+### Findings
+
+**1. (blocking) Re-tapping the already-selected category 500s → Telegram
+redelivery loop — `kanakko/app.py:206`, via `kanakko/tg.py:40`.**
+
+`handle_category` unconditionally calls `edit_message_text(...)` with the
+freshly-rendered `confirm_card(txn)`. When the chosen category equals the row's
+current category — which the full confirm card *already displays as a tappable
+button* (§5.1) — the re-render is byte-identical (same text, same keyboard).
+Telegram's `editMessageText` then returns `400 Bad Request: message is not
+modified`. `tg._call` does `response.raise_for_status()` (`tg.py:40`), so that
+400 raises `httpx.HTTPStatusError`, which propagates out of `handle_category`
+and out of the `webhook` coroutine — there is no `try/except` around the
+handler (`app.py:242-244`). FastAPI returns **500**, Telegram never got a 2xx,
+so it **redelivers the same callback**, which 400s again → 500 again → forever.
+
+Failure scenario (inputs → wrong result): a confirm card shows `Category: Food`
+with the category buttons on it (parse returned "Food", or the user just picked
+it). The user taps **Food** again — to re-affirm, or by accident. First tap:
+`set_pending_category` writes Food (unchanged) → `confirm_card` renders
+identical content → `editMessageText` 400 → webhook 500 → Telegram redelivers →
+500 → redelivery loop; the spinner on the button never clears and
+`answer_callback_query` (which runs *after* the edit) is never reached. This is
+precisely "a raise here would make Telegram redeliver the bad tap forever" that
+the docstring says it avoided — the unknown-category branch is guarded, but the
+identical-edit branch is not.
+
+Why the tests didn't catch it: both new webhook tests `monkeypatch` a
+non-raising `edit_message_text`, so they never exercise the 400. A check that
+drives the *real* not-modified condition (or asserts the handler tolerates a
+400 from `edit_message_text`) would fail today and is the missing guard on this
+path.
+
+Suggested fix (root cause, one place): treat "message is not modified" as
+success rather than a 500 — either short-circuit when the category is unchanged
+(skip the edit, still `answer_callback_query`), or catch the specific 400 in
+`handle_category`/`edit_message_text` and fall through to acking the callback.
+Whichever, add a check that reddens if an identical re-render escapes as a 500.
+
+**2. (minor, non-blocking) Cross-type forged category accepted —
+`kanakko/app.py:197`.** The guard checks membership in `ALL_CATEGORIES` (the
+union), not in the categories valid for `txn.type`. A forged `cat:Salary`
+callback on an *expense* card passes and stores an income category on an expense
+row. Only reachable by forging one's own callback_data, and the parse schema
+already uses the union `enum`, so this is consistent with existing behaviour and
+affects only the forger's own data — noting it, not blocking on it.
+
+---
+
+## 2026-08-06 — `ead8aab` — category buttons directly on the confirm card (§5, task 77)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope:** `confirm_card` now appends `category_keyboard(txn.type)`'s rows below
+the Confirm/Cancel row, so the wrong-category fix is one tap on the card. Pure
+rendering change; the category-press handler that mutates the pending row is the
+next (still-unticked) task.
+
+### What I checked (commands run)
+
+- `git show HEAD` — full diff (confirm.py, test_confirm.py, TASKS.md tick).
+- `uv run pytest -q` → **85 passed, 1 warning** (the pre-existing httpx
+  deprecation only). Matches the commit's claim (was 84, +1).
+- **Verified the new guard bites:** replaced `kanakko/confirm.py` with its
+  `HEAD~1` version (`git show HEAD~1:kanakko/confirm.py`) and re-ran
+  `tests/test_confirm.py` → **1 failed** on
+  `test_category_buttons_are_on_the_card_for_one_tap_correction` (the assertion
+  that every `cat:<name>` for the txn type is present in the keyboard). Restored
+  the file; suite green again. The guard reddens for the reason it exists —
+  dropping the category buttons off the card — not on a surface form.
+- **Spec fit against §5.1:** DECISIONS §5 explicitly replaces the field editor
+  with, first item, "Category buttons directly on the confirm card." The change
+  implements exactly that. No conversation state machine introduced (§5 "Why").
+- **Categories sourced from `categories.py` only:** `confirm.py` imports
+  `keyboard as category_keyboard`; no literal category string in the module. The
+  keyboard's `cat:<name>` data is generated from `EXPENSE_CATEGORIES` /
+  `INCOME_CATEGORIES`, so the card can never offer a category the schema rejects.
+- **No spec-critical surfaces touched:** amount still renders via
+  `format_amount` (no float), no `active_transactions`/timezone/money path in
+  scope, no confidence score, `category` nullability untouched. The
+  `assert txn.category is not None` precondition still routes null categories to
+  `category_prompt` (§3).
+- Confirmed `git status` clean after the revert experiment; no stray edits left.
+
+### Findings
+
+None. The change is minimal, matches §5.1, keeps categories single-sourced, and
+ships a guard that genuinely fails without the fix. The category-press handler is
+correctly left as the next unticked task, so nothing is falsely ticked.
+
+---
+
+## 2026-08-06 — `6ac1790` — show category buttons when the parse returned no category (§3, task 73)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope:** When `parse_message` returns `category: null`, `handle_text` now
+renders a category picker (`category_prompt`) instead of the Confirm/Cancel
+confirm card; the pending row is still written keyed by the sent message id.
+`confirm_card` gains an `assert txn.category is not None` backstop.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (app.py, confirm.py, categories.py
+  usage, test_webhook.py, TASKS.md tick).
+- `uv run pytest` → **84 passed, 1 warning** (the pre-existing httpx
+  deprecation warning only). Full suite green.
+- `uv run pytest tests/test_webhook.py` → 18 passed.
+- **Verified the new guard bites:** replaced line 135–136 of `app.py` with an
+  unconditional `text, keyboard = confirm_card(txn)` and re-ran
+  `test_handle_text_shows_category_buttons_when_category_is_null` →
+  **1 failed** (the null category reaches `confirm_card` and trips its assert /
+  sends Confirm not `cat:`). Restored `app.py` via `git checkout`; suite green
+  again. The test is a real check, not a rubber stamp.
+- Confirmed routing completeness: `grep` shows the only production caller of
+  `confirm_card` is `app.py:135`, correctly guarded by `txn.category is None`;
+  `category_prompt` is likewise only reached from there. No path lets a null
+  category into `confirm_card` in production.
+- Confirmed `category_keyboard(txn.type)` cannot `KeyError`: `parse.py:123`
+  types `type: Literal["expense", "income"]`, both keys of `CATEGORIES_BY_TYPE`.
+- Spec fit: §3 ("`category: null` → show the category buttons") — matches.
+  Categories sourced only from `categories.py` (imported `keyboard`), no literal
+  category strings. `amount` still non-nullable, `category` nullable, no
+  confidence score introduced. No money/timezone/soft-delete surface touched.
+
+### Findings
+
+None blocking. Three low-severity observations, all recoverable / out of the
+task's scope — recorded, not requested:
+
+1. **No Cancel on the picker** (`confirm.py:49` `category_prompt`). The picker
+   offers only the `cat:` buttons — a user who spots a wrong *amount* at this
+   point cannot abort directly; they must pick any category and Cancel on the
+   resulting confirm card (task 78, not yet built). §5 allows Cancel-and-retype;
+   this adds one tap to that path. Acceptable for now since task 78 owns the
+   post-pick card; worth a Cancel button if that card doesn't materialise.
+2. **Date line dropped** (`confirm.py:58–61`). `category_prompt` shows
+   type/amount/note but not `Date:` (the confirm card shows it). No data loss —
+   the parsed date is persisted in the pending row and shown on task 78's card.
+   Cosmetic.
+3. **`assert` stripped under `python -O`** (`confirm.py:31`). The assert is a
+   fail-loud backstop, not the real guard — the routing in `app.py:135` is what
+   actually keeps a null out of `confirm_card`, and that is not an assert. So
+   `-O` weakens only the redundant backstop, not the behaviour. No action needed.
+
+---
+
+## 2026-08-06 — `0667bfc` — reject an unparseable message with a rephrase prompt (§3, task 72)
+
+**Scope:** `handle_text` now catches the `ValidationError` that `parse_message`
+raises when the amount can't be read, sends `REPHRASE_PROMPT`, and returns
+`None` instead of letting it propagate to a 500 (which made Telegram redeliver
+the same unparseable text forever). Return type widened to `int | None`. New
+guard test.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (`TASKS.md`, `kanakko/app.py`,
+  `tests/test_webhook.py`).
+- Read `kanakko/parse.py`, `kanakko/money.py`, and `docs/DECISIONS.md` §2–§3
+  to confirm the exception path and the spec.
+- `uv run pytest -q` → **83 passed**, matching the commit message.
+- `uv run pytest tests/test_webhook.py -q` → 17 passed.
+- **Guard verified by reverting:** removed the `try/except` from `handle_text`
+  and ran `pytest -k rephrase` → the new test **FAILED** (the `ValidationError`
+  propagated instead of returning `None`). Restored `app.py` with
+  `git checkout`. The guard fails for the reason it exists.
+
+### Spec fit
+
+- §3 says "no amount means no transaction, so reject the message and ask for a
+  rephrase rather than showing a confirm card with a blank." The change does
+  exactly that: `send_message(msg.chat_id, REPHRASE_PROMPT)` then `return None`,
+  `save_pending` never reached. The test asserts `pending_count == 0` and
+  `reply_markup is None` (a prompt, not a confirm card) — the right effects.
+- Exception path traced end to end and confirmed real, not just the mock: an
+  empty/missing amount → `money.parse_amount("")` raises `ValueError("amount is
+  empty")` → the `_amount_is_exact` field validator re-raises as `ValueError` →
+  Pydantic surfaces it as `ValidationError` → `parse_message` re-raises after its
+  one retry (`parse.py:182-183`) → caught at `app.py:127`. The test's
+  `raise_validation` reproduces this faithfully by validating a real
+  `amount=""` payload rather than raising a bare exception.
+- Webhook path: `handle_text` returning `None` leaves `webhook` returning
+  `{"ok": True}` (200), so Telegram does not redeliver — the stated goal.
+
+### Notes (non-blocking, no fix required)
+
+- The catch is narrowed to `ValidationError` only. On the second (retry) attempt
+  `parse_message` can also raise `json.JSONDecodeError`, `httpx` errors, or
+  `RuntimeError` (missing key) — none of which are caught, so they still 500 and
+  Telegram redelivers. This is correct: those are transient transport/schema
+  failures, not "no amount," and redelivery is the right response for them
+  (`parse.py` docstring says as much). The scoping matches §3's intent.
+- `get_or_create_user` runs before the parse, so an unparseable first message
+  still creates (and, on `webhook` block-exit, commits) a user row. This is
+  benign — the user row is not a transaction, it's idempotent, and the same row
+  is created on any first message. Not a §3 "store nothing" violation.
+- No money/`float`, timezone, `active_transactions`, or `initData` surface is
+  touched by this commit.
+
+---
+
+## 2026-08-06 — `1426440` — handle Cancel: discard the pending row, acknowledge (§5, task 65)
+
+**Scope:** Wire the CANCEL button tap into `/webhook`. New `db.cancel_pending`
+deletes the user's pending row for the card's `telegram_message_id` (scoped by
+`user_id`, §1) and returns the deleted `pending_id` or `None` on a redelivered
+tap. New `app.handle_cancel` resolves the user, cancels, and answers the
+callback query ("Discarded ❌" / "Already gone"). Nothing is written to the
+ledger (§5).
+
+**Status: ✅ DONE** — no blocking issues. One low-severity note below; it does
+not change behaviour or require a fix before the next task.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (`TASKS.md`, `kanakko/app.py`,
+  `kanakko/db.py`, `tests/test_webhook.py`).
+- `uv run pytest -q` → **82 passed, 1 warning** (the pre-existing Starlette
+  `httpx` deprecation, unrelated). Matches the commit message's claim.
+- **Reddened the scoping guard myself** to confirm it fails for the reason it
+  exists: temporarily dropped `AND user_id = %s` from `cancel_pending`'s DELETE
+  and reran `tests/test_webhook.py::test_cancel_is_scoped_to_the_user` →
+  **`assert 0 == 1` (FAILED)** — A's Cancel deleted B's identically-numbered
+  card. Restored `db.py` (`git checkout`) and reran the suite → 82 passed. The
+  guard is real, not a surface-form assertion.
+- Read `docs/DECISIONS.md` §1 (every table keyed on internal `user_id`) and §5
+  (Cancel discards, no ledger write, no state machine) — the change matches
+  both.
+
+### Correctness and spec fit
+
+- **§5 honoured.** `handle_cancel`/`cancel_pending` only DELETE the pending row
+  and ack; no `transactions` insert, no conversation state. The
+  `test_handle_cancel_discards_the_pending_row_and_acknowledges` test asserts
+  `ledger_count == 0` via `active_transactions` — the right assertion, since a
+  stray write would show up there.
+- **§1 scoping** mirrors the already-reviewed `confirm_pending`: DELETE is keyed
+  on `(user_id, telegram_message_id)`, verified reddening above.
+- **Idempotent redelivery** (§5-adjacent, matches the Confirm handler's
+  contract): a second tap returns `None` and still acks "Already gone", so
+  Telegram's spinner clears on the redelivered 200. Covered by
+  `test_handle_cancel_is_idempotent_on_a_redelivered_tap`.
+- **Routing** is asserted both ways in the rewritten
+  `test_webhook_routes_confirm_and_cancel_to_their_handlers`: CONFIRM→confirm,
+  CANCEL→cancel, never crossed; each button tap opens exactly one connection; an
+  ignored update opens none. Good — a CANCEL leaking to `handle_confirm` would
+  write a ledger row, and that path is now guarded.
+- **Commit semantics:** the endpoint uses `with connect() as conn:`, identical
+  to the Confirm path, so the DELETE commits on clean exit and a handler
+  exception rolls back and 500s for redelivery. `cancel_pending` correctly does
+  not commit itself.
+- No `float`, no amount arithmetic, no read of `transactions`/`active_transactions`
+  in this diff — none of the money/timezone axes are touched.
+
+### Low-severity note (no fix required)
+
+1. `kanakko/app.py:138` — `handle_cancel` acknowledges but does **not**
+   `edit_message_text` to strip the Confirm/Cancel buttons off the discarded
+   card. Not a spec violation (§5 asks only to discard + acknowledge) and it is
+   safe: the pending row is gone, so a later Confirm tap on the same lingering
+   card hits `confirm_pending`→`None` and writes nothing. Worth a follow-up only
+   if the stale card's buttons prove confusing in use; leaving it is the correct
+   lazy call for this task.
+
+### Falsely-ticked check
+
+Task 65 is genuinely done: real behaviour (DB delete + ack), real error/edge
+handling (idempotent redelivery, user scoping), and guards that fail for their
+stated reason. Not a stub.
+
+---
+
+## 2026-08-06 — `fbd351f` — wire Handle Confirm into `/webhook` (§4, §14, §15, task 64)
+
+**Scope:** Route a dispatched `TextMessage` → `handle_text` and a
+`ButtonPress(data=CONFIRM)` → the new `handle_confirm`, each inside a
+per-update `with connect() as conn:` block; ignored/redelivered/CANCEL updates
+open no connection. `handle_confirm` resolves the user, calls
+`db.confirm_pending`, and answers the callback query.
+
+**Status: ✅ DONE** — no blocking issues. Two low-severity notes below; neither
+changes behaviour or requires a fix before the next task.
+
+### What I checked (commands run)
+
+- `git show HEAD` — reviewed the full diff (TASKS.md, `kanakko/app.py`,
+  `tests/test_webhook.py`).
+- `uv run pytest -q` → **79 passed, 1 warning** (the pre-existing Starlette
+  `httpx` deprecation). The three new/updated webhook tests are in that count.
+- Read `app.py`, `db.py`, `tg.py`, `confirm.py`, `conftest.py` end to end to
+  trace the real commit/redelivery flow, not just the diff.
+- `uv run python -c "import psycopg; print(psycopg.__version__)"` → **3.3.4**,
+  to confirm the `with connect() as conn:` commit-on-clean-exit contract the
+  webhook depends on. (An empirical two-cluster probe hung on parallel
+  `pg_ctl`; the conftest fixture already exercises the same context-manager
+  contract, so the reliance is sound.)
+- Spec fit: §15 (`app.py:21-33` origin verification unchanged, fails closed,
+  `hmac.compare_digest`), §14 (always-200 on malformed body / ignored update),
+  §1 (`confirm_pending` scopes the write by `user_id`), §4/§6/§9 (money path).
+
+### Guards — do they bite?
+
+- **CONFIRM discrimination** (`test_webhook_routes_confirm_but_not_cancel`):
+  routing a CANCEL to `handle_confirm` would push `confirmed` to 2, and opening
+  a connection for an ignored update would push `opened` past 1 — both asserted,
+  both would fail on regression. Real guard.
+- **Idempotency** (`test_handle_confirm_is_idempotent...`): drives the *real*
+  `confirm_pending` against Postgres twice on the same tap and asserts
+  `count == 1` via `active_transactions` plus acks `["Saved ✅", "Already
+  saved"]`. A double-write would make it 2. Real guard.
+- **Money path** (`test_handle_confirm_writes_the_ledger_row...`): asserts the
+  row reads back as exact `Decimal("100.00")` through `active_transactions`
+  (§6/§9), not `transactions` directly. Real guard.
+
+I confirmed idempotency-plus-500 is correct under both possible psycopg
+transaction semantics: whether `confirm_pending`'s inner `with conn.transaction()`
+commits the money write independently (delivery 1 saves, ack fails → 500 →
+delivery 2 sees no pending → "Already saved") or defers to the outer block
+(delivery 1 rolls back on the ack failure → delivery 2 re-confirms), the net is
+exactly one ledger row. No torn write either way.
+
+### Notes (low severity, non-blocking)
+
+1. **`handle_confirm` docstring says "Does not commit — the caller owns the
+   transaction" (`app.py:121`), but `confirm_pending` commits internally** via
+   its own `with conn.transaction()` on a fresh production connection (the
+   outermost transaction block → BEGIN…COMMIT). The behaviour is correct — and
+   arguably better, since the insert+delete money write is committed atomically,
+   independent of the Telegram ack — but the comment describes a transaction
+   ownership that isn't what actually happens. Doc nit only.
+
+2. **No test exercises the webhook's own commit for `handle_text`.** Both
+   webhook routing tests stub `connect` with `_FakeConn` (whose `__exit__`
+   commits nothing), and the `handle_confirm` DB tests call the handler directly
+   rather than through `/webhook`. So "the pending row is actually persisted by
+   the `with connect()` block" rests on the psycopg3 contract, untested here.
+   If that block ever silently stopped committing (e.g. an autocommit change),
+   the failure would be invisible: the pending row is lost, the user taps
+   Confirm, and `confirm_pending` returns `None` → "Already saved" with nothing
+   saved. Worth one end-to-end webhook test against real Postgres asserting a
+   `pending_transactions` row exists after the POST returns 200. Not blocking —
+   the contract holds at 3.3.4.
+
+Out of scope (correctly deferred, not findings): CANCEL taps get no ack yet
+(task 65, unchecked), and an unparseable message currently raises → 500 →
+Telegram redelivery until the "reject unparseable amount" task lands. Both are
+the next unchecked tasks; missing ≠ wrong.
+
+The TASKS.md tick for task 64 is justified — the endpoint opens the connection,
+routes CONFIRM, commits, and acks, with real-DB tests behind each claim.
+
+---
+
+## 2026-08-06 — `c6024de` — add `app.handle_text` + `db.get_or_create_user` (§1, §2, §4, task 58 split)
+
+**Scope:** Split the text-message half of the core loop out of Handle Confirm.
+`app.handle_text(conn, msg)` resolves the user, parses the text, sends the
+confirm card, and writes the pending row keyed by the *sent card's* message id.
+New `db.get_or_create_user` maps a Telegram id to the internal `users.user_id`
+(idempotent upsert). Standalone — not yet wired into `/webhook`.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run, not assumed)
+
+- `uv run pytest -q` → **76 passed** (was 74), matching the commit message.
+- **Guard 1 bites.** Edited `app.py` to key `save_pending` on `msg.message_id`
+  instead of `card_message_id`, then ran
+  `test_handle_text_keys_the_pending_row_on_the_sent_card` → **1 failed**
+  (`assert card_message_id == 909`). Reverted; passes again. The test drives the
+  real `get_or_create_user`, `confirm_card`, and `save_pending` against a real
+  Postgres cluster (only `parse_message`/`send_message` stubbed), so it exercises
+  the actual persistence path, not a mock of itself.
+- **Guard 2 bites.** Dropped `ON CONFLICT (telegram_user_id) DO NOTHING` from the
+  CTE, then ran `test_get_or_create_user_is_idempotent` → **1 failed**
+  (`psycopg.errors.UniqueViolation` on the second call). Reverted; passes again.
+- Traced the money path: `handle_text` → `save_pending` stores
+  `txn.model_dump(mode="json")`, and the test asserts `parsed["amount"] ==
+  "500.00"` (a string, §9). No `float` touches the amount. ✅
+- Confirmed the CTE returns the right id on both paths: on a fresh insert `ins`
+  yields the new row and the sibling `SELECT` sees nothing (statement snapshot),
+  so `UNION ALL … LIMIT 1` returns the inserted id; on conflict `ins` is empty
+  and the `SELECT` returns the existing row. The idempotency test confirms one
+  row, same id, distinct ids for distinct users.
+- **"Failed send leaves no pending row" holds structurally.** `tg.send_message`
+  → `_call` calls `response.raise_for_status()`, so an HTTP error raises before
+  `save_pending` is reached; an API-level `ok:false` (HTTP 200) instead raises
+  `KeyError` on `sent["result"]` — either way no pending row is written, the safe
+  direction the docstring claims.
+- `git status` clean after the two revert experiments (both files restored to
+  HEAD).
+
+### Non-blocking observations (do not fix now)
+
+1. **`kanakko/db.py:40` — `ON CONFLICT DO NOTHING` upsert has the classic
+   concurrent-first-insert race.** If two transactions insert the *same* new
+   `telegram_user_id` concurrently, the loser's `DO NOTHING` returns 0 rows while
+   its sibling `SELECT` (statement-start snapshot) can't yet see the winner's
+   uncommitted row → `fetchone()` returns `None` → `(user_id,) = None` raises
+   `TypeError`. Only reachable on two truly-parallel *first* messages from one
+   brand-new user; the send is sync and single-user today (§14 deferred), so this
+   is informational, not a scale finding to action now. If it ever wires up under
+   concurrency, the standard fix is a retry loop or a follow-up `SELECT` after a
+   commit boundary.
+2. No test for the "failed send → no pending row" direction. The behaviour is
+   structurally guaranteed by call ordering (send raises before `save_pending`),
+   so a test is optional; noting it only so the claim isn't mistaken for tested.
+
+### TASKS.md
+
+The tick is honest: task 58 was genuinely split, its scope narrowed to the
+wiring, and the box marks only the standalone handler that now exists and is
+tested. The follow-on Handle Confirm task correctly retains the `/webhook`
+routing, Confirm handler, and connection open/commit.
+
+## 2026-08-06 — `5a19d43` — add `kanakko/tg.py` — Telegram send client (§4, §14, task 51)
+
+**Scope:** New thin Telegram Bot API send client (`answer_callback_query`,
+`send_message`, `edit_message_text`) built on raw `httpx`, mirroring
+`parse.call()`. Token from `TELEGRAM_BOT_TOKEN`, fails closed when unset.
+`reply_markup` serialises a `confirm_card` `InlineKeyboardMarkup` via
+`.to_dict()`. New `tests/test_tg.py` (6 checks, no network). `TASKS.md` tick +
+Handle-Confirm note update. No production code path is wired to it yet.
+
+**Status: ✅ DONE** — matches the conventions, the two guards that matter
+provably bite, nothing regressed. No blocking findings.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **74 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). Matches the claimed count (was 68;
+  +6 from the new file).
+- **Fail-closed guard bites for its reason.** Neutered the guard in `tg._call`
+  (replaced `raise RuntimeError(...)` with `token = "x"`) and reran
+  `uv run pytest tests/test_tg.py -q` → **1 failed, 5 passed**, the failure being
+  `test_fails_closed_without_a_token` (`Failed: posted with no token set`).
+  Restored the file; tree clean. So an unset token can never reach the network —
+  the secret-from-env / never-a-literal convention holds and is enforced by a
+  check that genuinely reddens.
+- **Keyboard-serialisation guard is real, not a spelling check.**
+  `test_keyboard_is_serialised_to_a_plain_dict` asserts the sent `reply_markup`
+  is `kb.to_dict()` with `inline_keyboard[0][0]["callback_data"] == "ok"` — the
+  actual Bot API nested-list shape, not merely "a dict". A raw
+  `InlineKeyboardMarkup` handed to `httpx(json=...)` would not serialise, and
+  this check catches that regression. Confirmed `confirm.py:confirm_card` really
+  returns an `InlineKeyboardMarkup`, so the `.to_dict()` contract matches its
+  one real caller-to-be.
+- **Spec fit.** §4/§5 confirm-card flow uses these three methods; no
+  `parse_mode` is set, which is correct — `confirm_card` is deliberately plain
+  text (note is the user's own wording, §4). Sync httpx carries a `ponytail:`
+  comment naming the §14 deferred throughput ceiling (~50k users → rate-limited
+  send loop, not a queue) — consistent with the deferred table. No money,
+  timezone, `active_transactions`, or category surface is touched, so those
+  axes are N/A here.
+- **Not a stub / not a falsely-ticked task.** All three methods do real work;
+  the task's every claim (methods, raw httpx, env token, fail-closed,
+  `.to_dict()`, no-network tests) is present and exercised. HTTP errors
+  propagate (`test_http_error_propagates`).
+
+### Non-blocking observations (no action required)
+
+- **Application-level `ok: false` isn't inspected.** `_call` calls
+  `response.raise_for_status()` and returns `response.json()` without checking
+  the Bot API `ok` field (`kanakko/tg.py:36-38`). This is safe today because the
+  Bot API returns a 4xx HTTP status alongside `ok: false` for errors (verified
+  against the Bot API docs, 2026-08-06), so `raise_for_status()` already raises.
+  Worth a glance if a future handler starts branching on the returned dict, but
+  nothing silently wrong now.
+
+---
+
+## 2026-08-06 — `d0d97a5` — add `TELEGRAM_WEBHOOK_SECRET` to `.env.example` and compose (§15, task 43)
+
+**Scope:** Wire the §15 webhook secret through both config sources —
+`.env.example` gains `TELEGRAM_WEBHOOK_SECRET=` with the §15 alphabet note, and
+`docker-compose.yml`'s shared `x-app-env` declares it with `:?see .env.example`
+so a missing secret stops `up`. Task 43 ticked. No code change.
+
+**Status: ✅ DONE** — matches §15, the cross-file guard provably bites, nothing
+regressed. No findings.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **68 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). Unchanged count, as claimed.
+- **Guard bites for its stated reason.** Removed the compose line and reran
+  `uv run pytest tests/test_compose.py -q` → **1 failed, 9 passed**, failing
+  exactly `test_env_example_lists_no_key_no_service_consumes` with
+  `AssertionError: TELEGRAM_WEBHOOK_SECRET is in .env.example but no service
+  consumes it`. Restored via `git checkout` and confirmed `git status` clean.
+  This is a real bidirectional guard, not a surface-string assert: `COMPOSE_VARS`
+  is derived by regex over the *actual* `${VAR}` interpolations and `ENV_KEYS`
+  from a *parsed* .env, so the check tracks what compose really consumes, not a
+  spelling. The commit's guard claim is accurate.
+- **Spec fit (§15).** DECISIONS §15 requires the key **required** with `:?`
+  (docker-compose.yml:22 ✓), a 403 on absent/wrong/unset header, and alphabet
+  `A-Za-z0-9_-`, 1–256 chars. `.env.example:24-27` documents exactly that
+  alphabet and length, and correctly describes the header
+  `X-Telegram-Bot-Api-Secret-Token` and the fail-closed behaviour. No value is
+  committed (`test_env_example_holds_no_values` covers this, still green).
+- **The consumer exists.** `kanakko/app.py:26` reads
+  `os.environ.get("TELEGRAM_WEBHOOK_SECRET")` and `scripts/push-env.py` validates
+  and pushes it — so the key the operator is now told to set is genuinely wired,
+  which is the whole point of task 43 following task 42.
+- **No money/timezone/soft-delete/`initData` surface** in this diff — it is pure
+  config wiring, so those decision classes are not in scope here.
+
+### Findings
+
+None. Config-only change, spec-accurate, guard verified to fail for the reason
+it exists, full suite green.
+
+---
+
+## 2026-08-06 — `f565137` — verify `/webhook` origin with `secret_token`, fail closed (§15, task 42)
+
+**Scope:** `/webhook` now rejects any request whose
+`X-Telegram-Bot-Api-Secret-Token` header does not match
+`TELEGRAM_WEBHOOK_SECRET` with 403, *before* the body is read or `dispatch`
+runs. New `_origin_is_verified` helper; three new webhook guards. Task 42
+ticked; task 43 (`TELEGRAM_WEBHOOK_SECRET` into `.env.example`/compose) left
+open, correctly.
+
+**Status: ✅ DONE** — matches §15 point for point, the fail-closed guard
+provably bites, and nothing regressed. One low-severity robustness note below,
+not blocking.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **68 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation; was 65). Matches the commit's claim.
+- **The fail-closed guard fails for the reason it exists — verified by
+  reverting.** I temporarily removed the `if not secret: return False` clause
+  (`app.py:27-28`) and reran `tests/test_webhook.py`: **exactly**
+  `test_webhook_fails_closed_when_the_secret_is_unset` failed
+  (`403 != 200` — with the secret unset the endpoint accepted a forged POST),
+  the other 8 stayed green; restoring the clause → 9 passed. So the guard pins
+  the exact §15 "unset must never mean accept-everything" behaviour, and it is
+  the new test that pins it. Working tree restored, `git diff` clean.
+- **Spec fit against §15 (DECISIONS.md:320-352).** Header name
+  `X-Telegram-Bot-Api-Secret-Token` ✓ (`app.py:15`). Env key
+  `TELEGRAM_WEBHOOK_SECRET` ✓. 403 when header absent or mismatched ✓ (two
+  guards). `hmac.compare_digest`, not `==` ✓ (`app.py:30`). Fails closed on
+  unset secret ✓ (`app.py:27-28`, returns `False` before the compare, so an
+  empty presented token can't sneak past an empty secret under `==`). Check
+  runs **before** `request.json()` ✓ (`app.py:98-102`), so a forged POST never
+  buffers a body or reaches `dispatch`.
+- **Guard quality.** The three new tests assert the *behaviour* (status 403 on
+  missing / wrong / unset), not a surface string. The unset-secret test even
+  presents an empty token to prove the empty-vs-empty `==` trap is closed. Real
+  guards, not spelling checks.
+- **No convention violations.** Secret read from env at request time, never a
+  literal; no ORM/Redis/etc. touched; no money or timezone path involved.
+
+### Findings
+
+**Low — non-ASCII presented header 500s instead of 403 (`app.py:30`).** Not
+blocking. `hmac.compare_digest` on two `str` raises `TypeError` on non-ASCII
+input (verified: `comparing strings with non-ASCII characters is not
+supported`). Starlette decodes header values as latin-1, so a raw client
+sending a header byte in 0x80–0xFF reaches `_origin_is_verified` as a non-ASCII
+`str` and the `TypeError` propagates to an unhandled **500** rather than the
+403 the docstring promises. **Impact is contained:** the request is still
+rejected before `dispatch`, so no rows are forged and the security goal holds;
+legitimate Telegram traffic never triggers it (its `secret_token` alphabet is
+`A-Za-z0-9_-`). Only cost is a noisier 500 on malformed forged requests.
+Suggested fix if tightened later: `return False` on the `TypeError` (or compare
+on `.encode()` bytes). Left as a note, not a change request.
+
+**Nit — no test proves the body is never read.** The "before the body is read"
+property (a real anti-DoS point: don't buffer an unbounded forged body) is
+correct in the code ordering but untested. A `malformed body + missing secret →
+403` case would pin it. Optional.
+
+---
+
 ## 2026-08-06 — `1c979f4` — scope `confirm_pending` by `user_id` (§1, fixes `a22a437` Finding 1)
 
 **Scope:** Resolves the sole blocking finding from the `a22a437` review.

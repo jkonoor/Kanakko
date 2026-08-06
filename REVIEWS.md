@@ -12,6 +12,55 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `44b3096` — reject non-finite Decimals in `parse_amount`
+
+**Scope:** Fix for finding 1 of the `9d7046b` review — `Decimal("nan")` slipped
+past `parse_amount`'s `InvalidOperation` net and surfaced as an uncaught
+`decimal.InvalidOperation` at the `amount <= 0` line instead of the documented
+`ValueError`. Three files: `kanakko/money.py` (the `is_finite` guard + two
+`demo()` nan cases), `tests/test_money.py` (nan/NaN/-nan added to the garbage
+parametrize), `REVIEWS.md` (marked RESOLVED). `git show --stat HEAD` confirms
+exactly those three. Judged against `docs/DECISIONS.md` §9 and the CLAUDE.md
+money rule.
+
+**Status: ✅ DONE** — the input-validation hole is closed; the guard fails for
+the reason it exists; the §9 `Decimal`/`NUMERIC(12,2)` precision guarantee is
+untouched. No new findings.
+
+### What I checked (and what it returned)
+
+- `git show HEAD` — the change is a single 5-line guard
+  (`if not amount.is_finite(): raise ValueError`) inserted *after* `quantize`
+  and *before* `amount <= 0` (`money.py:46-47`), plus two test/demo additions.
+  Placement is correct: it sits on the one path every amount passes through,
+  ahead of the comparison that was raising.
+- `uv run pytest -q` → **37 passed** (was 34; +3, matching the three new nan
+  parametrize cases). `uv run python -m kanakko.money` → `money demo ok`.
+- **Guard earns its place (revert test).** Removed the two guard lines and ran
+  `uv run pytest tests/test_money.py -q` → `3 failed, 13 passed`; the three
+  failures are exactly `[nan]`, `[NaN]`, `[-nan]`, each
+  `decimal.InvalidOperation` at `money.py:46` (the `<= 0` line after removal).
+  Restored the guard → clean (`git diff --stat` empty), tests green again. The
+  check fails for precisely the breakage it prevents.
+- **Semantics spot-check.** Confirmed `Decimal("nan").quantize(...)` succeeds
+  but `nan <= 0` raises `InvalidOperation` (an `ArithmeticError`, *not* a
+  `ValueError`) — so pre-fix the documented `ValueError` contract in the
+  docstring was violated. `Decimal.is_finite()` returns `False` for
+  `nan/-nan/inf/-inf/Infinity`, so the guard also defensively covers infinities
+  (though `Decimal("inf").quantize(...)` already raises `InvalidOperation` and
+  is caught upstream, so infinities never reach the new line — no behaviour
+  change there, just belt-and-braces). No `float` is introduced; amounts remain
+  `Decimal` throughout.
+
+### Findings
+
+None. The fix is minimal, correct, and lands on the shared entry point rather
+than a caller. Both the new test cases and the two `demo()` additions
+(`"nan"`, `"NaN"`) are real guards, not surface-form assertions — verified by
+watching them go red on revert.
+
+---
+
 ## 2026-08-06 — `9d7046b` — add `kanakko/money.py` (₹ amounts as `Decimal`, float refused)
 
 **Scope:** New `kanakko/money.py` (`parse_amount`, `format_amount`, `demo`),

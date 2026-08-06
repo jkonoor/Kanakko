@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from kanakko import __version__
-from kanakko.confirm import CANCEL, CONFIRM, confirm_card
+from kanakko.confirm import CANCEL, CONFIRM, category_prompt, confirm_card
 from kanakko.db import (
     cancel_pending,
     confirm_pending,
@@ -117,6 +117,11 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     500ing (which makes Telegram redeliver the same unparseable text forever) we
     ask the user to rephrase and store nothing. Returns `None` in that case.
 
+    A null `category` means the model couldn't tell (§3): we show the category
+    picker instead of a confirm card so the user names it in one tap. The pending
+    row is still written (keyed by the sent card's id) so the category press can
+    update it; the amount, not the category, is what makes it a transaction.
+
     In a private chat the chat id is the user's Telegram id, so it doubles as the
     `telegram_user_id`. Does not commit — the caller owns the transaction.
     Returns the new `pending_id`, or `None` when the message couldn't be parsed.
@@ -127,7 +132,8 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     except ValidationError:
         send_message(msg.chat_id, REPHRASE_PROMPT)
         return None
-    text, keyboard = confirm_card(txn)
+    render = category_prompt if txn.category is None else confirm_card
+    text, keyboard = render(txn)
     sent = send_message(msg.chat_id, text, reply_markup=keyboard)
     card_message_id = sent["result"]["message_id"]
     return save_pending(conn, user_id, card_message_id, txn)

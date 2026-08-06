@@ -9,6 +9,7 @@ are the constants the button handlers route on.
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from kanakko.categories import keyboard as category_keyboard
 from kanakko.money import format_amount
 from kanakko.parse import Transaction
 
@@ -22,10 +23,12 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
     """Render `txn` as the confirm-card text plus its Confirm/Cancel keyboard.
 
     §4: every parsed transaction shows this before it is stored. A null category
-    routes to the category buttons instead (§3, task 59), so a card always has a
-    category to name. Plain text, no `parse_mode` — the note is the user's own
-    wording and must not need Markdown/HTML escaping.
+    routes to `category_prompt` instead (§3), so a confirm card always has a
+    category to name — the assert makes that precondition fail loud rather than
+    render the literal `Category: None`. Plain text, no `parse_mode` — the note
+    is the user's own wording and must not need Markdown/HTML escaping.
     """
+    assert txn.category is not None, "null category must route to category_prompt (§3)"
     lines = [
         f"{txn.type.capitalize()} — {format_amount(txn.amount)}",
         f"Category: {txn.category}",
@@ -41,3 +44,20 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
         ]
     )
     return "\n".join(lines), keyboard
+
+
+def category_prompt(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
+    """Render the category picker shown when the model returned no category (§3, §5).
+
+    `category: null` means the model genuinely couldn't tell (§3), so instead of a
+    confirm card with a blank in the category field we show the closed set as
+    buttons and ask the user to pick — one tap, no free text. The amount/type/note
+    are still shown so the choice is in context. The buttons carry `cat:<name>`
+    (`categories.keyboard`) for the category-press handler to route on.
+    """
+    lines = [
+        f"{txn.type.capitalize()} — {format_amount(txn.amount)}",
+        f"Note: {txn.note}",
+        "Which category?",
+    ]
+    return "\n".join(lines), category_keyboard(txn.type)

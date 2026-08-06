@@ -236,6 +236,58 @@ def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkey
     conn.rollback()
 
 
+def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypatch):
+    """A null category shows the category picker, not a confirm card (§3).
+
+    `category: null` means the model couldn't tell, so instead of a card reading
+    `Category: None` the user gets the closed set as `cat:<name>` buttons and a
+    pending row is still stored (keyed by the sent card's id) for the eventual
+    category press to update. The picker keyboard is *not* the Confirm/Cancel one:
+    its buttons carry `cat:` callback_data, which is what this asserts — routing a
+    null-category card through `confirm_card` would send Confirm/Cancel instead and
+    would also trip its `assert txn.category is not None`.
+    """
+    migrate(conn)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "spent 500 somewhere",
+        }
+    )
+    monkeypatch.setattr(app_module, "parse_message", lambda text: txn)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(app_module, "send_message", fake_send)
+
+    pending_id = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 somewhere")
+    )
+    assert isinstance(pending_id, int)  # the row is still stored for the picker to update
+
+    buttons = sent["reply_markup"].inline_keyboard
+    cbs = [b.callback_data for row in buttons for b in row]
+    assert all(c.startswith("cat:") for c in cbs)  # the category picker, not Confirm/Cancel
+    assert CONFIRM not in cbs and CANCEL not in cbs
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT telegram_message_id, parsed FROM pending_transactions"
+            " WHERE pending_id = %s",
+            (pending_id,),
+        )
+        card_message_id, parsed = cur.fetchone()
+    assert card_message_id == 909  # keyed on the sent picker's id
+    assert parsed["category"] is None  # stored null, for the category press to fill in
+    conn.rollback()
+
+
 def _seed_pending(conn, chat_id, card_message_id, amount="100.00"):
     user_id = get_or_create_user(conn, chat_id)
     txn = Transaction.model_validate(

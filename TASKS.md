@@ -36,7 +36,7 @@ the plan's order and it matters.
 - [x] Add a check covering parse → store → sum-by-category using `Decimal`
 - [x] Add `kanakko/parse.py` — OpenRouter call with `response_format` JSON schema and `require_parameters: true`, per `docs/DECISIONS.md` §2
 - [x] Make `parse.py` inject the current `Asia/Kolkata` date into every prompt so relative dates resolve
-- [ ] Add Pydantic validation of the parse result plus exactly one retry on schema failure
+- [x] Add Pydantic validation of the parse result plus exactly one retry on schema failure
 - [ ] Make `category` nullable in the schema and `amount` non-nullable, per `docs/DECISIONS.md` §3
 - [ ] Add the Telegram webhook endpoint and update dispatch
 - [ ] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons

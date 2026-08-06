@@ -11,19 +11,23 @@ the schema parameters. The schema's `category` enum is generated from
 `json.loads` yields a `str` that `money.parse_amount` can turn into an exact
 `Decimal`.
 
-This module only makes the call and returns the model's parsed JSON. Pydantic
-validation and the single retry (§2's price of the provider abstraction) live in
-the caller — that is a separate task.
+`call()` makes the raw request; `parse_message()` validates the result with
+Pydantic and retries exactly once on a schema failure — §2's price of the
+provider abstraction, since OpenRouter's strict mode is best-effort per provider.
 """
 
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from kanakko.categories import schema_enum
+from kanakko.categories import ALL_CATEGORIES, schema_enum
+from kanakko.money import parse_amount
 
 # §10: one function returns the timezone; a per-user column replaces the constant
 # later without touching call sites.
@@ -99,6 +103,44 @@ def build_request(
     }
 
 
+class Transaction(BaseModel):
+    """A validated parse result (§2, §3).
+
+    OpenRouter's strict mode is best-effort per provider, so the model's JSON is
+    re-checked here rather than trusted. `amount` is routed through
+    `money.parse_amount` — the single door every amount enters by (§9) — so a
+    non-numeric, non-positive, `float`, or over-`NUMERIC(12,2)` value fails
+    validation and triggers the retry. `extra="forbid"` mirrors the schema's
+    `additionalProperties: false`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["expense", "income"]
+    amount: Decimal
+    category: str
+    date: date
+    note: str
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _amount_is_exact(cls, value: object) -> Decimal:
+        # A JSON number arrives as float and parse_amount raises TypeError, which
+        # Pydantic does NOT wrap — re-raise as ValueError so a float amount surfaces
+        # as a ValidationError (retried), never silently coerced to Decimal (§9).
+        try:
+            return parse_amount(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("category")
+    @classmethod
+    def _category_is_known(cls, value: str) -> str:
+        if value not in ALL_CATEGORIES:
+            raise ValueError(f"unknown category: {value!r}")
+        return value
+
+
 def call(message: str) -> dict:
     """Send `message` to OpenRouter and return the model's parsed JSON.
 
@@ -118,3 +160,18 @@ def call(message: str) -> dict:
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     return json.loads(content)
+
+
+def parse_message(message: str) -> Transaction:
+    """Parse `message` into a validated `Transaction`, retrying once (§2).
+
+    OpenRouter does not guarantee schema compliance, so the model's JSON is
+    validated with Pydantic. On a schema failure — a `ValidationError` or
+    non-JSON content — the call is retried exactly once; a second failure
+    propagates. Network/HTTP errors and a missing key are not schema failures and
+    are not retried.
+    """
+    try:
+        return Transaction.model_validate(call(message))
+    except (ValidationError, json.JSONDecodeError):
+        return Transaction.model_validate(call(message))

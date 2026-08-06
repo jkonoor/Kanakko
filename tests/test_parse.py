@@ -7,13 +7,26 @@ as a number (json decodes it to float, paise gone — DECISIONS §9), or the mod
 default swallowed by compose's empty-string env var.
 """
 
+import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import httpx
+import pytest
+from pydantic import ValidationError
 
 from kanakko import parse
 from kanakko.categories import schema_enum
-from kanakko.parse import MODEL_DEFAULT, build_request, parse_schema, today
+from kanakko.parse import (
+    MODEL_DEFAULT,
+    Transaction,
+    build_request,
+    parse_message,
+    parse_schema,
+    today,
+)
 
 
 def test_require_parameters_forces_schema_aware_provider():
@@ -73,3 +86,87 @@ def test_today_reads_the_kolkata_clock(monkeypatch):
     monkeypatch.setattr(parse, "datetime", FrozenDatetime)
     assert today() == "2026-08-07"
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", today())
+
+
+# --- Pydantic validation + one retry (§2) -------------------------------------
+
+_GOOD = {
+    "type": "expense",
+    "amount": "500.50",
+    "category": "Food",
+    "date": "2026-08-06",
+    "note": "lunch",
+}
+
+
+def _feed(monkeypatch, *responses):
+    """Replace parse.call with one that yields the given responses in order,
+    recording each invocation so the retry count can be asserted."""
+    calls = []
+
+    def fake_call(message):
+        calls.append(message)
+        r = responses[len(calls) - 1]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(parse, "call", fake_call)
+    return calls
+
+
+def test_valid_response_validates_to_typed_transaction(monkeypatch):
+    _feed(monkeypatch, _GOOD)
+    txn = parse_message("spent 500.50 on lunch")
+    assert isinstance(txn, Transaction)
+    assert txn.type == "expense"
+    assert txn.amount == Decimal("500.50")
+    assert isinstance(txn.amount, Decimal)  # §9: never float
+    assert txn.category == "Food"
+    assert txn.date == date(2026, 8, 6)
+
+
+def test_schema_failure_is_retried_exactly_once(monkeypatch):
+    bad = {**_GOOD, "category": "Nonsense"}  # not in the closed set → invalid
+    calls = _feed(monkeypatch, bad, _GOOD)
+    txn = parse_message("x")
+    assert txn.category == "Food"
+    assert len(calls) == 2  # one retry after the first failure
+
+
+def test_two_failures_raise_and_do_not_loop(monkeypatch):
+    bad = {**_GOOD, "amount": "0"}  # parse_amount rejects non-positive
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x")
+    assert len(calls) == 2  # exactly one retry, then give up — not infinite
+
+
+def test_float_amount_is_refused_not_coerced(monkeypatch):
+    # A provider ignoring strict mode returns amount as a JSON number → float.
+    # Pydantic would happily coerce float→Decimal (losing paise) without the
+    # parse_amount validator; here it must fail and exhaust the single retry.
+    bad = {**_GOOD, "amount": 500.5}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x")
+    assert len(calls) == 2
+
+
+def test_non_json_content_is_retried(monkeypatch):
+    # A provider that ignores response_format may return prose, so call() raises
+    # JSONDecodeError. That is a schema failure and must be retried, not raised.
+    err = json.JSONDecodeError("nope", "not json", 0)
+    calls = _feed(monkeypatch, err, _GOOD)
+    txn = parse_message("x")
+    assert txn.category == "Food"
+    assert len(calls) == 2
+
+
+def test_http_error_is_not_retried(monkeypatch):
+    # A network/HTTP error is not a schema failure — it must propagate on the
+    # first call without a retry.
+    calls = _feed(monkeypatch, httpx.HTTPError("boom"), _GOOD)
+    with pytest.raises(httpx.HTTPError):
+        parse_message("x")
+    assert len(calls) == 1

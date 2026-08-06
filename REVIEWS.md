@@ -12,6 +12,51 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `00561e9` — swallow "message is not modified" 400 in edit_message_text (§5, review 9a25c4f)
+
+**Status: ✅ DONE** — no blocking issues. The fix root-causes the redelivery
+loop the prior review (`9a25c4f`) flagged, in the shared send helper, with a
+guard that reddens without the fix.
+
+**Scope:** `tg.edit_message_text` now catches `httpx.HTTPStatusError`; when it's
+the Bot API 400 "message is not modified", it returns the response body as
+success instead of letting `raise_for_status` propagate a 500 that Telegram
+answers by redelivering the tap forever. A new `_is_not_modified` helper gates
+the swallow: 400-only, description-matched, and it treats a non-JSON body as
+"not the no-op" (raises). Two new tests in `test_tg.py`.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — read the full diff; the swallow lives in the shared
+  `edit_message_text` (`kanakko/tg.py:79-84`), not on the single `handle_category`
+  caller, so every future editor benefits. Root-cause fix, not symptom.
+- Traced the loop end to end: `webhook` (`app.py:242-244`) → `handle_category`
+  (`app.py:181-208`) re-writes the *same* category, `confirm_card` re-renders
+  byte-identical text+markup → `edit_message_text` → 400 not-modified. Before the
+  fix this raised out of `handle_category`, the webhook 500'd, and Telegram
+  (which redelivers any non-2xx, per the `webhook` docstring) re-sent the tap.
+  Loop confirmed real; the fix closes it and `answer_callback_query` still fires.
+- `uv run pytest -q` → **92 passed, 1 warning** (matches the commit's claim; the
+  warning is the pre-existing Starlette/httpx testclient deprecation, unrelated).
+- **Defeated the guard as required:** replaced the try/except with a plain
+  `return _call(...)` and ran `uv run pytest tests/test_tg.py -q` →
+  `test_edit_swallows_message_not_modified` **FAILED** (HTTPStatusError
+  propagates, `tests/test_tg.py:109`), 7 passed. Restored → `8 passed`. The
+  swallow guard fails for the reason it exists; the "still raises on other 400"
+  guard pins that a genuine 400 ("chat not found") is not swallowed. Working tree
+  left clean (`git status --short` empty).
+
+**Verification notes:** The test double (`_StatusResponse.raise_for_status`
+raising `HTTPStatusError`) faithfully mirrors `_call`'s real path
+(`response.raise_for_status()` then `.json()`), and the mocked `httpx.post`
+signature (`url, json, timeout`) matches the real call. `_is_not_modified`'s
+`except ValueError` correctly covers a non-JSON error body (httpx's
+`json.JSONDecodeError` subclasses `ValueError`), so a 400 with an HTML body
+raises rather than being mis-swallowed. No money, timezone, soft-delete, or
+`initData` surface is touched. No findings.
+
+---
+
 ## 2026-08-06 — `9a25c4f` — handle a category button press (§5, task 78)
 
 **Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one

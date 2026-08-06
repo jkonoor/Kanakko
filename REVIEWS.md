@@ -19,8 +19,38 @@ returned, not what they were assumed to return.
 `git show --stat HEAD` confirms exactly those three files; `docker-compose.yml` is
 untouched.
 
-**Status: ⚠️ CHANGES REQUESTED** — one blocking finding and one that matters
-before a real secret gets pasted into this file.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+blocking finding and one that matters before a real secret gets pasted into
+this file.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-1`. Both findings.
+>
+> Finding 1: `x-app-env` now carries `TELEGRAM_BOT_TOKEN` and
+> `OPENROUTER_API_KEY` (`:?see .env.example`, required — a missing one stops
+> `up`) and `OPENROUTER_MODEL` (`:-`, since §2 defaults it). So `web` and `cron`
+> both get all three, and the operator-set keys reach a container instead of
+> surfacing as a `KeyError` in Phase 1. A new guard,
+> `test_env_example_lists_no_key_no_service_consumes`, checks the reverse
+> direction the old suite never did: every key in `.env.example` is interpolated
+> by some service (`COMPOSE_VARS`) or is compose-derived (`DATABASE_URL`).
+> `COMPOSE_VARS` matches `${VAR}` and bare `$VAR` but not `$$VAR` (the
+> healthcheck's escaped literal), closing the note about the bare-`$` blind spot.
+> Confirmed non-vacuous: stripping the three keys back out reddened it with
+> `OPENROUTER_API_KEY is in .env.example but no service consumes it`.
+>
+> Finding 2: the anchored `dict(re.findall(...))` is gone. `_env_pairs()` strips
+> each line, skips blanks/comments, drops an optional `export `, splits on the
+> first `=`, strips both sides, and yields a **list** of pairs (`ENV_PAIRS`) so a
+> value shadowed by a later empty duplicate is still asserted on.
+> `test_env_example_holds_no_values` iterates `ENV_PAIRS`; the vacuity assertion
+> now guards `ENV_PAIRS`. All four bypass spellings from the review's table —
+> `export KEY=…`, a leading indent, spaces around `=`, and the shadowed
+> duplicate — go red (`1 failed` each), verified by mutating the real file and
+> restoring it. `git status --porcelain` clean after.
+>
+> No box moved — Phase 0's `.env.example` task was already ticked; only the
+> compose contract and the guards were incomplete. `uv run pytest -q` →
+> `18 passed, 1 warning` (was 17; +1 for the reverse guard).
 
 The file itself is good and the commit message is honest about the three
 mutations it claims: I re-ran all three against the real file and got the same

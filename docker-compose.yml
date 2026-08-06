@@ -10,6 +10,15 @@ x-app-env: &app-env
   # [A-Za-z0-9._~-] only. An `@` in it makes the host `<rest>@db` and web dies
   # in the migrator naming DNS while db sits there healthy.
   DATABASE_URL: "postgresql://${POSTGRES_USER:?see .env.example}:${POSTGRES_PASSWORD:?see .env.example}@db:5432/${POSTGRES_DB:?see .env.example}"
+  # web reads the bot token for the webhook and initData HMAC (DECISIONS §13)
+  # and OpenRouter to parse (§2); cron reads the bot token to send summaries.
+  # Required, so `:?` stops `up` on a missing one rather than the first webhook
+  # or job — an env the operator set on Dokploy but no service asked for is a
+  # KeyError phases later, not at deploy.
+  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?see .env.example}"
+  OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?see .env.example}"
+  # Optional: §2 defaults to claude-opus-5 when unset, so `:-` not `:?`.
+  OPENROUTER_MODEL: "${OPENROUTER_MODEL:-}"
 
 services:
   db:

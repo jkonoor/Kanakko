@@ -4,9 +4,11 @@ import hmac
 import logging
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
 from kanakko import __version__, configure_logging
@@ -18,13 +20,27 @@ from kanakko.db import (
     confirm_pending,
     connect,
     get_or_create_user,
+    month_summary,
+    recent_transactions,
     save_pending,
     set_pending_category,
+    set_transaction_category,
+    soft_delete_transaction,
+    totals,
     undo_last,
 )
 from kanakko.money import format_amount
 from kanakko.parse import Transaction, parse_message
 from kanakko.tg import answer_callback_query, edit_message_text, send_message
+from kanakko.webapp import (
+    InitDataError,
+    current_month_ist,
+    current_week_ist,
+    dashboard_html,
+    validate_init_data,
+    user_id_from_init_data,
+    SHELL_HTML,
+)
 
 configure_logging()
 log = logging.getLogger(__name__)
@@ -52,6 +68,139 @@ def _origin_is_verified(request: Request) -> bool:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok", "version": __version__}
+
+
+@app.get("/app", response_class=HTMLResponse)
+def mini_app_shell() -> str:
+    """Serve the Mini App bootstrap page (§13) — no data, no secret, no auth."""
+    return SHELL_HTML
+
+
+TMA_PREFIX = "tma "
+
+
+@app.get("/app/data", response_class=HTMLResponse)
+def mini_app_data(request: Request) -> str:
+    """The dashboard fragment for the authenticated user (§13): totals, balance,
+    this-week and current-month figures.
+
+    The bootstrap sends `initData` in the `Authorization: tma <initData>` header
+    (Telegram's documented scheme). Validation *is* the authentication — a valid
+    HMAC proves the payload came from Telegram and names the real user (§13), so
+    there is no login. A missing, malformed, or forged payload is a 401; an unset
+    `TELEGRAM_BOT_TOKEN` fails closed as a 500 (loud misconfig, not a bypass).
+    Read-only, so no `auth_date` freshness check is needed yet — the replay
+    concern arrives with the per-row mutations of tasks 100/101 (see REVIEWS.md).
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(header[len(TMA_PREFIX):])
+        telegram_user_id = user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+    with connect() as conn:
+        user_id = get_or_create_user(conn, telegram_user_id)
+        income, expenses = totals(conn, user_id)
+        first, next_first = current_month_ist()
+        m_income, m_expenses, top = month_summary(conn, user_id, first, next_first)
+        w_first, w_next = current_week_ist()
+        # month_summary is a generic date-range summary; its top categories are
+        # the month's, so the week's are discarded — the week section is figures only.
+        w_income, w_expenses, _ = month_summary(conn, user_id, w_first, w_next)
+        recent = recent_transactions(conn, user_id)
+    return dashboard_html(
+        income, expenses, w_income, w_expenses,
+        first.strftime("%B %Y"), m_income, m_expenses, top, recent,
+    )
+
+
+@app.post("/app/delete")
+async def mini_app_delete(request: Request) -> Response:
+    """Soft-delete one of the authenticated user's transactions (§13, task 100).
+
+    The dashboard's per-row delete button POSTs `{"id": <txn_id>}` here with the
+    same `Authorization: tma <initData>` header the read route uses. Unlike
+    `/app/data` this route *mutates state*, so it passes
+    `max_age=timedelta(hours=24)`: a captured `initData` must not stay a working
+    delete button forever (§13, and the official SDK's 24h default). The row is
+    scoped to the user resolved from the *signed* `user` object, so one user
+    cannot delete another's transaction by guessing an id.
+
+    A missing/forged/stale payload is 401; a body without a usable integer `id`
+    is 400; a delete that matched no live row of this user's is 404 (already gone
+    or never theirs). Success is 204 — the client re-fetches `/app/data`.
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(
+            header[len(TMA_PREFIX):], max_age=timedelta(hours=24)
+        )
+        telegram_user_id = user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+    try:
+        body = await request.json()
+        txn_id = int(body["id"])
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+
+    with connect() as conn:
+        user_id = get_or_create_user(conn, telegram_user_id)
+        deleted = soft_delete_transaction(conn, user_id, txn_id)
+    if deleted is None:
+        raise HTTPException(status_code=404)
+    return Response(status_code=204)
+
+
+@app.post("/app/category")
+async def mini_app_category(request: Request) -> Response:
+    """Change the category of one of the user's transactions (§5, §13, task 101).
+
+    The dashboard's per-row category `<select>` POSTs
+    `{"id": <txn_id>, "category": <name>}` here with the same
+    `Authorization: tma <initData>` header the read route uses. Like `/app/delete`
+    this *mutates state*, so it passes `max_age=timedelta(hours=24)` — a captured
+    `initData` must not stay a working edit button forever (§13). `category` must
+    be one of the closed set (`categories.py`, §11); anything else is a 400, so a
+    forged body can't write a junk label. The row is scoped to the user resolved
+    from the *signed* `user` object, so one user cannot relabel another's row.
+
+    A missing/forged/stale payload is 401; a body without a usable integer `id` or
+    with an unknown `category` is 400; an id matching no live row of this user's is
+    404. Success is 204 — the client re-fetches `/app/data`.
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(
+            header[len(TMA_PREFIX):], max_age=timedelta(hours=24)
+        )
+        telegram_user_id = user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+    try:
+        body = await request.json()
+        txn_id = int(body["id"])
+        category = body["category"]
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+    if category not in ALL_CATEGORIES:
+        raise HTTPException(status_code=400)
+
+    with connect() as conn:
+        user_id = get_or_create_user(conn, telegram_user_id)
+        updated = set_transaction_category(conn, user_id, txn_id, category)
+    if updated is None:
+        raise HTTPException(status_code=404)
+    return Response(status_code=204)
 
 
 @dataclass(frozen=True)

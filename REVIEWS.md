@@ -12,6 +12,602 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `1df19ba` — dashboard follows the Telegram light/dark theme (§13, task 102)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: closes task 102. A CSS-only change to `SHELL_HTML` — binds `body`
+background/text and the secondary text classes (`.label`, `.txn-note`) to
+Telegram's injected `--tg-theme-*` vars with light-theme fallbacks, drops the
+`.txn-note` `opacity` dimming in favour of the hint colour, and adds one guard
+test. No Python/SQL/route logic touched; nothing on the money, timezone,
+soft-delete, or `initData` paths.
+
+### What I checked
+
+- **Webapp suite** — `uv run pytest tests/test_webapp.py -q` → **41 passed**
+  (was 40). New test included.
+- **The diff itself** — `git show HEAD`. Only `body` gains
+  `background: var(--tg-theme-bg-color, #fff)` /
+  `color: var(--tg-theme-text-color, #000)`; `.label, .txn-note` bind to
+  `--tg-theme-hint-color`; `.txn-note` loses `opacity: .7`. Fallbacks are the
+  prior light-theme values, so a plain-browser open is unchanged.
+- **Contrast of secondary text** — `.label` (webapp.py:144) is the stat
+  *descriptor*, not the amount; the amount value stays at primary
+  `--tg-theme-text-color`. Dimming labels/notes to the hint colour is the right
+  side of the pair. `.del`/`.cat-select` use `color: inherit`, so they follow
+  the themed body text. `.bar` track stays theme-neutral grey — fine in both
+  modes.
+- **Guard specificity** — the two asserted substrings (`var(--tg-theme-bg-color`,
+  `var(--tg-theme-text-color`) appear nowhere else in the response (`.fill` uses
+  `--tg-theme-button-color`), so they pin *this* binding.
+- **Guard actually reddens** — temporarily reverted the binding to hardcoded
+  `#fff`/`#000` and ran
+  `test_shell_body_follows_the_telegram_theme` → **1 failed**; restored the file
+  (`git diff --stat` clean). Confirms the commit's claim rather than trusting it.
+
+### Findings
+
+None. A headless test can't observe a rendered pixel, so asserting the var
+binding (the mechanism that makes the page dark) is the correct level to guard
+at, and it fails for the reason it exists.
+
+---
+
+## 2026-08-06 — `3ac705b` — per-row category change from the dashboard (§13, task 101)
+
+**Status: ✅ DONE** — one low-severity finding below, non-blocking.
+
+Scope: closes task 101. `db.set_transaction_category` (user-scoped category
+UPDATE through the `active_transactions` subquery, mirroring
+`soft_delete_transaction`), `POST /app/category` (mutation route,
+`initData` validated with a 24h freshness window + scoped to the signed user +
+`category ∈ ALL_CATEGORIES`), `webapp._category_select` / `recent_list` (the
+per-row native `<select>` + `change` handler + `.cat-select` CSS), six new tests,
+and the `TASKS.md` tick.
+
+### What I checked
+
+- **Full test suite** — `uv run pytest -q` → **165 passed, 1 warning in 5.52s**
+  (webapp file alone: 40 passed). Matches the commit's claim.
+- **Diff read end to end** (`git show HEAD`): `kanakko/app.py:161-205`,
+  `kanakko/db.py:345-372`, `kanakko/webapp.py:180-230,304,328-337`, the six new
+  tests, the `TASKS.md` tick.
+- **Both new guards fail for the reason they exist (revert-and-red, run myself):**
+  - Removed `if category not in ALL_CATEGORIES` from the route → 
+    `test_category_route_rejects_an_unknown_category` **FAILED** (a forged
+    `"Bribes"` reached the DB and returned 204 instead of 400). Restored.
+  - Dropped `max_age=timedelta(hours=24)` from *this* route's
+    `validate_init_data` call → `test_category_route_rejects_a_stale_init_data`
+    **FAILED** (2023 `auth_date` with a valid HMAC returned 204 instead of 401).
+    Restored.
+- **Spec fit, verified in code, not assumed:**
+  - Write goes to base `transactions` but the row is *chosen* from
+    `active_transactions` scoped to `user_id` (`db.py:361-367`) — a
+    deleted/foreign id yields no `txn_id`, `WHERE txn_id = (NULL)` matches nothing,
+    returns `None` → 404. Same shape as the delete route. No read bypasses the view.
+  - Money path untouched — this route only rewrites the `category` TEXT column;
+    `amount`/`type` are never touched, so income/expense totals (which filter by
+    `type`) can't shift. No `float` anywhere.
+  - Categories sourced only from `categories.py` (`ALL_CATEGORIES`,
+    `CATEGORIES_BY_TYPE`); no literal category strings introduced.
+  - Note/category rendering stays HTML-escaped; the `<select>` option text is
+    `html.escape`d.
+- **Cross-user scoping, run live:** `test_category_route_cannot_change_another_users_row`
+  passes (404, row unchanged) — reproduced the intent by reading the subquery.
+
+### Findings
+
+**F1 (LOW, non-blocking) — the route validates `category` against the union
+`ALL_CATEGORIES`, not the transaction's per-type set, so a forged body can put an
+income-only category on an expense (and vice-versa).**
+`kanakko/app.py:192` (`if category not in ALL_CATEGORIES`) and
+`kanakko/db.py:345` (the DB function never sees the row's `type`).
+
+Verified live: I inserted an `expense` row and POSTed
+`{"id": …, "category": "Salary"}` (income-only, never offered for an expense in
+the `<select>`) with a fresh `initData` → **STATUS 204, STORED "Salary"**. The
+UI never surfaces this (the `<select>` only lists `CATEGORIES_BY_TYPE[type]`), so
+it is reachable only by a hand-crafted request, not by normal use.
+
+Failure scenario: `month_summary` builds the expense breakdown as
+`... WHERE type='expense' GROUP BY category` (`db.py:264-268`). An expense
+relabeled "Salary" then shows up as a **"Salary" slice inside the expense
+breakdown** for that user. Bounded harm: it stays within the closed set, it is
+the user's own data only (cross-user is blocked), and the income/expense *totals*
+are unaffected because they filter on `type`, which this route never changes.
+That is why it is LOW, not blocking.
+
+Suggested fix: validate against the row's own type. Either look up the type and
+check `category in CATEGORIES_BY_TYPE[type]`, or fold the check into
+`set_transaction_category` with `... AND type = (SELECT type FROM
+active_transactions WHERE txn_id = %s ...)` so a type-mismatched category matches
+no row and returns `None` → 404. A test that POSTs an income category to an
+expense and asserts 400/404 + unchanged row would fail today.
+
+### Nits (not findings)
+
+- The `&` in "Bills & Utilities" round-trips correctly: the server emits
+  `<option>Bills &amp; Utilities</option>`, and a browser reports the *decoded*
+  text ("Bills & Utilities") as `option.value`, which is in `ALL_CATEGORIES`. No
+  test exercises this specific category, but it is a fixed set and the escaping is
+  purely a rendering concern, so it is low value.
+
+---
+
+## 2026-08-06 — `f5d2a4f` — recent-transactions list + per-row soft delete (§13, task 100)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: closes task 100. `db.recent_transactions` (newest-first live rows through
+`active_transactions`, each carrying `txn_id`), `db.soft_delete_transaction`
+(user-scoped soft delete via the view subquery), `webapp.recent_list` (renders
+the list with an HTML-escaped note and a per-row delete button), and
+`POST /app/delete` (the mutation route, `initData` validated with a 24h freshness
+window and scoped to the signed user). Ticks the box in `TASKS.md` for task 100
+with its two carried constraints (a) escape the note, (b) freshness on the
+mutation route.
+
+### What I checked
+
+- **Full test suite** — `uv run pytest -q` → **159 passed, 1 warning in 5.63s**.
+  Matches the commit message's claim (was 152).
+- **Diff read end to end** (`git show HEAD`): `kanakko/app.py:119-157`,
+  `kanakko/db.py:296-341`, `kanakko/webapp.py:179-205,217-260`, the six new tests,
+  and the `TASKS.md` tick.
+- **Both new guards fail for the reason they exist (revert-and-red, run myself):**
+  - Removed `max_age=timedelta(hours=24)` from the delete route
+    (`app.py:139-141`) → `test_delete_route_rejects_a_stale_init_data`
+    **FAILED** (a 2023 `auth_date` with a valid HMAC then reached the DB and
+    returned 404 instead of 401). Restored. The guard genuinely proves the
+    mutation route rejects a captured/replayed `initData`.
+  - Dropped `html.escape` on the note (`webapp.py:198`) →
+    `test_recent_list_escapes_the_note` **FAILED** (`assert '<scr...` — the raw
+    `<script>` tag rendered live). Restored. The test asserts the effect
+    (escaped bytes present, raw tag absent), not a surface form.
+- **Cross-user delete is a 404, not a delete** — `soft_delete_transaction`
+  (`db.py:319-341`) chooses the row from an `active_transactions` subquery scoped
+  to `user_id AND txn_id`; a foreign or already-deleted id makes the subquery
+  yield nothing, so `WHERE txn_id = (NULL)` matches no row → `RETURNING` empty →
+  `None` → 404, never a second write. `test_delete_route_cannot_delete_another_users_row`
+  covers it and asserts the victim's row is still live afterwards. Passed in the
+  full run.
+- **Reads go through the view (§6)** — both `recent_transactions` and the
+  `soft_delete_transaction` subquery select from `active_transactions`, never
+  `transactions`. A soft-deleted row can neither reappear in the list nor be
+  "re-deleted".
+- **Money stays `Decimal` (§9)** — `recent_transactions` returns raw
+  `NUMERIC(12,2)` → `Decimal` tuples; `recent_list` feeds `amount` straight to
+  `format_amount`. No float touches an amount. The sign is chosen from `type`,
+  not from the number.
+- **XSS surface (constraint a)** — in `recent_list` every interpolated value is
+  either escaped (`note`, `category`), an `int` (`txn_id` → `data-id`), a `date`
+  (`occurred_on` via strftime), or a `format_amount` string. `note`/`category`
+  null both handled (empty note renders no `.txn-note`, null category →
+  "Uncategorised"). No unescaped user string reaches the markup.
+- **Body validation on the delete route** (`app.py:146-150`) — `int(body["id"])`
+  wrapped in `except (ValueError, TypeError, KeyError)`: a non-JSON body
+  (`JSONDecodeError` ⊂ `ValueError`), a non-dict body, a missing/`null`/
+  non-numeric `id` all become a 400, not a 500. Query is bounded
+  (`recent_transactions` `LIMIT 10`).
+- **Freshness runs after the HMAC** — the delete route reuses
+  `validate_init_data`, whose `max_age` branch (`webapp.py:78-86`) sits below the
+  `compare_digest` check, so `auth_date` is only trusted once the signature
+  verifies. Constant-time comparison unchanged.
+
+### Non-blocking observations (not fixes required)
+
+- The delete route relies on `with connect() as conn:` committing on clean exit
+  (psycopg3's context-manager behaviour), the same pattern `/webhook` and
+  `/app/data` already use. The new `test_delete_route_soft_deletes_the_users_row`
+  uses the shared `_Reuse` connection wrapper (like every other route test), so
+  it verifies the UPDATE is *visible within the transaction* but not that the
+  real commit fires. If a future refactor dropped the commit, the delete would
+  silently not persist and no test would catch it — but this gap is systemic to
+  the whole app's test harness, not introduced here, so it is not a task-100
+  finding.
+- On a first-ever user who deletes a non-existent id, the route
+  `get_or_create_user`-creates an empty user row and commits it before returning
+  404. Harmless.
+
+Nothing blocking. Task 100 is done as specified.
+
+---
+
+## 2026-08-06 — `10ca6c0` — `auth_date` freshness guard for initData (§13, task 100 prerequisite)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `validate_init_data` gains optional `max_age`/`now` params — with `max_age`
+set, a missing/malformed `auth_date` or one older than `max_age` raises
+`InitDataError`, checked *after* the HMAC verifies. Read-only `/app/data` route
+left unchanged (no `max_age`). This is the prerequisite split carved off task
+100; the recent-list + per-row delete + note-escaping remainder stays open in
+`TASKS.md`.
+
+### What I checked
+
+- **Diff read end to end** (`git show HEAD`): `kanakko/webapp.py:78-86`, the three
+  new tests, and the `TASKS.md` split note.
+- **Ordering is correct — freshness runs after the HMAC** (`webapp.py:75-86`). The
+  `max_age` branch sits below the `compare_digest` check, so `auth_date` is only
+  trusted once the signature verifies. A forged `auth_date` can't slip a stale
+  payload through, and can't be used to probe timing before the constant-time
+  compare. Matches the docstring claim (`webapp.py:53-55`) and Telegram's
+  documented replay defence.
+- **Fails closed** (`webapp.py:80-83`). Missing `auth_date` → `KeyError`; empty
+  or non-numeric → `ValueError` (`parse_qsl` keeps blanks, `int("")` raises);
+  out-of-range → `OverflowError`/`OSError`. All four are caught and re-raised as
+  `InitDataError`. No path returns `fields` with `max_age` set but the check
+  skipped.
+- **Timezone-correct**: `datetime.fromtimestamp(..., timezone.utc)` and
+  `datetime.now(timezone.utc)` — both aware, so the subtraction can't raise on a
+  naive/aware mismatch and the comparison is a true UTC delta. `now` is injectable
+  for tests.
+- **Boundary**: `now - auth_date > max_age` uses `>`, so exactly-`max_age` still
+  passes ("older than" raises) — consistent with the wording.
+- **Read-only route untouched** (`app.py:95`): `/app/data` still calls
+  `validate_init_data` with no `max_age`, so a stale-but-genuine HMAC keeps
+  loading the user's *own* data — the deliberate, documented behaviour
+  (`app.py:88-89`). No mutating route exists yet, so nothing is left unguarded.
+- **`uv run pytest tests/test_webapp.py -q`** → `27 passed`. **Full suite
+  `uv run pytest -q`** → `152 passed`.
+- **Revert-and-red verified myself** (not trusting the commit message): commented
+  out the `if now - auth_date > max_age: raise` branch → `1 failed, 26 passed`,
+  the single failure being `test_stale_auth_date_is_rejected`. Restored the file
+  (`git diff --stat kanakko/webapp.py` clean). The guard fails for the reason it
+  exists.
+
+### Findings
+
+None blocking. Two notes, neither a defect:
+
+- The guard is defined but **not yet wired** to any mutating route — by design,
+  since no such route exists yet. The box is correctly left open in `TASKS.md`
+  with an explicit "the mutation route this task adds MUST call
+  `validate_init_data(..., max_age=timedelta(hours=24))`". When the delete route
+  lands, that call is the thing to verify; the guard here is inert until then.
+- A *future* `auth_date` (negative `now - auth_date`) passes the check. Not a
+  finding — it's HMAC-trusted (Telegram sets it) and matches the official SDK,
+  which only bounds staleness, not future-dating.
+
+Task box honestly left unticked (prerequisite split, not the whole of task 100).
+No `float` on any amount path, no secret in the diff, categories untouched.
+
+## 2026-08-06 — `914e029` — Weekly summary section on the dashboard (§13, task 99)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `webapp.current_week_ist` (new); `dashboard_html` gains
+`week_income`/`week_expenses` params and a "This week" section; `app.mini_app_data`
+reuses `month_summary` for the week range; the task-99 tick in `TASKS.md`; new
+tests in `tests/test_webapp.py`.
+
+### What I actually ran
+
+- `uv run pytest -q` → **149 passed, 1 warning** (matches the commit claim; was
+  147). Warning is Starlette's testclient/`httpx` deprecation, unrelated.
+- `uv run pytest tests/test_webapp.py -q` → **24 passed**.
+- **Week boundary guard, break-and-red (verified myself):** re-ran the
+  `current_week_ist` body with `.astimezone(IST)` removed against the test's input
+  `datetime(2026, 8, 9, 19:00 UTC)` (= Mon 00:30 IST). Broken form returns
+  `2026-08-03`; the guard `test_current_week_ist_buckets_in_kolkata` asserts
+  `2026-08-10`, so it reddens for the reason it exists — the 5.5h slide that would
+  drop Monday's opening entries into last week.
+
+### Spec / convention checks
+
+- **§13 scope.** `docs/DECISIONS.md:278` lists a weekly summary in the dashboard
+  contents; task 97 landed the monthly block, task 99 adds the weekly counterpart.
+  Tick is honest — the "This week" section renders and figures are real.
+- **Money invariant (§9).** Week balance is `week_income - week_expenses`, exact
+  `Decimal` subtraction; both figures flow from `month_summary` as `NUMERIC` →
+  `Decimal`. No float touches the path.
+- **Soft-delete (§6).** The week reuses `db.month_summary`, which reads
+  `active_transactions` (db.py:259, 265) — a deleted row can't re-enter the week's
+  totals.
+- **IST boundaries (§10).** `current_week_ist` converts to IST before taking
+  `weekday()`, and `month_summary`'s range is half-open `[monday, next_monday)` on
+  `occurred_on` (a date) — matches the week's date pair exactly. Weeks start Monday
+  (Mon=0), consistent with the docstring.
+- **No new dependency (§13).** Route discards the week's `top` categories and
+  renders figures only; no charting library, no import added beyond
+  `current_week_ist`.
+
+### Non-blocking note
+
+- The route integration test (`tests/test_webapp.py:273`) only asserts the
+  "This week" *section* is present, not that its figures are bucketed on the week
+  range against dated data. Low risk: the boundary logic is unit-tested with a
+  fixed `now`, the rendering-distinctness of week vs month balances is covered
+  (`test_dashboard_html_week_and_month_balances_are_distinct`), and `month_summary`'s
+  date-range bucketing is already exercised via the month path. The route wiring
+  is plain plumbing. Not worth a blocking finding; if a future change touches the
+  week-range wiring, an integration assertion on the week figure would catch a
+  silent swap.
+
+---
+
+## 2026-08-06 — `e51d214` — Category breakdown as sorted CSS percentage bars (§13, task 98)
+
+**Status: ✅ DONE** — no blocking issues. One low-severity robustness note below.
+
+Scope: `webapp.category_bars` (new); `dashboard_html` gains a `top` param and
+appends the breakdown; `app.mini_app_data` forwards `month_summary`'s
+previously-discarded categories; bar CSS in `SHELL_HTML`; the task-98 tick in
+`TASKS.md`; new tests in `tests/test_webapp.py`.
+
+### What I actually ran
+
+- `uv run pytest -q` → **147 passed, 1 warning** (matches the commit claim; was
+  144). Warning is Starlette's testclient/`httpx` deprecation, unrelated.
+- **Denominator guard, break-and-red (verified myself):** changed the share to
+  `amount / (total * 2) * 100` in `category_bars` (`kanakko/webapp.py:132`) and
+  ran `pytest -k "category or breakdown or dashboard"` → **3 failed**
+  (`test_category_bars_are_sorted_shares_of_month_expenses`,
+  `test_dashboard_html_renders_the_category_breakdown`,
+  `test_dashboard_route_renders_totals_and_current_month`). Matches the commit's
+  "reddens under a wrong denominator (3 tests fail)". Restored; `git status` clean.
+
+### What I checked and found correct
+
+- **Denominator is consistent, shares sum to 100.** `month_summary`
+  (`kanakko/db.py:241`) returns `expenses` and `top` from the *same*
+  `active_transactions` window, same `type='expense'` filter, same IST
+  boundaries — so `sum(top amounts) == month_expenses` exactly and each
+  `amount/total` share is a true fraction. `app.py:103-107` passes that same
+  `month_expenses` as the denominator, not all-time expenses. No day/UTC slip:
+  the boundaries are `current_month_ist`, unchanged by this commit.
+- **No float touches an amount (§9).** `amount` and `total` are `NUMERIC` →
+  `Decimal`; `pct = amount / total * 100` is `Decimal/Decimal`; `format_amount`
+  raises on a `float`. `{pct:.1f}` is a display-only rounding of a `Decimal`.
+- **Reads go through `active_transactions`** — via `month_summary`, so no
+  soft-deleted row re-enters a bar. Unbounded? No — `top` is capped at the fixed
+  `categories.py` set size.
+- **Divide-by-zero / empty month** guarded: `if not categories or total <= 0`
+  returns `""`; `test_category_bars_empty_when_no_expenses` pins both.
+- **No new dependency, no charting library (§13):** bars are a `<div>` with an
+  inline `width` and a few lines of CSS in `SHELL_HTML`. Good.
+- **XSS:** category names go through `html.escape`; amounts via `format_amount`;
+  month label via `strftime`. Nothing user-controlled reaches the markup raw.
+
+### Finding — low severity, non-blocking
+
+**`category_bars` crashes on a NULL category name** — `kanakko/webapp.py:135`.
+`category` is a nullable column (`migrations/001_init.sql:21`) and `null`
+category is a first-class state in the spec (§3). `month_summary`'s `top` query
+`GROUP BY category` (`kanakko/db.py:265-268`) will emit a `(None, amount)` row
+for any uncategorised expense, and `html.escape(None)` raises
+`AttributeError: 'NoneType' object has no attribute 'replace'` — I reproduced it:
+`category_bars([(None, Decimal("100"))], Decimal("100"))` → `AttributeError`.
+That would 500 the whole `/app/data` endpoint, so the dashboard shows only
+"Could not load dashboard.", not merely a missing breakdown section.
+
+Why it is **not** blocking: the write path cannot currently store a confirmed
+null-category expense. `handle_text` routes a null category to
+`category_prompt` (`app.py:196`), whose card carries no Confirm button
+(`confirm.py:55-69`), so a row only becomes confirmable after a category is
+tapped, and `confirm_card` asserts non-null (`confirm.py:36`). So `top` never
+actually contains a `None` today.
+
+It is worth a one-liner anyway because (a) the read side is the *only* place
+that assumes non-null while the rest of the read path already defends it —
+`handle_undo` guards `if removed["category"]` (`app.py:227`); and (b) tasks
+100/101 and the recent-transactions list widen what the dashboard reads, and a
+nullable column plus a first-class `null` state is exactly the kind of invariant
+that later loosens. Suggested fix: `html.escape(name or "Uncategorised")` in the
+loop, and a test that `category_bars([(None, Decimal("100"))], Decimal("100"))`
+renders instead of raising.
+
+---
+
+## 2026-08-06 — `62f5708` — Mini App dashboard route: totals, balance, current-month figures (§13, task 97)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `GET /app` (static bootstrap) and `GET /app/data` (auth'd dashboard
+fragment) in `kanakko/app.py`; `db.totals`; `webapp.user_id_from_init_data`,
+`webapp.current_month_ist`, `webapp.dashboard_html`, `webapp.SHELL_HTML`; the
+task-97 tick in `TASKS.md`; new tests in `tests/test_webapp.py`.
+
+### What I actually ran
+
+- `uv run pytest -q` → **144 passed, 1 warning** (matches the commit claim; was
+  130). The warning is Starlette's `httpx`/testclient deprecation, unrelated.
+- **Balance guard, revert-and-red (verified myself):** flipped
+  `income - expenses` → `income + expenses` in `dashboard_html`
+  (`kanakko/webapp.py:133`) and ran `pytest -k dashboard` →
+  `test_dashboard_html_shows_rupee_amounts_and_exact_balance` **and**
+  `test_dashboard_route_renders_totals_and_current_month` both FAILED (2 failed,
+  2 passed). Restored; tree clean. The money guard is real on both the pure and
+  the integration path.
+- **Timezone guard, revert-and-red (verified myself):** dropped
+  `.astimezone(IST)` from `current_month_ist` (`kanakko/webapp.py:100`) and ran
+  `pytest -k current_month` → `test_current_month_ist_buckets_in_kolkata`
+  FAILED. With the UTC-date path, 00:30 IST on Aug 1 (19:00 UTC Jul 31) buckets
+  as July, sliding this month's opening entries into last month. The guard fails
+  for the reason it exists. Restored.
+
+### Spec / convention checks
+
+- **Money is `Decimal`, never float.** `db.totals` sums `NUMERIC` via
+  `coalesce(sum(...), 0)` → `Decimal`; balance is exact `Decimal` subtraction in
+  `dashboard_html`; amounts render through `format_amount`. The pure test pins
+  `0.30 - 0.10 → ₹0.20` (no float drift). ✅
+- **Reads through `active_transactions`.** `db.totals` selects
+  `FROM active_transactions` — a soft-deleted row can't re-enter the headline
+  totals (§6). ✅
+- **Month boundary in `Asia/Kolkata`.** `current_month_ist` is the correct
+  mirror of `jobs.monthly.previous_month_ist` (day-1 in IST, +32d→day-1 for the
+  next first). Buckets on the `occurred_on` date, consistent with
+  `month_summary`'s half-open `[first, next_first)`. ✅
+- **`initData` validation is the auth.** `/app/data` requires the `tma ` prefix,
+  re-verifies the HMAC via `validate_init_data`, and only then resolves the user;
+  `user_id_from_init_data` reads the id from the *signed* `user` object, not from
+  any client-supplied field. Forged (`test_dashboard_route_rejects_a_forged_payload`)
+  and absent-header (`test_dashboard_route_needs_the_authorization_header`)
+  payloads are 401, checked before DB work. Unset `TELEGRAM_BOT_TOKEN` lets the
+  `RuntimeError` propagate → 500 (fails closed, no bypass). ✅
+- **`user_id_from_init_data` input handling.** Parametrized test covers no user
+  field, empty, non-JSON, JSON-but-not-an-object, object-without-id, and a
+  string id — all → `InitDataError`. The `isinstance(uid, bool)` exclusion
+  correctly rejects a JSON `true` masquerading as an int `1`. ✅
+- **No new dependency, no charting library, no ORM.** Fragment is
+  string-concatenated HTML + `format_amount`; `SHELL_HTML` pulls Telegram's own
+  `telegram-web-app.js` from `telegram.org` (required by the platform, §13). ✅
+- **No secret in the served page.** `test_shell_serves_the_bootstrap_without_a_secret`
+  asserts the token isn't in `/app`'s body; the shell carries no data and no
+  auth, matching §13's "no secret in the URL/page." ✅
+
+### Non-blocking observations (not findings; do not action now)
+
+- `dashboard_html` writes its fragment into the shell via `innerHTML`. Safe
+  today — only `format_amount` output and a `strftime` month label are
+  interpolated, none user-controlled — and the docstring says as much. When
+  task 98/101 add category names / notes / the recent list, those *are*
+  user-controlled and must be escaped before they reach the fragment. Flagging so
+  it isn't forgotten; nothing to change for task 97.
+- `/app/data` calls `get_or_create_user` on a GET, so a first-ever open commits a
+  user row. Harmless and consistent with the existing bot path; noted only
+  because it's a write on a nominally read-only route.
+- No route-level test asserts the 500-on-unset-token path. It's covered by the
+  `validate_init_data` unit test plus TestClient's default re-raise of server
+  exceptions, and the behaviour is correct (fail-closed, not bypass), so this is
+  a gap-of-convenience, not a missing money/tz/auth-rejection guard.
+
+The `auth_date` freshness deferral is explicitly documented, read-only, and
+consistent with §13 (HMAC-only); the replay concern legitimately belongs with
+the task 100/101 mutations. Not an issue for this commit.
+
+---
+
+## 2026-08-06 — `e6775fc` — validate Mini App initData HMAC (§13, Phase 4 tasks 95-96)
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED — finding 1 was WRONG, do not apply
+it.** The review did the right thing by tagging its claim `UNVERIFIED` and
+asking for primary-source confirmation. That confirmation was done (attended,
+with web access the review sandbox lacks) and it **refutes** the finding. The
+code was already correct; the suggested fix would have broken it.
+
+Scope: new `kanakko/webapp.py` (`validate_init_data`), new
+`tests/test_webapp.py`, and the task 95/96 ticks in `TASKS.md`.
+
+### Resolution of finding 1 (`signature` exclusion) — 2026-08-06, attended
+
+**Verdict: `signature` must STAY in the data-check-string for the bot-token
+HMAC path. `fields.pop("signature", None)` is a defect, not a fix.**
+
+Telegram has *two* validation paths and only one of them excludes `signature`:
+
+| Path | Key | Excluded from data-check-string |
+|---|---|---|
+| Bot-token HMAC (what `validate_init_data` implements) | `HMAC-SHA256(bot_token, "WebAppData")` | `hash` **only** |
+| Third-party Ed25519 (not implemented here) | Telegram's public key | `hash` **and** `signature` |
+
+Evidence, in order of authority:
+
+1. **`core.telegram.org/bots/webapps`** states the exclusion *only* for the
+   Ed25519 path — "Append all received fields **(except _hash_ and
+   _signature_)**" — and says nothing of the sort for the HMAC path, which it
+   describes as "a chain of all received fields, sorted alphabetically". The
+   docs' silence on the HMAC path is what makes this finding so easy to reach;
+   the asymmetry is the answer, not an omission.
+2. **The official SDK has both paths in one file** —
+   `Telegram-Mini-Apps/telegram-apps`, `packages/init-data-node/src/validation.ts`
+   (read via the GitHub API, 2026-08-06): the Ed25519 routine skips `hash` and
+   `signature` (L94-100); the bot-token HMAC routine skips **only** `hash` and
+   pushes every other field, `signature` included, into `pairs` (L251-264).
+
+**Consequence had it been applied:** any Bot API 8.0+ client sends `signature`,
+so the validator would have recomputed a hash Telegram never produced and
+raised `InitDataError` on every legitimate payload — the dashboard rejecting
+100% of real users. It fails closed, so it would have been loud rather than a
+bypass, but it is the exact availability bug the finding set out to prevent.
+
+**What landed instead:** no production change (the code was already right), plus
+`tests/test_webapp.py::test_signature_field_stays_in_the_data_check_string` —
+a payload signed *with* a `signature` field must verify. Confirmed it earns its
+place: re-applying `fields.pop("signature", None)` makes it fail with
+`InitDataError: initData hash mismatch` (1 failed, 5 passed); restored, 6 passed.
+
+**For the next iteration: this finding is closed. Do not re-open it, and do not
+add the `signature` pop.** The test above is what will stop you.
+
+### Still open from this review (carried forward, not blocking)
+
+`auth_date` freshness is still unchecked, and the review correctly called that a
+defensible deferral *while the validator does not mutate state*. Tasks 100 and
+101 (per-row soft delete, per-row category change from the dashboard) **do**
+mutate state, which makes a captured `initData` a replay token valid forever.
+The same official SDK defaults to `expiresIn = 86400` (24h) for this reason.
+Add the `max_age` guard as part of whichever of those tasks lands first.
+
+### What I checked
+
+- **Full suite** — `uv run pytest -q` → **130 passed** (was 125). Matches the
+  commit message.
+- **The HMAC algorithm matches §13.** `secret_key = hmac.new(b"WebAppData",
+  token, sha256)` (key `"WebAppData"`, message = bot token) and `expected =
+  hmac.new(secret_key, data_check_string, sha256).hexdigest()`. That is exactly
+  the order §13 (lines 260-264) and the task specify. Comparison is
+  `hmac.compare_digest`, not `==` (CLAUDE.md / §13). Fails closed with
+  `RuntimeError` on unset `TELEGRAM_BOT_TOKEN` before any comparison — same
+  posture as `tg.py:29-31`. Secret comes from `os.environ`, no literal token.
+- **The guard reddens for the reason it exists.** Replaced `if not
+  hmac.compare_digest(...)` with `if False:` and reran
+  `tests/test_webapp.py` → `test_tampered_field_is_rejected` and
+  `test_signature_from_a_different_token_is_rejected` both **FAILED** (2 failed,
+  3 passed). Restored the file. The two rejection tests genuinely gate the
+  comparison — not a surface-form assertion.
+- **Test quality.** Tests assert the effect: a byte-flipped signed `user` id
+  (keeping the original hash) raises, a payload re-signed with a different token
+  raises, a missing `hash` raises, and no-token raises `RuntimeError`. The
+  tamper test verifies `forged != init_data` before asserting, so it can't
+  silently pass on a no-op replace.
+- **`parse_qsl(..., keep_blank_values=True)`** decodes percent-encoding, so the
+  data-check-string is built from decoded values (correct), and a legitimately
+  empty field still round-trips. `hash` is `pop`-ped out before the check.
+- **Not yet wired.** `grep -rn validate_init_data kanakko/` finds no caller —
+  the dashboard route is a later, still-unchecked task. So the finding below is
+  not breaking anything in a live path *today*; it must be settled before the
+  route lands.
+
+### Findings
+
+**1. (medium) The `signature` field is not excluded from the data-check-string
+— `kanakko/webapp.py:47-49`.** The code removes only `hash` from `fields`, then
+includes every remaining field. Telegram Bot API 8.0+ adds a `signature`
+parameter to `initData` (for its separate Ed25519 third-party validation), and
+Telegram computes the HMAC `hash` with `signature` **excluded** from the
+data-check-string. If a real client sends `initData` containing `signature`,
+this validator folds it into the check string, recomputes a hash that does not
+match Telegram's, and raises `InitDataError` on a legitimate payload — the
+dashboard rejects real users. It fails *closed* (rejects rather than admits), so
+this is an availability bug, not an auth bypass.
+
+`UNVERIFIED`: WebFetch to `core.telegram.org` is not permitted in this review
+sandbox, so I could not confirm the current wording against the primary source.
+The claim above is from prior knowledge of the Bot API 8.0 changelog; confirm at
+`https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app`
+before acting. **Suggested fix (if confirmed):** `fields.pop("signature",
+None)` alongside the `hash` pop, and add one test with a `signature` field
+present in the signed payload that still verifies. §13 in `docs/DECISIONS.md`
+describes only "sort the received fields" and doesn't mention `signature`; if
+the exclusion is required, that's a spec gap worth a `TASKS.md` note, not a code
+workaround.
+
+### Not findings (checked, fine)
+
+- No `float`, no DB access, no timezone math in this diff — none of the usual
+  silent-wrongness surfaces apply here.
+- No `auth_date` freshness / replay check — the in-file `ponytail:` comment
+  (`webapp.py:59-61`) acknowledges this; §13 requires only the HMAC and the
+  validator doesn't mutate state, so a `max_age` guard is a defensible deferral.
+- The `ponytail:` comment sits after `return fields`; it's a comment, so no dead
+  code executes. Style only.
+
+---
+
 ## 2026-08-06 — `9519735` — guard a 23:50-IST last-day transaction lands in that month's report (Phase 3, task 91)
 
 **Status: ✅ DONE** — no blocking issues.

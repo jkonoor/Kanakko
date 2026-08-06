@@ -92,14 +92,37 @@ the plan's order and it matters.
 
 ## Phase 4 — Mini App dashboard
 
-- [ ] Add `initData` HMAC validation — `HMAC-SHA256(bot_token, "WebAppData")` as the secret key, per `docs/DECISIONS.md` §13
-- [ ] Add a check that a forged or tampered `initData` payload is rejected
-- [ ] Add the dashboard route rendering totals, balance, and current-month figures
-- [ ] Add the category breakdown as a sorted list with CSS percentage bars — no charting library
-- [ ] Add the weekly and monthly summary sections
-- [ ] Add the recent-transactions list with per-row soft delete
-- [ ] Add per-row category change from the dashboard
-- [ ] Make the dashboard render correctly in both light and dark themes
+- [x] Add `initData` HMAC validation — `HMAC-SHA256(bot_token, "WebAppData")` as the secret key, per `docs/DECISIONS.md` §13
+- [x] Add a check that a forged or tampered `initData` payload is rejected
+- [x] Add the dashboard route rendering totals, balance, and current-month figures
+- [x] Add the category breakdown as a sorted list with CSS percentage bars — no charting library
+- [x] Add the weekly and monthly summary sections
+- [x] Add the recent-transactions list with per-row soft delete — **two constraints
+      that arrive with this task, both noted attended on `62f5708`:**
+      **(a) escape the `note`.** This is the first task to render a user-typed
+      string into server-rendered markup. `webapp.py` currently says "no
+      user-controlled string reaches the markup here, so there is nothing to
+      escape yet" — that stops being true here. §11 keeps the note's original
+      wording deliberately, so `note` is arbitrary text that arrived through the
+      bot. Unescaped, `<img src=x onerror=...>` in a logged expense is stored XSS
+      in the dashboard. Use `html.escape`, and add a check that a note containing
+      `<script>` renders inert — assert the *escaped* bytes, not that the page
+      "looks fine".
+      **(b) add the `auth_date` freshness check.** ✅ **Landed as the prerequisite
+      split — this box stays open for the recent-list + delete + note-escaping
+      remainder.** `validate_init_data(init_data, max_age=..., now=...)` now opts
+      into the check: with `max_age` set, a missing/malformed `auth_date` or one
+      older than `max_age` raises `InitDataError`; the read-only `/app/data` route
+      still passes no `max_age`. Tested (`test_webapp.py`): stale rejected, fresh
+      passes, missing fails closed. **The mutation route this task adds MUST call
+      `validate_init_data(..., max_age=timedelta(hours=24))`** — the guard exists
+      but is only wired once a state-changing route uses it. (Was: Telegram's
+      docs — "check the `auth_date` field"; the official SDK defaults to
+      `expiresIn = 86400`.)
+- [x] Add per-row category change from the dashboard — same two constraints as the
+      task above if they haven't landed yet; category itself is a closed set from
+      `categories.py`, so the escaping risk here is the note, not the category
+- [x] Make the dashboard render correctly in both light and dark themes
 - [ ] `[human]` Register the Mini App menu button with BotFather
 
 ## Phase 5 — Backups and hardening

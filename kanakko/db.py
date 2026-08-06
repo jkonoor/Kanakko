@@ -272,6 +272,104 @@ def month_summary(
     return income, expenses, top
 
 
+def totals(conn: psycopg.Connection, user_id: int) -> tuple[Decimal, Decimal]:
+    """All-time `(income, expenses)` for `user_id`'s live rows (§6, §9, §13).
+
+    The dashboard's headline numbers: every confirmed, un-undone transaction ever
+    logged, so balance is `income - expenses`. Reads `active_transactions`, so a
+    soft-deleted row never re-enters the totals (§6). Both sums come back as
+    `NUMERIC` → `Decimal` (never float, §9); a user with no rows yields
+    `(0.00, 0.00)`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT"
+            " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
+            " FROM active_transactions WHERE user_id = %s",
+            (user_id,),
+        )
+        income, expenses = cur.fetchone()
+    return income, expenses
+
+
+def recent_transactions(
+    conn: psycopg.Connection, user_id: int, limit: int = 10
+) -> list[tuple]:
+    """The user's most recent live transactions, newest first (§6, §13).
+
+    The dashboard's recent list: each row carries its `txn_id` so the per-row
+    delete button can name it. Reads `active_transactions`, so a soft-deleted row
+    never reappears (§6). `limit` caps the list — the dashboard shows a handful,
+    not the whole ledger. Amounts come back as `NUMERIC` → `Decimal` (§9). Ordered
+    by `created_at` (when logged) so the list matches the order entries were added.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT txn_id, amount, type, category, note, occurred_on"
+            " FROM active_transactions WHERE user_id = %s"
+            " ORDER BY created_at DESC, txn_id DESC LIMIT %s",
+            (user_id, limit),
+        )
+        return cur.fetchall()
+
+
+def soft_delete_transaction(
+    conn: psycopg.Connection, user_id: int, txn_id: int
+) -> int | None:
+    """Soft-delete one live transaction by id, scoped to `user_id` (§6, §13).
+
+    The dashboard's per-row delete: sets `deleted_at` on the row so the ledger
+    stays recoverable (§6), scoped to `user_id` so one user cannot delete
+    another's row by guessing an id (§1). The row is chosen from
+    `active_transactions`, so deleting an already-deleted (or another user's) row
+    is a no-op returning `None`, not a second write — the subquery yields no
+    `txn_id`, and `WHERE txn_id = NULL` matches nothing. Mirrors `undo_last`'s
+    read-through-the-view pattern. Returns the deleted `txn_id`, or `None`. Does
+    not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transactions SET deleted_at = now()"
+            " WHERE txn_id = ("
+            "   SELECT txn_id FROM active_transactions"
+            "   WHERE user_id = %s AND txn_id = %s"
+            " )"
+            " RETURNING txn_id",
+            (user_id, txn_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def set_transaction_category(
+    conn: psycopg.Connection, user_id: int, txn_id: int, category: str
+) -> int | None:
+    """Set the category of one live transaction, scoped to `user_id` (§5, §13).
+
+    The dashboard's per-row category change (task 101): corrects the most-often-
+    wrong field on an already-confirmed entry. Scoped to `user_id` so one user
+    cannot relabel another's row by guessing an id (§1); the row is chosen from
+    `active_transactions`, so a deleted or foreign id yields no `txn_id` and the
+    UPDATE matches nothing, returning `None` rather than a stray write. The caller
+    validates `category` against the closed set (`categories.py`) before this runs.
+    Mirrors `soft_delete_transaction`. Returns the updated `txn_id`, or `None`.
+    Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transactions SET category = %s"
+            " WHERE txn_id = ("
+            "   SELECT txn_id FROM active_transactions"
+            "   WHERE user_id = %s AND txn_id = %s"
+            " )"
+            " RETURNING txn_id",
+            (category, user_id, txn_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:
     """True if `user_id` has any live transaction logged since `since` (§6, §12).
 

@@ -12,6 +12,58 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `b948736` — add `kanakko/categories.py`, the closed category set defined once
+
+**Scope:** New `kanakko/categories.py` (the §11 expense/income lists as one
+constant, plus `schema_enum()` and `keyboard(txn_type)` derived from it), new
+`tests/test_categories.py`, and one ticked box in `TASKS.md`. `git show --stat
+HEAD` confirms exactly those three files. Pure constants + two derivation
+helpers — no money, no timestamps, no SQL, no LLM prompt, no `active_transactions`
+read — so the `Decimal`/`NUMERIC`, `AT TIME ZONE 'Asia/Kolkata'`, and soft-delete
+decisions have no surface here.
+
+**Status: ✅ DONE** — the constant matches the spec verbatim, both helpers derive
+from it, and the guard fails for the reason it exists. No blocking issues.
+
+### What I actually checked
+
+| Check | Command | Result |
+|---|---|---|
+| Categories match spec | `grep -A40 '## 11' docs/DECISIONS.md` vs the module | verbatim match — `Food · Groceries · Transport · Shopping · Bills & Utilities · Health · Entertainment · Other`; income `Salary · Freelance · Refund · Other` |
+| Suite green | `uv run pytest -q` | `21 passed, 1 warning in 1.08s` (was 18) |
+| Guard fails for its reason | renamed `Groceries`→`groceries` in the source, ran `pytest tests/test_categories.py` | `3 failed` (`_match_the_spec_verbatim`, `_deduped_union`, `_keyboard_mirrors`); restored → green |
+| `schema_enum()` dedupes `Other` | `uv run python -c` calling `schema_enum()` | 11 entries, `Other` appears once — the two lists' shared `Other` collapses via `dict.fromkeys` |
+| Keyboard derivation | `keyboard('expense')`/`keyboard('income')` live | two buttons per row, `callback_data` = `cat:<name>`, labels mirror the constant in order |
+| Dependency already declared | `grep telegram pyproject.toml` | `python-telegram-bot>=21.10` already a project dep — the `telegram` import adds nothing new |
+
+Note on method: after the sed-revert of the `Groceries` typo, a same-second
+`git checkout` left a stale `__pycache__` `.pyc`, so an intermediate live probe
+printed `groceries` against a source that already read `Groceries`. Touching the
+source forced a recompile and the enum came back correct — flagging it only so the
+transcript isn't misread as a real defect. The file on disk is clean (`grep`
+confirms `Groceries`, `git status` clean).
+
+### Findings
+
+None blocking. Two non-blocking observations for whoever wires this up next:
+
+1. **`keyboard('bogus')` raises `KeyError`, not a domain error.** `categories.py:44`
+   — `CATEGORIES_BY_TYPE[txn_type]` bare-indexes. Acceptable now: `txn_type` will
+   come from the parse schema's own `type` enum (`expense`/`income`), so an invalid
+   value can't reach here from validated LLM output. Worth a guard only if a
+   future caller passes an unvalidated string; not a fix for this commit.
+
+2. **`ALL_CATEGORIES` order is expense-first.** The `enum` handed to the model is
+   `[…expenses…, Salary, Freelance, Refund]`. §2/§3 don't constrain order and the
+   model matches on value not position, so this is fine — noting only that the
+   income-only categories sit at the tail, which is what the test asserts.
+
+The ticked box in `TASKS.md` is honest: the file exists, both helpers do real
+work, and the test transcribes §11 by hand rather than importing it — so a drift
+between spec and constant goes red instead of silently agreeing with itself.
+
+---
+
 ## 2026-08-06 — `55db09f` — wire the three app keys into compose, parse `.env` instead of regexing it
 
 **Scope:** Resolves the two open findings from the `a69544e` review.

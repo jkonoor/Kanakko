@@ -104,6 +104,29 @@ def test_web_and_cron_share_one_image():
 
 def test_web_migrates_before_it_serves():
     """Otherwise /healthz answers 200 on an unmigrated database and the first
-    webhook dies on `relation "transactions" does not exist`."""
-    command = re.search(r"^\s+command: (.*)$", service("web"), re.M).group(1)
-    assert re.search(r"kanakko\.migrate.*&&.*uvicorn", command)
+    webhook dies on `relation "transactions" does not exist`.
+
+    Asserted against the Dockerfile rather than compose: the deployed Dokploy
+    Application carries no command override, so the ordering has to be a
+    property of the image or it only holds locally.
+    """
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+    cmd = [ln for ln in dockerfile.splitlines() if ln.startswith("CMD ")][-1]
+    assert re.search(r"kanakko\.migrate.*&&.*uvicorn", cmd)
+
+
+def test_image_is_runnable_without_an_external_command():
+    """The image must start on its own.
+
+    Dokploy's per-service `command` is an argv array split on whitespace, so a
+    shell-form command set there arrives mangled and the container crash-loops
+    with "Unterminated quoted string". Relying on an override to make the image
+    runnable is what made that possible; an exec-form CMD removes the dependency.
+    """
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+    cmd_lines = [ln for ln in dockerfile.splitlines() if ln.startswith("CMD ")]
+    assert cmd_lines, "Dockerfile has no CMD — the image cannot start unaided"
+    assert cmd_lines[-1].startswith('CMD ['), (
+        "CMD must be exec form (a JSON array); shell form is re-split by the "
+        f"runtime: {cmd_lines[-1]!r}"
+    )

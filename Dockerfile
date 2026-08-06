@@ -22,3 +22,10 @@ RUN uv sync --frozen --no-dev
 # to /app/migrations. That is why migrations/ is COPYed rather than packaged
 # into the wheel (REVIEWS.md, finding 1 on 3f33abf).
 ENV PATH="/app/.venv/bin:$PATH"
+
+# The image must be runnable with no external command. Dokploy's per-service
+# `command` field is an argv array split on whitespace, so a shell-form command
+# set there arrives as ["sh","-c","\"python","-m",...] and dies with
+# "Unterminated quoted string". Exec-form CMD here is immune, and the sidecar
+# still overrides it with the single-token `cron -f`, which survives splitting.
+CMD ["sh", "-c", "python -m kanakko.migrate && exec uvicorn kanakko.app:app --host 0.0.0.0 --port 8000"]

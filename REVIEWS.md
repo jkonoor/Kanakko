@@ -12,6 +12,77 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `f7fa03d` — dedup Telegram updates by `update_id` so a redelivered `/undo` can't delete a second row (§14, review b9acac9)
+
+**Status: ✅ DONE** — no blocking issues. The fix resolves the sole open finding
+from the `b9acac9` review, is root-caused in the right place (the webhook, not
+per-handler), and ships a guard that genuinely reddens without it.
+
+**Scope:** New `processed_updates` idempotency ledger
+(`migrations/002_processed_updates.sql`), `db.claim_update` (INSERT … ON CONFLICT
+DO NOTHING RETURNING), and the webhook consolidated to one connection per update
+that claims the `update_id` inside the handler's own transaction and skips the
+handler on a repeat. New regression test.
+
+**What I actually checked (commands + results):**
+
+- `git show HEAD` / `--stat` — read the full diff; 5 files, +131/−16.
+- `uv run pytest -q` → **`100 passed, 1 warning in 2.58s`** (was 99). The
+  new test runs against the throwaway Postgres cluster in `conftest.py`, not a
+  stub.
+- **Reverted the fix to confirm the guard fails for its reason.** Deleted the
+  `if isinstance(update_id, int) and not claim_update(...)` block from
+  `kanakko/app.py:279-281` and re-ran the new test:
+  `uv run pytest -q -k redelivered` →
+  **`assert (0,) == (1,)` at test_webhook.py:515** — both confirmed rows soft-
+  deleted, exactly the silent money-path loss the fix prevents. Restored the
+  file; the other two dispatch tests stayed green (they carry no `update_id`).
+  The guard asserts the **effect** (rows surviving in `active_transactions`),
+  not a surface string.
+- Traced the transaction semantics against the diff:
+  - Claim + handler share one `with connect() as conn` (`app.py:278-292`), so
+    they commit together and roll back together. A handler that raises (500)
+    unwinds the block → psycopg `__exit__` rolls back → claim gone → Telegram's
+    redelivery legitimately re-runs. A committed update conflicts on the PK →
+    `claim_update` returns False → 200 no-op. Matches the docstring's claim.
+  - The refactored `elif action.data == …` chain (`app.py:287-292`) is sound:
+    `dispatch` (`app.py:72-100`) returns only `TextMessage | ButtonPress | None`;
+    `None` returns at line 271 and `TextMessage` takes the first branch, so any
+    value reaching the `elif`s is a `ButtonPress` with a `str` `.data`. No
+    `AttributeError` risk from dropping the old `isinstance` checks.
+  - `handle_undo` (`app.py:156-174`) does the DB write before `send_message`, so
+    a send failure rolls the soft-delete back with the claim — net effect is
+    still exactly one undo across a redelivery. No regression.
+- `migrations/002_processed_updates.sql` is a new file; `001_init.sql` is
+  untouched (respects "don't edit an applied migration"). `kanakko/migrate.py`
+  applies `*.sql` in sorted filename order and records each in
+  `schema_migrations`, so 002 is picked up exactly once. `update_id` is `BIGINT
+  PRIMARY KEY` — correct width for Telegram ids and the right column for the
+  ON-CONFLICT dedup. No `float`, no amount touched, no read bypassing
+  `active_transactions`.
+
+**Non-blocking observations (no change required):**
+
+- The `§14` citation is loose: §14 is "Hosting" and only chose webhook over long
+  polling; there is no numbered decision for redelivery idempotency. The webhook
+  docstring already carried `(§14)` pre-commit, so this is consistent with
+  existing practice, and the behaviour itself is correct and well-documented in
+  the migration header. Flagging only so a future reader isn't surprised.
+- The test's `_Reuse` context manager runs both deliveries on one shared
+  connection (the second INSERT sees the first within the same transaction),
+  whereas production uses a fresh connection per delivery (the second blocks on
+  the PK until the first commits, then conflicts). Both paths dedup correctly via
+  `ON CONFLICT DO NOTHING`; the test is a faithful proxy for the app logic. The
+  true cross-transaction blocking path is a Postgres guarantee, not app code, so
+  not worth a separate test.
+- `processed_updates` grows one row per update forever; the author marked this
+  with a `ponytail:` comment and a retention-sweep upgrade path. Correct call at
+  personal scale (§8 — no Redis), and monotonic ids mean old rows never repeat.
+
+**Findings:** none blocking.
+
+---
+
 ## 2026-08-06 — `b9acac9` — add `/undo`: soft-delete the last confirmed transaction (§5, §6, task 79)
 
 **Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one open

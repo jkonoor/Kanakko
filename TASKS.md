@@ -52,7 +52,7 @@ the plan's order and it matters.
       the loop then wires the header check + guard that a wrong/absent secret is
       rejected. Safe to defer past task 48 (render confirm card writes no rows);
       must land before task 49 (Handle Confirm), the first handler that writes.
-- [ ] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
+- [x] Render the confirm card: amount, type, category, date, note, with Confirm and Cancel buttons
 - [ ] Handle Confirm — write to `transactions`, clear the pending row
 - [ ] Handle Cancel — discard the pending row, acknowledge
 - [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing

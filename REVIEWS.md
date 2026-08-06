@@ -12,6 +12,62 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `5a19d43` — add `kanakko/tg.py` — Telegram send client (§4, §14, task 51)
+
+**Scope:** New thin Telegram Bot API send client (`answer_callback_query`,
+`send_message`, `edit_message_text`) built on raw `httpx`, mirroring
+`parse.call()`. Token from `TELEGRAM_BOT_TOKEN`, fails closed when unset.
+`reply_markup` serialises a `confirm_card` `InlineKeyboardMarkup` via
+`.to_dict()`. New `tests/test_tg.py` (6 checks, no network). `TASKS.md` tick +
+Handle-Confirm note update. No production code path is wired to it yet.
+
+**Status: ✅ DONE** — matches the conventions, the two guards that matter
+provably bite, nothing regressed. No blocking findings.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **74 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). Matches the claimed count (was 68;
+  +6 from the new file).
+- **Fail-closed guard bites for its reason.** Neutered the guard in `tg._call`
+  (replaced `raise RuntimeError(...)` with `token = "x"`) and reran
+  `uv run pytest tests/test_tg.py -q` → **1 failed, 5 passed**, the failure being
+  `test_fails_closed_without_a_token` (`Failed: posted with no token set`).
+  Restored the file; tree clean. So an unset token can never reach the network —
+  the secret-from-env / never-a-literal convention holds and is enforced by a
+  check that genuinely reddens.
+- **Keyboard-serialisation guard is real, not a spelling check.**
+  `test_keyboard_is_serialised_to_a_plain_dict` asserts the sent `reply_markup`
+  is `kb.to_dict()` with `inline_keyboard[0][0]["callback_data"] == "ok"` — the
+  actual Bot API nested-list shape, not merely "a dict". A raw
+  `InlineKeyboardMarkup` handed to `httpx(json=...)` would not serialise, and
+  this check catches that regression. Confirmed `confirm.py:confirm_card` really
+  returns an `InlineKeyboardMarkup`, so the `.to_dict()` contract matches its
+  one real caller-to-be.
+- **Spec fit.** §4/§5 confirm-card flow uses these three methods; no
+  `parse_mode` is set, which is correct — `confirm_card` is deliberately plain
+  text (note is the user's own wording, §4). Sync httpx carries a `ponytail:`
+  comment naming the §14 deferred throughput ceiling (~50k users → rate-limited
+  send loop, not a queue) — consistent with the deferred table. No money,
+  timezone, `active_transactions`, or category surface is touched, so those
+  axes are N/A here.
+- **Not a stub / not a falsely-ticked task.** All three methods do real work;
+  the task's every claim (methods, raw httpx, env token, fail-closed,
+  `.to_dict()`, no-network tests) is present and exercised. HTTP errors
+  propagate (`test_http_error_propagates`).
+
+### Non-blocking observations (no action required)
+
+- **Application-level `ok: false` isn't inspected.** `_call` calls
+  `response.raise_for_status()` and returns `response.json()` without checking
+  the Bot API `ok` field (`kanakko/tg.py:36-38`). This is safe today because the
+  Bot API returns a 4xx HTTP status alongside `ok: false` for errors (verified
+  against the Bot API docs, 2026-08-06), so `raise_for_status()` already raises.
+  Worth a glance if a future handler starts branching on the returned dict, but
+  nothing silently wrong now.
+
+---
+
 ## 2026-08-06 — `d0d97a5` — add `TELEGRAM_WEBHOOK_SECRET` to `.env.example` and compose (§15, task 43)
 
 **Scope:** Wire the §15 webhook secret through both config sources —

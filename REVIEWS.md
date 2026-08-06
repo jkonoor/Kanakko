@@ -12,6 +12,65 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `811391f` — reclassify webhook-origin task to `[human]` (§14, task 42)
+
+**Scope:** Docs-only. `TASKS.md` reclassifies the open "Verify the webhook's
+origin" task to `[human]` and records a blocker: its first step is authoring a
+new `docs/DECISIONS.md` line (env key name, whether the secret is required in
+Phase 1) plus a `setWebhook` reconfiguration carrying a `secret_token`. No code,
+schema, or test changed.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **Diff is docs-only.** `git show HEAD --stat` → `TASKS.md | 19 +++---`, one
+  file. Nothing under `kanakko/`, `migrations/`, or `tests/` touched, so none of
+  the money / timezone / soft-delete / category silent-wrongness classes are in
+  scope.
+- **Suite still green.** `uv run pytest -q` → **57 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation). A docs-only change shouldn't move
+  this, and it didn't.
+- **The spec really is silent on webhook origin.** `grep -ni
+  'secret_token|secret-token|X-Telegram|webhook|origin|no auth'
+  docs/DECISIONS.md` plus reading §1 (line 11, "No auth" — user-facing), §13
+  (lines 255–265, Mini App `initData`), §14 (lines 291–305, webhook-over-polling
+  only), and the deferred table (lines 320–345). No `secret_token`/origin
+  decision exists anywhere, and it is not on the deferred list. The commit's
+  central factual claim holds.
+- **The `[human]` classification is justified.** The queue's own convention
+  (TASKS.md lines 9–11): `[human]` = touches credentials, deployment, or an
+  external account. This task's first step is authoring a new DECISIONS decision
+  — `CLAUDE.md` forbids the loop from editing the spec — and its wiring requires
+  `setWebhook` with a secret (a credentials/deployment action). Both halves are
+  genuinely off-limits to the loop. Correctly left `- [ ]` (open), not ticked, so
+  this is a deliberate skip, not a false tick.
+- **The safety gate is sound.** Confirmed the current `/webhook`
+  (`kanakko/app.py:69–91`) only classifies via `dispatch()` and `log.info`s — it
+  writes **no rows** (verified by reading the handler and `grep -rn
+  'pending_transactions|INSERT INTO pending' kanakko/` → no matches; the
+  confirm-card and Handle-Confirm tasks are unimplemented). So "a forged update
+  can't forge anything yet" is true today, and gating origin auth ahead of the
+  first ledger write (Handle Confirm) is the right, conservative call.
+
+### Advisory (non-blocking)
+
+- **`TASKS.md:53` — "render confirm card writes no rows" is a claim about an
+  unimplemented task, not a verified fact.** In the intended flow (parse → store
+  a `pending_transactions` row → render the card), the pending row is created
+  *before* the card is shown — and lines 56/64 ("clear the pending row",
+  "update the pending row") confirm a pending row is expected to exist by then.
+  If whoever implements the confirm-card task persists the pending row there,
+  then a forged update could write `pending_transactions` rows before origin auth
+  lands. This is low-consequence — `pending_transactions` is a staging table, not
+  the `transactions` ledger, and the material forgery risk (a real transaction)
+  is still the Handle-Confirm write the gate correctly targets — but the
+  implementer of the confirm-card task should confirm whether it persists a
+  pending row and, if so, treat that as the true earliest write point rather than
+  trusting the "writes no rows" phrasing. No change required to this commit.
+
+---
+
 ## 2026-08-06 — `4402e63` — `/webhook` endpoint + update dispatch (§14, task 41)
 
 **Scope:** `kanakko/app.py` gains `TextMessage`/`ButtonPress` frozen dataclasses,

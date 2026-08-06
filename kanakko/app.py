@@ -8,8 +8,14 @@ import psycopg
 from fastapi import FastAPI, HTTPException, Request
 
 from kanakko import __version__
-from kanakko.confirm import CONFIRM, confirm_card
-from kanakko.db import confirm_pending, connect, get_or_create_user, save_pending
+from kanakko.confirm import CANCEL, CONFIRM, confirm_card
+from kanakko.db import (
+    cancel_pending,
+    confirm_pending,
+    connect,
+    get_or_create_user,
+    save_pending,
+)
 from kanakko.parse import parse_message
 from kanakko.tg import answer_callback_query, send_message
 
@@ -129,6 +135,25 @@ def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     return txn_id
 
 
+def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
+    """Discard the pending transaction the Cancel tap carries, then acknowledge (§5).
+
+    The tap carries the confirm card's message id; `cancel_pending` scopes the
+    delete to this user (§1) so one user's Cancel can't discard another's
+    identically-numbered card. It returns `None` on a redelivered tap (the row
+    is already gone) — either way we answer the callback query so Telegram
+    clears the spinner. Nothing is written to the ledger. Does not commit — the
+    caller owns the transaction. Returns the discarded `pending_id`, or `None`
+    when there was nothing to cancel.
+    """
+    user_id = get_or_create_user(conn, press.chat_id)
+    pending_id = cancel_pending(conn, user_id, press.message_id)
+    answer_callback_query(
+        press.callback_query_id, "Discarded ❌" if pending_id else "Already gone"
+    )
+    return pending_id
+
+
 @app.post("/webhook")
 async def webhook(request: Request) -> dict[str, bool]:
     """Receive a Telegram update and route it (§14).
@@ -157,4 +182,7 @@ async def webhook(request: Request) -> dict[str, bool]:
     elif isinstance(action, ButtonPress) and action.data == CONFIRM:
         with connect() as conn:
             handle_confirm(conn, action)
+    elif isinstance(action, ButtonPress) and action.data == CANCEL:
+        with connect() as conn:
+            handle_cancel(conn, action)
     return {"ok": True}

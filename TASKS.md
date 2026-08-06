@@ -68,7 +68,7 @@ the plan's order and it matters.
       opens the DB connection, commits, and connects the pieces in the endpoint.
       A handler exception is left to 500 so Telegram redelivers a transiently
       failed transaction; only CONFIRM routes here — Cancel is the next task.
-- [ ] Handle Cancel — discard the pending row, acknowledge
+- [x] Handle Cancel — discard the pending row, acknowledge
 - [ ] Reject messages with no parseable amount with a rephrase prompt, storing nothing
 - [ ] Show category buttons instead of the confirm card when `category` came back null
 

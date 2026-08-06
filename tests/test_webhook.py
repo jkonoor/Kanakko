@@ -256,18 +256,19 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     conn.rollback()
 
 
-def test_webhook_routes_confirm_but_not_cancel(monkeypatch):
-    """The endpoint opens a connection and calls handle_confirm only for CONFIRM.
+def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
+    """CONFIRM routes to handle_confirm, CANCEL to handle_cancel — never crossed.
 
-    A CANCEL tap (task 65) must not reach handle_confirm here, and a connection
-    is opened only when there is something to handle — so an ignored update
-    touches no DB. `connect` and the handlers are stubbed; no Postgres.
+    Each button tap opens exactly one connection; an ignored update opens none.
+    Routing CANCEL to handle_confirm would corrupt the ledger, so the split is
+    asserted both ways. `connect` and the handlers are stubbed; no Postgres.
     """
     _set_secret(monkeypatch)
     opened = []
     monkeypatch.setattr(app_module, "connect", lambda: opened.append(True) or _FakeConn())
-    confirmed, texted = [], []
+    confirmed, cancelled, texted = [], [], []
     monkeypatch.setattr(app_module, "handle_confirm", lambda conn, press: confirmed.append(press))
+    monkeypatch.setattr(app_module, "handle_cancel", lambda conn, press: cancelled.append(press))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
 
     def press(data):
@@ -280,12 +281,80 @@ def test_webhook_routes_confirm_but_not_cancel(monkeypatch):
         }
 
     client.post("/webhook", json=press(CONFIRM), headers=AUTH)
-    assert len(confirmed) == 1 and len(opened) == 1
+    assert len(confirmed) == 1 and len(cancelled) == 0 and len(opened) == 1
 
     client.post("/webhook", json=press(CANCEL), headers=AUTH)
     assert len(confirmed) == 1  # CANCEL did not route to the Confirm handler
-    assert len(opened) == 1  # and opened no connection
+    assert len(cancelled) == 1  # it routed to the Cancel handler
+    assert len(opened) == 2  # and opened its own connection
 
     client.post("/webhook", json={"channel_post": {"text": "x"}}, headers=AUTH)
-    assert len(opened) == 1  # an ignored update opens nothing
+    assert len(opened) == 2  # an ignored update opens nothing
     assert texted == []
+
+
+def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypatch):
+    """A Cancel tap deletes its pending row, stores nothing, and answers the tap (§5).
+
+    Drives the real `cancel_pending` against Postgres; only the Telegram ack is
+    stubbed. Asserts the pending row is gone and no ledger row was written.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    acked = {}
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+
+    pending_id = app_module.handle_cancel(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
+    )
+    assert isinstance(pending_id, int)
+    assert acked == {"cbq": "cbq1", "text": "Discarded ❌"}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pending_transactions WHERE user_id = %s", (user_id,)
+        )
+        (pending_count,) = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        (ledger_count,) = cur.fetchone()
+    assert pending_count == 0  # the pending row is gone
+    assert ledger_count == 0  # §5: Cancel writes nothing to the ledger
+    conn.rollback()
+
+
+def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
+    """Telegram redelivers taps; a second Cancel must still ack, not error (§5)."""
+    migrate(conn)
+    _seed_pending(conn, chat_id=12345, card_message_id=909)
+    acks = []
+    monkeypatch.setattr(
+        app_module, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+    )
+    press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
+
+    first = app_module.handle_cancel(conn, press)
+    second = app_module.handle_cancel(conn, press)
+    assert isinstance(first, int)
+    assert second is None  # nothing left to cancel
+    assert acks == ["Discarded ❌", "Already gone"]  # spinner cleared both times
+    conn.rollback()
+
+
+def test_cancel_is_scoped_to_the_user(conn):
+    """A user's Cancel can't discard another user's identically-numbered card (§1)."""
+    migrate(conn)
+    a_user, _ = _seed_pending(conn, chat_id=111, card_message_id=555, amount="100.00")
+    b_user, _ = _seed_pending(conn, chat_id=222, card_message_id=555, amount="999.99")
+
+    cancelled = app_module.cancel_pending(conn, a_user, 555)
+    assert cancelled is not None
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pending_transactions WHERE user_id = %s", (b_user,))
+        (b_remaining,) = cur.fetchone()
+    assert b_remaining == 1  # B's pending card is untouched
+    conn.rollback()

@@ -108,3 +108,25 @@ def confirm_pending(
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))
     return txn_id
+
+
+def cancel_pending(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int
+) -> int | None:
+    """Discard the user's pending row for `telegram_message_id`, storing nothing (§5).
+
+    Scoped by `user_id` for the same reason as `confirm_pending` — message ids
+    repeat per chat, so a Cancel keyed on the id alone could delete another
+    user's pending card. Returns the deleted `pending_id`, or `None` when there
+    is nothing to cancel (a redelivered tap Telegram already got a 200 for), so
+    the handler can tell a fresh cancel from a repeat. Does not commit — the
+    caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s RETURNING pending_id",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None

@@ -12,6 +12,87 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-06 — `a22a437` — add `kanakko/db.py`, confirm-flow persistence (§1, §6, §9, prereq of task 56)
+
+**Scope:** New `kanakko/db.py` with `connect()`, `save_pending()`, and
+`confirm_pending()` — the DB half of task 56 (confirm → write to `transactions`,
+clear the pending row), carved off ahead of the not-yet-built message handler and
+Telegram-send client. New `tests/test_db.py` (3 checks against a real Postgres),
+the `conn` fixture moved to `tests/conftest.py` (one definition, shared with
+`test_migrate`). `TASKS.md`: db.py ticked, task 56 left open with remaining work
+recorded.
+
+**Status: ⚠️ CHANGES REQUESTED** — one latent cross-tenant defect in
+`confirm_pending`; everything else is sound and the money guard bites.
+
+### What I checked
+
+- **Suite green.** `uv run pytest -q` → **64 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation; was 61). The three new db tests ran
+  against a real throwaway Postgres, not a mock.
+- **§9 money guard verified live, not trusted.** `Transaction.model_dump(mode="json")`
+  serializes `amount` to the string `'1234.56'` (confirmed by running it), and
+  feeding a JSON *number* (`1234.56` float) back through `Transaction.model_validate`
+  raises `ValidationError` (confirmed). So a float in the stored JSON is refused at
+  the §9 door on the way back in, never rounded into the ledger. The round-trip test
+  asserts the amount returns as exact `Decimal("1234.56")`.
+- **§6 respected.** The verification read in `test_db.py:48` goes through
+  `active_transactions`, not `transactions`. `confirm_pending`'s own `SELECT` is on
+  `pending_transactions` (unfiltered by design — pending rows have no `deleted_at`),
+  so §6 doesn't apply there.
+- **Atomicity is real.** read → insert → delete run inside one
+  `conn.transaction()` (`db.py:59`), so a crash can't store a txn while leaving its
+  pending row live, nor clear the pending row with nothing stored.
+- **Idempotency holds within a user.** `test_confirm_is_idempotent_on_redelivery`
+  confirms a second tap returns `None` and the ledger still holds one row. Correct
+  for the current single-user deployment (per-chat message ids don't repeat).
+- **Column mapping correct.** `txn.date` → `occurred_on`, `type`/`category`/`note`
+  pass through; `created_at`/`deleted_at` take their defaults (now / NULL).
+- **No new dependency, no ORM, no float.** Plain psycopg + `Jsonb`. `connect()`
+  fails closed when `DATABASE_URL` is unset.
+- **Fixture move is a clean dedup.** `conftest.py`'s `conn` is the same
+  socket-only, `fsync=off` throwaway cluster `test_migrate` used; `test_migrate`
+  now imports it implicitly and still passes.
+
+### Finding 1 (blocking) — `confirm_pending` keys on `telegram_message_id` alone, single-tenant by accident (§1)
+
+`kanakko/db.py:49,60-63` — `confirm_pending(conn, telegram_message_id)` takes no
+`user_id` and selects `WHERE telegram_message_id = %s ORDER BY created_at DESC
+LIMIT 1`. Telegram message ids are unique *per chat*, not globally — every user's
+chat reuses the same small integers. `save_pending` correctly stores `user_id`;
+`confirm_pending` throws that scoping away.
+
+**Failure scenario (with a second user, which §1 says to build for now):** User A
+and User B each have a live pending confirm card that happened to land on message
+id `555`. B taps Confirm on *their* card. `confirm_pending(conn, 555)` selects the
+globally-most-recent pending row for `555` — A's — and writes **A's** transaction
+to A's ledger, deleting A's pending row. B's own row stays live and B's tap wrote
+nothing of theirs. A wrong-owner write plus a broken idempotency guarantee, and it
+raises nothing.
+
+This is exactly the §1 anti-pattern ("never single-tenant by accident"): the whole
+reason every table carries `user_id` from day one is so the multi-user change stays
+small and no query bakes in a single-tenant assumption. This one does, and it's the
+foundation the confirm handler (task 56) will call. It does **not** bite today's
+single-user, constant-`user_id` deployment — flagging it now because the fix is one
+parameter and one clause, and it gets more expensive once the handler is wired.
+
+**Suggested fix:** give `confirm_pending` a `user_id` parameter (the handler has it
+from the callback query) and add `AND user_id = %s` to the `SELECT`, matching
+`save_pending`'s scoping. `test_confirm_is_idempotent_on_redelivery` should grow a
+sibling: a second user with the same message id must not confirm the first user's row.
+
+### Notes (non-blocking)
+
+- **Multiple pending rows per `(user, message_id)` are silently tolerated.** The
+  `ORDER BY … LIMIT 1` means if `save_pending` were ever called twice for the same
+  card, `confirm_pending` confirms the newest and orphans the rest. Not reachable
+  today (one card → one pending row), but a `UNIQUE (user_id, telegram_message_id)`
+  on `pending_transactions` would make the key a real key rather than a convention.
+  Migration-only; note for whoever wires task 56, not required now.
+
+---
+
 ## 2026-08-06 — `2c6f27c` — render the confirm card (§4, §5, task 55)
 
 **Scope:** New `kanakko/confirm.py` with `confirm_card(txn)` — a pure renderer

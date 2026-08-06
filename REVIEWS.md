@@ -14,6 +14,25 @@ returned, not what they were assumed to return.
 
 ## 2026-08-06 — `131dbe5` — guard that every production read goes through `active_transactions` (§6, task 80)
 
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — both
+guard-coverage gaps closed in the follow-up commit on `ralph/phase-2`.
+
+> **RESOLVED.** The guard no longer regex-strips source. It parses each module
+> with `ast` and scans the value of every string literal *except* docstrings
+> (`sql_literals`), so triple-quoted SQL — the idiomatic multi-line query form
+> that the old `re.sub(r'""".*?"""', ...)` deleted wholesale (finding 1) — now
+> reaches the scan; comments are excluded for free because they aren't string
+> nodes. The match widened from `\bfrom\s+transactions\b` to
+> `\b(from|join)\s+transactions\b` so a `... JOIN transactions t ...` that pulls
+> soft-deleted rows into the row set (finding 2) reddens too. Verified both:
+> injecting a triple-quoted `SELECT ... FROM transactions` **and** a
+> `FROM active_transactions a JOIN transactions t` into `db.py` each fail the
+> guard; removing them greens it. `uv run pytest -q` → **101 passed**.
+
+---
+
+## 2026-08-06 — `131dbe5` (original) — guard that every production read goes through `active_transactions` (§6, task 80)
+
 **Status: ⚠️ CHANGES REQUESTED** — the invariant genuinely holds today and the
 guard reddens when the *current* read is repointed, but the guard silently
 misses the two most likely ways the bypass gets reintroduced. This is the

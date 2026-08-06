@@ -8,28 +8,44 @@ base table (`INSERT INTO transactions`, `UPDATE transactions SET deleted_at`)
 are correct and don't match — a view can't own the soft-delete write.
 """
 
+import ast
 import re
 from pathlib import Path
 
 KANAKKO = Path(__file__).parent.parent / "kanakko"
 
+# `from`/`join` because both read rows: `FROM active_transactions a JOIN
+# transactions t` pulls soft-deleted `t` rows into the row set just as a bare
+# `FROM transactions` does. `\btransactions\b` won't match `active_transactions`
+# or `pending_transactions` — the underscore is a word char, so there's no
+# boundary before `transactions`, and only the bare base ledger table trips it.
+BYPASS = re.compile(r"\b(from|join)\s+transactions\b", re.I)
 
-def sql_only(source: str) -> str:
-    """Source with docstrings and `#` comments stripped, keeping the SQL strings.
 
-    Queries live in ordinary `"..."` string literals; the prose that discusses
-    `transactions` (e.g. "reading `transactions` directly would...") lives in
-    triple-quoted docstrings and `#` comments. Dropping those keeps the guard on
-    real queries and off the prose that explains why we avoid them.
+def sql_literals(source: str):
+    """(value, lineno) for every string literal that isn't a docstring.
+
+    SQL lives in ordinary string literals — single-line `"..."` or multi-line
+    `\"\"\"...\"\"\"`; the prose that discusses `transactions` lives in
+    docstrings and `#` comments. Parsing with `ast` scans every real string
+    (including triple-quoted SQL, the idiomatic way to write a multi-line
+    query) while skipping the docstrings that only explain the invariant.
+    Comments aren't string nodes, so they're excluded for free.
     """
-    source = re.sub(r'""".*?"""', "", source, flags=re.S)
-    source = re.sub(r"'''.*?'''", "", source, flags=re.S)
-    source = re.sub(r"#[^\n]*", "", source)
-    return source
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            yield node.value, node.lineno
 
 
 def test_no_production_read_bypasses_active_transactions():
-    r"""No `FROM transactions` in production — the read must go through the view.
+    r"""No `FROM`/`JOIN transactions` in production — reads go through the view.
 
     `\btransactions\b` does not match `active_transactions`/`pending_transactions`
     (underscore is a word char, so there's no boundary before `transactions`), so
@@ -37,10 +53,9 @@ def test_no_production_read_bypasses_active_transactions():
     """
     offenders = []
     for module in sorted(KANAKKO.glob("*.py")):
-        sql = sql_only(module.read_text())
-        for match in re.finditer(r"\bfrom\s+transactions\b", sql, re.I):
-            line = sql.count("\n", 0, match.start()) + 1
-            offenders.append(f"{module.name}:{line}")
+        for value, lineno in sql_literals(module.read_text()):
+            if BYPASS.search(value):
+                offenders.append(f"{module.name}:{lineno}")
     assert not offenders, (
         "reads must go through active_transactions, not transactions: "
         + ", ".join(offenders)

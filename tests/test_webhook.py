@@ -472,6 +472,50 @@ def test_handle_undo_with_nothing_to_undo_replies_and_stores_nothing(conn, monke
     conn.rollback()
 
 
+def test_a_redelivered_undo_does_not_soft_delete_a_second_row(conn, monkeypatch):
+    """The same `/undo`, redelivered, must remove exactly one transaction (§14, §6).
+
+    Telegram redelivers any update it did not answer 2xx for, and `/undo` has no
+    per-message anchor (unlike Confirm/Cancel), so without the `update_id` dedup a
+    redelivery would soft-delete a *second* real row and silently drop it from
+    every total. Two confirmed rows, then the identical `/undo` update POSTed
+    twice: exactly one must survive in `active_transactions`, not zero. Drives the
+    real webhook and `undo_last` against Postgres; only the Telegram send is
+    stubbed. Reverting the webhook's `claim_update` guard reddens this
+    (`assert 1 == 0` — both rows gone).
+    """
+    migrate(conn)
+    uid, _ = _seed_pending(conn, chat_id=555, card_message_id=11, amount="250.00")
+    app_module.confirm_pending(conn, uid, 11)
+    _seed_pending(conn, chat_id=555, card_message_id=12, amount="100.00")
+    app_module.confirm_pending(conn, uid, 12)
+
+    monkeypatch.setattr(app_module, "send_message", lambda *a, **k: None)
+    # connect() yields the shared test connection; __exit__ must not close it, so
+    # the first delivery's claim is visible to the redelivery on the same session.
+    class _Reuse:
+        def __enter__(self):
+            return conn
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse())
+    _set_secret(monkeypatch)
+
+    update = {
+        "update_id": 4242,
+        "message": {"message_id": 7, "chat": {"id": 555}, "text": "/undo"},
+    }
+    client.post("/webhook", json=update, headers=AUTH)  # first delivery
+    client.post("/webhook", json=update, headers=AUTH)  # redelivery, same update_id
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE user_id = %s", (uid,))
+        assert cur.fetchone() == (1,)  # one undone, one preserved — not both
+    conn.rollback()
+
+
 def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypatch):
     """A Cancel tap deletes its pending row, stores nothing, and answers the tap (§5).
 

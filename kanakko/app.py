@@ -13,6 +13,7 @@ from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import CANCEL, CONFIRM, category_prompt, confirm_card
 from kanakko.db import (
     cancel_pending,
+    claim_update,
     confirm_pending,
     connect,
     get_or_create_user,
@@ -249,6 +250,12 @@ async def webhook(request: Request) -> dict[str, bool]:
     become a growing retry loop. But first the origin is verified (§15): a
     request without Telegram's `secret_token` gets a 403 and its body is never
     read, so a forged POST cannot reach `dispatch`.
+
+    A redelivery carries the same `update_id`; `claim_update` records it in the
+    handler's own transaction and returns False on a repeat, so the handler runs
+    at most once per update. That is what keeps `/undo` from soft-deleting a
+    *second* real transaction on a redelivery — it has no per-message anchor the
+    way Confirm/Cancel do — and hardens every other handler for free.
     """
     if not _origin_is_verified(request):
         raise HTTPException(status_code=403)
@@ -257,24 +264,30 @@ async def webhook(request: Request) -> dict[str, bool]:
         update = await request.json()
     except Exception:
         return {"ok": True}
+    if not isinstance(update, dict):
+        return {"ok": True}
 
-    action = dispatch(update if isinstance(update, dict) else {})
-    # One connection per handled update, committed on block exit; a redelivered
-    # or ignored update opens nothing. Confirm is idempotent (confirm_pending
-    # returns None on redelivery), so answering 200 after the commit is safe.
-    if isinstance(action, TextMessage):
-        with connect() as conn:
+    action = dispatch(update)
+    if action is None:
+        return {"ok": True}
+
+    # One connection per handled update, committed on block exit. The claim and
+    # the handler's writes share that transaction, so a redelivery that arrives
+    # before the first commit blocks on the id and then finds it taken; a handler
+    # that 500s rolls the claim back and the redelivery legitimately re-runs.
+    with connect() as conn:
+        update_id = update.get("update_id")
+        if isinstance(update_id, int) and not claim_update(conn, update_id):
+            return {"ok": True}  # a prior delivery of this update was handled
+        if isinstance(action, TextMessage):
             if _is_undo(action.text):
                 handle_undo(conn, action)
             else:
                 handle_text(conn, action)
-    elif isinstance(action, ButtonPress) and action.data == CONFIRM:
-        with connect() as conn:
+        elif action.data == CONFIRM:
             handle_confirm(conn, action)
-    elif isinstance(action, ButtonPress) and action.data == CANCEL:
-        with connect() as conn:
+        elif action.data == CANCEL:
             handle_cancel(conn, action)
-    elif isinstance(action, ButtonPress) and action.data.startswith(CATEGORY_PREFIX):
-        with connect() as conn:
+        elif action.data.startswith(CATEGORY_PREFIX):
             handle_category(conn, action)
     return {"ok": True}

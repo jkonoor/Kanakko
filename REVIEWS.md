@@ -14,10 +14,27 @@ returned, not what they were assumed to return.
 
 ## 2026-08-06 — `b9acac9` — add `/undo`: soft-delete the last confirmed transaction (§5, §6, task 79)
 
-**Status: ⚠️ CHANGES REQUESTED** — one open finding on the money path: a
-redelivered `/undo` update soft-deletes a *second* real transaction, silently
-dropping it from the user's totals. The rest of the commit is correct and its
-guards genuinely guard.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one open
+finding on the money path: a redelivered `/undo` update soft-deletes a *second*
+real transaction, silently dropping it from the user's totals. The rest of the
+commit is correct and its guards genuinely guard.
+
+> **RESOLVED** in the follow-up commit on `ralph/phase-2`. Root-caused at the
+> webhook, not per-handler: a redelivery carries the same Telegram `update_id`,
+> so the webhook now `claim_update`s that id in the handler's own transaction
+> and skips the handler when it returns False. The claim and the handler's
+> writes share one transaction, so they commit together and roll back together —
+> a handler that 500s legitimately re-runs on the redelivery, but a redelivery of
+> a *committed* update is a no-op. This fixes `/undo` (which had no per-message
+> anchor the way Confirm/Cancel do) and hardens every other handler for free
+> (§14). New migration `002_processed_updates.sql` (a `processed_updates`
+> idempotency ledger), new `db.claim_update`, webhook consolidated to one
+> connection per update. New guard `test_a_redelivered_undo_does_not_soft_delete_a_second_row`
+> seeds two confirmed rows, POSTs the identical `/undo` update twice through the
+> real webhook against Postgres, and asserts exactly one survives in
+> `active_transactions` — reverting the webhook's `claim_update` guard reddens it
+> (`assert 1 == 0`, both rows gone) while the routing tests (no `update_id`) stay
+> green. `uv run pytest -q` → **100 passed** (was 99).
 
 **Scope:** New `db.undo_last` sets `deleted_at` on the user's newest live row
 (chosen from `active_transactions`, scoped by `user_id`) and returns its fields;

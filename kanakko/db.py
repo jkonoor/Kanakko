@@ -179,6 +179,28 @@ def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
     }
 
 
+def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
+    """Record `update_id` as processed; True the first time, False on a repeat (§14).
+
+    Telegram redelivers any update it did not answer 2xx for, so the webhook calls
+    this before running a handler and skips the handler when it returns False —
+    the one place that makes every handler idempotent against redelivery. It
+    matters most for `/undo`, which soft-deletes "the newest live row" with no
+    per-message anchor (Confirm/Cancel key on the card's message id): a redelivery
+    would otherwise soft-delete a *second* real transaction and drop it from every
+    total. The INSERT runs in the caller's transaction, so the claim commits with
+    the handler's writes and rolls back with them — a handler that 500s is
+    retried. Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO processed_updates (update_id) VALUES (%s)"
+            " ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
+            (update_id,),
+        )
+        return cur.fetchone() is not None
+
+
 def cancel_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int
 ) -> int | None:

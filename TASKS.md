@@ -329,7 +329,7 @@ row, because there is no `txn_id` to hang one on.
       the summary. Rotate to the last N folders, N from env. The check: a failed
       parse leaves a file whose *name* identifies the failure, and the rotation
       actually deletes — a rotation that never fires is the bug that fills a disk.
-- [ ] Add `LOG_DIR`, `TRACE_MODE` and `TRACE_KEEP` to `.env.example` and to
+- [x] Add `LOG_DIR`, `TRACE_MODE` and `TRACE_KEEP` to `.env.example` and to
       compose's shared app env, alongside the other keys. **`.env.example` carries
       keys with empty values** (CLAUDE.md) and `tests/test_compose.py` enforces
       both that and the rule that every documented key is consumed by a service —

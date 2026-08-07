@@ -238,10 +238,10 @@ def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkey
     conn.rollback()
 
 
-def _http_error(status_code):
+def _http_error(status_code, body=""):
     """An `httpx.HTTPStatusError` carrying `status_code`, as `parse_message` raises."""
     request = httpx.Request("POST", "https://openrouter.ai")
-    response = httpx.Response(status_code, request=request)
+    response = httpx.Response(status_code, request=request, text=body)
     return httpx.HTTPStatusError("boom", request=request, response=response)
 
 
@@ -301,6 +301,39 @@ def test_handle_text_lets_a_5xx_parse_failure_propagate(conn, monkeypatch):
             conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on lunch")
         )
     assert sent == []  # 5xx redelivers; no user-facing message on the transient path
+    conn.rollback()
+
+
+def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
+    conn, monkeypatch, caplog
+):
+    """An upstream parse failure is logged at WARNING with status + body (§6, task 2).
+
+    The 402 outage was invisible in the container log; the next occurrence must be
+    diagnosable without reconstructing the request. Assert the status code and the
+    provider body reach the log, and that the API key — which rides in the request
+    headers, never the body — does not.
+    """
+    migrate(conn)
+    body = "Insufficient credits. Add more at openrouter.ai/credits"
+    monkeypatch.setattr(
+        app_module, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402, body))
+    )
+    monkeypatch.setattr(
+        app_module, "send_message", lambda *a, **k: {"result": {"message_id": 1}}
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret-key-value")
+
+    with caplog.at_level("WARNING", logger="kanakko.app"):
+        app_module.handle_text(
+            conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on lunch")
+        )
+
+    (record,) = [r for r in caplog.records if r.levelname == "WARNING"]
+    line = record.getMessage()
+    assert "402" in line
+    assert body in line
+    assert "sk-secret-key-value" not in line
     conn.rollback()
 
 

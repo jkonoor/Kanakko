@@ -159,7 +159,7 @@ OpenRouter credits, then a 400 for the type-array schema, fixed in `f1320a1`).
       sent message and the exception propagating. Assert both directions — a test
       that only covers the 4xx branch would pass if every error were swallowed,
       which is the more dangerous bug.
-- [ ] Log the upstream failure at `WARNING` with the status code and provider
+- [x] Log the upstream failure at `WARNING` with the status code and provider
       body, so the next occurrence is diagnosable from the container log rather
       than by reconstructing the request by hand. `configure_logging` (task 84)
       already makes this visible; nothing currently logs it. Keep the API key out

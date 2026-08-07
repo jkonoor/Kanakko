@@ -300,7 +300,10 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     tell the user the parser is unreachable, store nothing, and return `None` so the
     webhook answers 200 and the retry loop stops. A **5xx** or network/timeout error
     is transient, so it propagates: the webhook 500s and Telegram's redelivery is the
-    recovery (mirrors the Handle Confirm contract). Store nothing either way.
+    recovery (mirrors the Handle Confirm contract). Store nothing either way. Either
+    upstream failure is logged at WARNING with the status and provider body so the
+    next occurrence is diagnosable from the container log (the API key rides in the
+    request headers, not the body, so it can't leak into the line).
 
     A null `category` means the model couldn't tell (§3): we show the category
     picker instead of a confirm card so the user names it in one tap. The pending
@@ -318,6 +321,13 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
         send_message(msg.chat_id, REPHRASE_PROMPT)
         return None
     except httpx.HTTPStatusError as exc:
+        # The API key rides in the request headers, not the response body, so
+        # logging status + body can't leak it (asserted in the check).
+        log.warning(
+            "parse upstream failure: status=%s body=%s",
+            exc.response.status_code,
+            exc.response.text,
+        )
         if not 400 <= exc.response.status_code < 500:
             raise  # 5xx is transient — let it 500 so Telegram redelivers
         send_message(msg.chat_id, PARSER_DOWN_PROMPT)

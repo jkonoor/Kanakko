@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+import httpx
 import psycopg
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
@@ -42,6 +43,7 @@ from kanakko.webapp import (
     current_month_ist,
     current_week_ist,
     dashboard_html,
+    previous_month_first,
     validate_init_data,
     user_id_from_init_data,
     SHELL_HTML,
@@ -120,11 +122,24 @@ def mini_app_data(request: Request) -> str:
         a_income, a_expenses, a_top = month_summary(
             conn, user_id, date.min, date.max
         )
+        # Previous-period expenses give each hero a baseline — a figure with none
+        # is a record, not an insight. Same generic query, shifted bounds: the week
+        # before (a plain 7-day step back) and the month before (its 1st, which for
+        # January is December of the prior year — see `previous_month_first`). Both
+        # derive from the *current* bounds, so no second clock read can disagree
+        # with them at a month/week rollover. All-time has no prior period.
+        prev_m_first = previous_month_first(first)
+        _, pw_expenses, _ = month_summary(
+            conn, user_id, w_first - timedelta(days=7), w_first
+        )
+        _, pm_expenses, _ = month_summary(conn, user_id, prev_m_first, first)
         recent = recent_transactions(conn, user_id)
     return dashboard_html(
         [
-            Period("week", "Week", "this week", w_income, w_expenses, w_top),
-            Period("month", "Month", first.strftime("%B %Y"), m_income, m_expenses, m_top),
+            Period("week", "Week", "this week", w_income, w_expenses, w_top,
+                   pw_expenses, "vs last week"),
+            Period("month", "Month", first.strftime("%B %Y"), m_income, m_expenses,
+                   m_top, pm_expenses, "vs last month"),
             Period("all", "All", "all time", a_income, a_expenses, a_top),
         ],
         recent,
@@ -272,6 +287,11 @@ REPHRASE_PROMPT = (
     'like "spent 500 on groceries" or "got 20000 salary".'
 )
 
+PARSER_DOWN_PROMPT = (
+    "I can't reach my parser right now — your message wasn't saved. "
+    "Please try again shortly."
+)
+
 
 def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """Parse a typed message and send its confirm card (§2, §4) — first half of
@@ -289,6 +309,16 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     500ing (which makes Telegram redeliver the same unparseable text forever) we
     ask the user to rephrase and store nothing. Returns `None` in that case.
 
+    A **4xx** from OpenRouter is permanent (§6): a bad key (401), exhausted credits
+    (402), a rejected schema (400) — no amount of Telegram redelivery fixes it. We
+    tell the user the parser is unreachable, store nothing, and return `None` so the
+    webhook answers 200 and the retry loop stops. A **5xx** or network/timeout error
+    is transient, so it propagates: the webhook 500s and Telegram's redelivery is the
+    recovery (mirrors the Handle Confirm contract). Store nothing either way. Either
+    upstream failure is logged at WARNING with the status and provider body so the
+    next occurrence is diagnosable from the container log (the API key rides in the
+    request headers, not the body, so it can't leak into the line).
+
     A null `category` means the model couldn't tell (§3): we show the category
     picker instead of a confirm card so the user names it in one tap. The pending
     row is still written (keyed by the sent card's id) so the category press can
@@ -303,6 +333,18 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
         txn = parse_message(msg.text)
     except ValidationError:
         send_message(msg.chat_id, REPHRASE_PROMPT)
+        return None
+    except httpx.HTTPStatusError as exc:
+        # The API key rides in the request headers, not the response body, so
+        # logging status + body can't leak it (asserted in the check).
+        log.warning(
+            "parse upstream failure: status=%s body=%s",
+            exc.response.status_code,
+            exc.response.text,
+        )
+        if not 400 <= exc.response.status_code < 500:
+            raise  # 5xx is transient — let it 500 so Telegram redelivers
+        send_message(msg.chat_id, PARSER_DOWN_PROMPT)
         return None
     render = category_prompt if txn.category is None else confirm_card
     text, keyboard = render(txn)

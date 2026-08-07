@@ -156,6 +156,45 @@ class Period:
     income: Decimal
     expenses: Decimal
     top: list[tuple[str, Decimal]]
+    # The same-length period before this one's expenses, for the hero's delta.
+    # `None` for a range with no prior period (all-time) — no baseline, no delta.
+    prev_expenses: Decimal | None = None
+    compare_label: str = ""  # "vs last month" / "vs last week"
+
+
+def previous_month_first(first_day: date) -> date:
+    """First day of the month *before* the one that starts on `first_day` (§10).
+
+    `first_day` is already an `Asia/Kolkata` month boundary (from
+    `current_month_ist`), so this is pure calendar arithmetic — no zone. It steps
+    back one day into the prior month and truncates to its 1st, never subtracts
+    from the month number: the previous month of **January is December of the
+    prior year**, and this is the case that catches a naive `month - 1`.
+    """
+    return (first_day - timedelta(days=1)).replace(day=1)
+
+
+def _delta(current: Decimal, previous: Decimal | None, label: str) -> str:
+    """The hero's period-over-period change: `▼ 40% vs last month`, or nothing.
+
+    A figure with no baseline is a record, not an insight, so each hero carries
+    how it compares to the same-length period before it. Direction rides the
+    arrow glyph *and* the label text, never colour alone (WCAG 1.4.1); the whole
+    line stays in hint ink, so expenses are not tinted (§13). A zero or absent
+    baseline has no defined percentage — division by zero is *not* "100%" — so a
+    first-ever period renders "no comparison yet" rather than a fabricated number.
+    `previous` is `None` for a range with no prior period (all-time). Arithmetic
+    is `Decimal` throughout; no float touches an amount (§9).
+    """
+    if previous is None:
+        return ""
+    if previous <= 0:
+        return '<p class="delta">no comparison yet</p>'
+    pct = round((current - previous) / previous * 100)  # Decimal — never float
+    if pct == 0:
+        return f'<p class="delta">about the same {html.escape(label)}</p>'
+    arrow = "▲" if pct > 0 else "▼"
+    return f'<p class="delta">{arrow} {abs(pct)}% {html.escape(label)}</p>'
 
 
 def _stat(label: str, amount: Decimal, positive: bool = False) -> str:
@@ -189,7 +228,8 @@ def _period_panel(period: Period, selected: bool) -> str:
         f'<section class="panel" data-period="{period.key}"{hidden}>'
         f'<p class="hero-label">Spent · {html.escape(period.label)}</p>'
         f'<p class="hero">{format_amount(period.expenses)}</p>'
-        '<div class="substats">'
+        + _delta(period.expenses, period.prev_expenses, period.compare_label)
+        + '<div class="substats">'
         + _stat("Balance", period.income - period.expenses)
         + _stat("Income", period.income, positive=True)
         + "</div>"
@@ -376,6 +416,9 @@ h2 {
    leading because it is a single line, not a paragraph. */
 .hero-label { font-size: 13px; color: var(--tg-theme-hint-color, #707579); margin: 20px 0 2px; }
 .hero { font-size: 40px; font-weight: 600; line-height: 1.1; margin: 0; }
+/* The period-over-period delta. Hint ink, not the income accent: direction is
+   carried by the arrow glyph and the label, never colour alone (WCAG 1.4.1). */
+.delta { font-size: 13px; color: var(--tg-theme-hint-color, #707579); margin: 6px 0 0; }
 .substats { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
 .stat { font-size: 15px; }
 /* Segmented control: 44px tall so the tap target clears WCAG 2.5.8's 24px

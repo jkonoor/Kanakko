@@ -12,6 +12,184 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `d561153` — period-over-period delta on each dashboard hero (Phase 7)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: each period hero gains a same-length prior-period comparison line
+(`▼ 40% vs last month` / `vs last week`); all-time has no prior period and shows
+nothing. New `previous_month_first` helper, `_delta` renderer, two extra
+`month_summary` queries in `/app/data`.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **183 passed**. `uv run pytest tests/test_webapp.py -q`
+  → **50 passed**.
+- **Guard actually reddens.** Temporarily deleted the
+  `+ _delta(period.expenses, …)` line from `_period_panel` (reverting the fix)
+  and ran the delta tests: **3 failed** —
+  `test_hero_delta_says_no_comparison_against_a_zero_baseline`,
+  `test_hero_delta_shows_direction_and_magnitude`,
+  `test_dashboard_route_month_delta_needs_a_baseline`. Restored via
+  `git checkout`. The tests fail for the reason they exist.
+- **Exercised `_delta` and `previous_month_first` directly:**
+  - `_delta(300, 500)` → `▼ 40% vs last month`; `_delta(300, 200)` → `▲ 50%`;
+    `_delta(500, 300)` → `▲ 67%` (66.7 → 67).
+  - `_delta(500, 0)` → `no comparison yet` (no `%` — division-by-zero is not
+    fabricated as 100%); `_delta(500, None)` → `''` (all-time); equal figures →
+    `about the same`.
+  - `type(round((500-300)/300*100))` is `int` off `Decimal` operands — **no
+    float touches the amount** (§9). ✅
+  - `previous_month_first(2026-01-01)` → `2025-12-01` (January → December of the
+    prior year); `previous_month_first(2026-03-01)` → `2026-02-01` (correct
+    across February's short length). ✅
+
+### Spec / convention conformance
+
+- **Decimal throughout** — `pct` is `round()` of a `Decimal` expression; `abs()`
+  of an int. No `float`. (§9) ✅
+- **Reads via `active_transactions`** — both new queries route through
+  `month_summary`, which reads the view; soft-deleted rows stay out of the
+  baseline. (§6) ✅
+- **Boundaries in IST** — `previous_month_first` is pure calendar arithmetic on
+  a boundary `current_month_ist` already computed in `Asia/Kolkata`; the prev-week
+  bound is `w_first - 7d` off the IST Monday. Both derive from the *current*
+  bounds — no second `datetime.now()` that could disagree at a rollover
+  (`app.py:131-135`). (§10) ✅
+- **No new dependency, no charting lib, no state machine.** ✅
+- **Direction by glyph + label, never colour** — `.delta` stays in hint ink;
+  arrow + text carry the sign (WCAG 1.4.1). ✅
+- `html.escape` applied to the label before interpolation (constant strings
+  today, but escaped regardless). ✅
+
+### Notes (non-blocking, no action needed)
+
+- `round()` on `Decimal` uses banker's rounding (`ROUND_HALF_EVEN`), so e.g. a
+  2.5% change displays as `2%`. This is a display percentage, not a money path;
+  acceptable.
+- `TASKS.md` box ticked matches delivered work; the per-day week bar remains
+  correctly unticked.
+
+No blocking issues. `d561153` is **✅ DONE**.
+
+---
+
+## 2026-08-07 — `991c883` — log upstream parse failures at WARNING (Phase 6, task 2)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `handle_text`'s `except httpx.HTTPStatusError` handler now emits a
+`log.warning("parse upstream failure: status=%s body=%s", ...)` before the
+transient/permanent branch, so both the swallowed 4xx and the re-raised 5xx
+carry the provider status and body into the container log (§6, task 2). One new
+test; `_http_error` test helper gains an optional `body`; TASKS.md box ticked.
+
+### What I checked
+
+- **`git show HEAD`** — the diff is exactly the three files claimed
+  (`kanakko/app.py`, `tests/test_webhook.py`, `TASKS.md`), no drive-by changes.
+- **Placement.** The `log.warning` sits at `app.py:326`, *before* the
+  `if not 400 <= status < 500: raise` at `app.py:331`. So a 5xx is logged and
+  then re-raised, and a 4xx is logged and then swallowed — both branches log,
+  which is what the task asked for. The prior task's swallow/re-raise routing is
+  untouched.
+- **Full suite green.** `uv run pytest -q` → **178 passed, 1 warning**. The
+  lone warning is the pre-existing Starlette/httpx testclient deprecation, not
+  from this change.
+- **The guard fires for the reason it exists.** Reverted the fix in place
+  (`uv run python` to delete the `log.warning` block) and ran
+  `test_handle_text_logs_upstream_failure_at_warning_without_the_api_key`
+  → **1 failed**; restored with `git checkout` → **1 passed**. The test is a
+  real red, not a decorative one: without the log line, caplog has no WARNING
+  record and the `(record,) = [...]` unpack raises. The commit's reddened-by-revert
+  claim holds.
+- **No leak path.** The only interpolated values are `exc.response.status_code`
+  (an int) and `exc.response.text` (the provider body). The OpenRouter key
+  travels in the `Authorization` request header (`parse.py`), never the response
+  body, so it cannot reach this line. Nothing money/timezone/`active_transactions`/
+  category-related is touched — this is a pure logging addition.
+
+### Findings
+
+- **(minor, non-blocking) The "without the API key" assertion is close to
+  vacuous — it can't fail for the reason it exists.**
+  `tests/test_webhook.py:337` asserts `"sk-secret-key-value" not in line`, but
+  the key is only placed in the environment via `monkeypatch.setenv`; it is
+  never put into the `httpx.Request`/`Response` that `_http_error` builds, and
+  the log line only interpolates `status` + `body`. So the assertion would still
+  pass even if the log line were changed to dump `exc.request.headers` — the
+  stub request carries no `Authorization` header to leak. The real safety comes
+  from the code logging only body+status, which is fine; the *assertion* just
+  doesn't independently defend it. Not worth a change on its own (the log line is
+  fixed and correct), but if this guard is ever leaned on, give `_http_error` a
+  request built with a real `Authorization: Bearer sk-...` header and assert that
+  token is absent — then the guard would actually catch a headers-in-log
+  regression.
+
+Verdict: correct, minimal, and the new test genuinely reddens on revert. ✅ DONE.
+
+---
+
+## 2026-08-07 — `4c625d0` — warn the user when a parse fails permanently (Phase 6, task 1)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `handle_text` now catches `httpx.HTTPStatusError`. A **4xx** from
+OpenRouter (bad key/401, exhausted credits/402, rejected schema/400) is treated
+as permanent — send `PARSER_DOWN_PROMPT`, store nothing, return `None` so
+`/webhook` answers 200 and Telegram stops redelivering. A **5xx** (or
+network/timeout, which isn't an `HTTPStatusError` at all) re-raises so the
+webhook 500s and redelivery remains the recovery. Two new tests; TASKS.md box
+ticked.
+
+### What I checked
+
+- **The guard fires for real.** The whole change is worthless if `parse_message`
+  never raises `HTTPStatusError`. Confirmed `kanakko/parse.py:182` calls
+  `response.raise_for_status()` inside `call()`, and `parse_message`'s single
+  retry (`parse.py:196-199`) only catches `ValidationError` /
+  `json.JSONDecodeError`, so an `HTTPStatusError` propagates out unretried and
+  un-swallowed. The `except` in `app.py:320` can actually be reached.
+- **Boundary logic.** `if not 400 <= exc.response.status_code < 500: raise`
+  (`app.py:321`). 400–499 → warn + swallow; ≥500 → re-raise. `raise_for_status`
+  only raises on 4xx/5xx so 3xx never appears. Correct in both directions.
+- **Webhook routing.** `handle_text` returning `None` → the webhook falls
+  through to `return {"ok": True}` (200, `app.py:485`); a propagated exception
+  escapes the `with connect()` block → 500 (rolling back the `claim_update`, so
+  redelivery legitimately re-runs, `app.py:465-472`). Matches the documented
+  Handle-Confirm contract.
+- **Transient network/timeout path.** `httpx.TimeoutException`/`ConnectError`
+  are not subclasses of `HTTPStatusError`, so they aren't caught here → propagate
+  → 500. Consistent with the "5xx and network errors keep 500ing" requirement.
+- **No pre-parse writes.** Nothing is written before `parse_message`, so the 4xx
+  path genuinely stores nothing; the test asserts `pending_count == 0`.
+- **Full suite** — `uv run pytest -q` → **177 passed**. Webhook file alone → 26
+  passed.
+- **Both guards redden.** Temporarily rewrote the `except` to swallow *every*
+  `HTTPStatusError` (dropped the `raise`); `uv run pytest tests/test_webhook.py`
+  → **1 failed** (`test_handle_text_lets_a_5xx_parse_failure_propagate`:
+  "DID NOT RAISE HTTPStatusError"), the rest passed. Restored the file with
+  `git checkout`. This is the dangerous regression the task named — a
+  swallow-all that a 4xx-only test would have missed — and the 5xx test catches
+  it.
+
+### Findings
+
+None blocking.
+
+- **Minor / non-blocking (doc citation).** The commit headline and the new
+  `handle_text` docstring cite "(§6)", but `docs/DECISIONS.md` §6 is *Soft
+  delete* — the intended reference is TASKS.md **Phase 6** (Upstream failure
+  handling). The repo convention uses `§N` for DECISIONS sections, so the
+  citation is misleading to a future reader. No behavioural impact; the code
+  matches the Phase 6 task and the Handle-Confirm contract exactly.
+
+The change does what its task asked, the tests fail for the reasons they exist
+(verified by revert), and nothing on the money, timezone, soft-delete, or
+`initData` paths is touched.
+
+---
+
 ## 2026-08-06 — `1df19ba` — dashboard follows the Telegram light/dark theme (§13, task 102)
 
 **Status: ✅ DONE** — no blocking issues.

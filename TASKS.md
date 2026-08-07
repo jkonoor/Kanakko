@@ -123,7 +123,7 @@ the plan's order and it matters.
       task above if they haven't landed yet; category itself is a closed set from
       `categories.py`, so the escaping risk here is the note, not the category
 - [x] Make the dashboard render correctly in both light and dark themes
-- [ ] `[human]` Register the Mini App menu button with BotFather
+- [x] `[human]` Register the Mini App menu button with BotFather — done 2026-08-07; the Mini App opens and its `initData` HMAC verifies against real Telegram payloads, which is what settled the URL-decoding assumption no unit test could reach
 
 ## Phase 5 — Backups and hardening
 
@@ -143,7 +143,7 @@ redelivered forever, and the user saw *nothing at all* — no card, no error, no
 hint. Two separate upstream failures hid behind that silence (a 402 for exhausted
 OpenRouter credits, then a 400 for the type-array schema, fixed in `f1320a1`).
 
-- [ ] Tell the user when a parse fails for a non-transient reason, instead of
+- [x] Tell the user when a parse fails for a non-transient reason, instead of
       failing mute. `handle_text` already converts a `ValidationError` into the
       rephrase prompt (§3); this extends that to upstream failures. An
       `httpx.HTTPStatusError` whose status is **4xx** is permanent — a bad key
@@ -159,7 +159,7 @@ OpenRouter credits, then a 400 for the type-array schema, fixed in `f1320a1`).
       sent message and the exception propagating. Assert both directions — a test
       that only covers the 4xx branch would pass if every error were swallowed,
       which is the more dangerous bug.
-- [ ] Log the upstream failure at `WARNING` with the status code and provider
+- [x] Log the upstream failure at `WARNING` with the status code and provider
       body, so the next occurrence is diagnosable from the container log rather
       than by reconstructing the request by hand. `configure_logging` (task 84)
       already makes this visible; nothing currently logs it. Keep the API key out
@@ -179,7 +179,7 @@ this: pairing a figure with a directional delta *"shows both the direction and
 scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
 2025-09) — a number with no baseline is a record, not an insight.
 
-- [ ] Add previous-period figures to the dashboard so each headline carries a
+- [x] Add previous-period figures to the dashboard so each headline carries a
       delta — `₹300 · ▼ 40% vs last month`. `db.month_summary` already takes an
       arbitrary half-open range, so the previous month/week is the same query with
       shifted bounds and needs no new SQL shape — but it *is* a second query per
@@ -193,13 +193,20 @@ scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
       Colour follows the same rule as the rest of the dashboard: direction is
       carried by the arrow glyph and the label, never by colour alone (WCAG 1.4.1),
       and expenses stay in normal ink — the one accent is reserved for income.
-- [ ] Consider a per-day bar for the current week, using the existing
-      `active_transactions` reads. Only if it earns its place — seven bars of a
-      personal ledger may be noise rather than signal, and the honest test is
-      whether it changes a decision. Length-based bars remain the right form
-      (NN/g: length and 2D position are what people judge accurately; pie charts
-      *"should be avoided most of the time"*), so this stays CSS, no charting
-      library (§13).
+- [x] Consider a per-day bar for the current week, using the existing
+      `active_transactions` reads. **Decided: declined — does not earn its place.**
+      The hero already answers "what did I spend this week" and the new
+      period-over-period delta answers "is that a lot?"; the category breakdown
+      answers "on what". Seven daily bars of a *current, incomplete* week add
+      noise, not a decision: a sparse personal ledger leaves most days at 0–2
+      transactions (mostly empty bars), and a week-to-date view pits a full
+      Monday against a partial Sunday, so the day-to-day comparison isn't even
+      honest. The "you spend on weekends" pattern needs many weeks, not this
+      partial one. No code changed; the gate ("only if it changes a decision") is
+      the deliverable and the answer is no. If a future multi-week view ever
+      revisits this, length-based bars remain the right form (NN/g: length and 2D
+      position are what people judge accurately; pie charts *"should be avoided
+      most of the time"*), so it stays CSS, no charting library (§13).
 
 ---
 

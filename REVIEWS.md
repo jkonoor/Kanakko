@@ -12,6 +12,68 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `ab8eafc` — the §17 event-log seam (Phase 8, task 1)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `kanakko/eventlog.py` (`log_event` / `bind_sink` / `unbind_sink` /
+`ms_since` / `file_sink`, pinned `ok|error|noop`), the sink bound inside the
+existing `configure_logging()` on truthy `LOG_DIR`, and `update_id` / `source`
+added to both dispatch dataclasses (gap 1). No call sites, sinks-to-Postgres, or
+scrubber yet — those are the still-unchecked tasks and correctly out of scope.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **190 passed**, 1 unrelated Starlette/httpx deprecation
+  warning.
+- **The load-bearing guard actually reddens.** Temporarily replaced the
+  `try/except` in `log_event` with a bare `sink(record)` and ran
+  `tests/test_eventlog.py` → **1 failed** (`test_a_raising_sink_never_breaks_the
+  _caller`, `RuntimeError: sink is down` propagating). Restored; `git diff
+  --stat` clean. The "never raises" contract fails for the reason it exists —
+  this is the check the commit claimed and it holds.
+- **The `LOG_DIR` empty-string trap is real and tested.**
+  `test_configure_logging_binds_only_when_log_dir_is_set` asserts unbound for
+  both unset *and* present-but-empty (`""`), bound only for a real path. The
+  code reads `os.environ.get("LOG_DIR")` then `if log_dir:` — truthiness, not
+  `get(key, default)`, so compose's `:-` empty value slips through to unbound.
+  Matches §17 / CLAUDE.md's "assert the effect" bar.
+- **No JSONL leaked into the repo.** After the full run, `git status --short`
+  clean and `find . -name events.jsonl` (excl. `.venv`) empty. `grep -rn
+  LOG_DIR` confirms it is set nowhere in tests, `.env*`, or compose, so the sink
+  stays unbound under pytest as designed.
+- **Dataclass fields are additive.** `update_id: int | None = None` and
+  `source: str = "webhook"` are appended with defaults; all 16 construction
+  sites in `tests/test_webhook.py` are keyword-based, so positional construction
+  is unaffected. The two equality assertions now assert the correlation id is
+  captured (`update_id=4242/4243`) plus `action.source == "webhook"`.
+
+### Spec fit
+
+- No `float` anywhere; no money path touched this commit. `file_sink` uses
+  `json.dumps(record, default=str)` so the `Decimal` amounts later call sites
+  pass serialise as strings — the right seam for the money tasks that follow.
+- Statuses pinned to exactly `ok|error|noop` (§17), module named `eventlog.py`
+  not `logging.py`, seam is `bind_sink`/`unbind_sink`, correlation id is
+  `update_id`, origin field is `source` — all names match §17's pinned list.
+- Rotation is stdlib `RotatingFileHandler` on a dedicated `kanakko.events`
+  logger with `propagate=False` — no new dependency, JSON lines kept out of the
+  operational stderr handler (§17 storage).
+
+### Notes (not blocking, not findings)
+
+- `file_sink` reuses the process-wide `kanakko.events` logger and only adds a
+  handler `if not events.handlers`; a second `file_sink(other_dir)` in the same
+  process would silently keep the first path. In production `configure_logging`
+  is only ever called with one `LOG_DIR` per process, and the test fixture
+  clears the handler between tests, so this is a documented gotcha, not a bug in
+  this diff.
+- `dispatch` sets `update_id` but leans on the dataclass default for `source`
+  rather than setting it explicitly. Harmless — `dispatch` only ever handles
+  webhook updates — but worth a glance when the miniapp call sites land.
+
+---
+
 ## 2026-08-07 — `d561153` — period-over-period delta on each dashboard hero (Phase 7)
 
 **Status: ✅ DONE** — no blocking issues.

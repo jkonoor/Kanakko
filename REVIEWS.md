@@ -12,6 +12,87 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `762fb9a` — write the §17 audit trail inside the money transaction (Phase 8, task 6)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: adds `migrations/003_transaction_events.sql` and makes the four money
+functions (`confirm_pending`, `undo_last`, `soft_delete_transaction`,
+`set_transaction_category`) write one `transaction_events` audit row on the same
+cursor, inside the function's own `conn.transaction()` block. Each takes `source`
+and a nullable `update_id` as arguments; `set_transaction_category` reads the old
+category with a `SELECT` before its `UPDATE` (Postgres 16, no `RETURNING OLD.*`).
+`before`/`after` serialise through `json.dumps(default=str)` so the amount and
+date are canonical strings, never a float. Judged against §17 and TASKS.md task 6.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — the whole diff: `migrations/003_transaction_events.sql` (new
+  table + index), `db.py` (`_record_event` helper, four functions now wrap in
+  `conn.transaction()` and record an event), `handlers.py`/`app.py` (call sites
+  pass `source`/`update_id`), `tests/test_db.py` (4 new audit tests + seed-call
+  updates), `tests/test_webhook.py` (seed-call updates), `TASKS.md` (task 6 ticked).
+- `uv run pytest -q` → **201 passed**, 1 warning (pre-existing Starlette
+  testclient deprecation, unrelated).
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Reddened the audit guards myself.** Replaced `_record_event(...)` in
+  `confirm_pending` with `pass` and ran `-k "audit or atomic"` →
+  `test_confirm_writes_an_audit_row` and `test_undo_and_delete_write_audit_rows`
+  **FAILED** (2 failed, 1 passed). Restored (`git checkout`, tree clean). The
+  content guards fail for the reason they exist.
+- **Spec fit, verified against the code, not the message:**
+  - Columns match task 6 / §17: `txn_id`, `user_id`, `action`
+    (`CHECK IN (confirm|undo|delete|recategorise)`), `before`/`after` JSONB
+    (nullable), `source` (`CHECK IN (webhook|miniapp|cron)`, always present),
+    `update_id BIGINT` nullable, `created_at` default `now()`. Migration is
+    auto-discovered by `migrate.py`'s `glob("*.sql")`; FKs reference tables in 001.
+  - Money stays `Decimal`/string: `after["amount"] == "250.00"` in the test, and
+    the functions *return* the raw `Decimal` for the caller's log line — no float
+    anywhere. Reads for `undo`/`delete`/`recategorise` all go through
+    `active_transactions` (§6).
+  - All call sites updated — grep for the four function names shows no caller
+    missing `source=`; `msg.source`/`press.source` and `msg.update_id`/
+    `press.update_id` exist on the handler models (`handlers.py:56,72`), and the
+    two Mini App routes pass `source="miniapp", update_id=None` (§17 gap 2).
+
+### On the atomicity guard — checked and found adequate (not a finding)
+
+The one guard worth attacking is `test_the_ledger_row_and_its_audit_row_are_atomic`,
+whose docstring says it "reddens the moment either write is committed independently
+of the other." I tried to defeat it: **removing the inner `conn.transaction()`
+wrapper** from `undo_last` (the mechanism that is supposed to make db.py
+self-sufficient) left **all 46 db+webhook tests green**. So the test does *not*
+pin the inner wrapper.
+
+That is **not a defect**, because the task text itself calls it out
+(`TASKS.md:322-325`): *"Note what that check does not prove: it exercises today's
+call ordering, which is exactly why the write's location is specified rather than
+left to judgement."* The guarantee against the §16-reorders-the-calls regression
+is delivered by pinning the audit write's **location** (adjacent, inside db.py's
+`conn.transaction()`), which the shipped code does, not by the test. Under every
+current caller (`with connect() as conn: … <mutation>`) the money and audit
+statements share one connection-level transaction regardless, so removing the
+inner wrapper changes no production behaviour today — it only removes the
+future-proofing. The check asserts *both* rows absent (not one), as the task
+required. Adequate as specified.
+
+### Low-severity observation (non-blocking, loud failure — not silent wrongness)
+
+`set_transaction_category` (`kanakko/db.py:454-463`) unpacks the UPDATE's
+`RETURNING` with `tid, amount = cur.fetchone()` and does **not** guard for `None`,
+unlike its siblings (`confirm_pending`, `soft_delete_transaction`, `undo_last` all
+do `if row is None: return None`). The `SELECT` at the top proves the row is active
+*at SELECT time*, but the `UPDATE`'s subquery re-reads `active_transactions`. If the
+same user's Mini App fires a `/app/delete` and `/app/category` on the identical row
+near-simultaneously (separate connections, READ COMMITTED) and the delete commits
+between this transaction's `SELECT` and `UPDATE`, the subquery yields nothing, the
+UPDATE affects 0 rows, `fetchone()` returns `None`, and the unpack raises
+`TypeError` → HTTP 500 with a full rollback. No partial write, no money error, no
+silent total drift — it fails loud and clean, and the race is a narrow same-user
+double-tap. Worth a `if row is None: return None` for parity, but not blocking.
+
+---
+
 ## 2026-08-07 — `2d0eaca` — log the parse success side through the §17 seam (Phase 8, task 5)
 
 **Status: ✅ DONE** — no blocking issues.

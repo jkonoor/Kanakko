@@ -271,7 +271,7 @@ row, because there is no `txn_id` to hang one on.
       `get(key, default)` — the §2 compose trap. Also in this task, because it is
       the seam and not a call site: `update_id` and `source` onto both dataclasses
       (gap 1 above), and pin `ok` | `error` | `noop` as the only statuses (§17).
-- [ ] Add the scrubber and the never-log list (§17): redact key-shaped strings and
+- [x] Add the scrubber and the never-log list (§17): redact key-shaped strings and
       any base64 run over 500 characters, recursively through nested values. The
       check must pass a realistic payload — a bot token, an `sk-or-` key, a long
       base64 blob — and assert each is absent from the output *and* that the

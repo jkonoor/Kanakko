@@ -15,12 +15,50 @@ is wrapped and a broken sink is swallowed.
 
 import json
 import logging
+import re
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
 log = logging.getLogger(__name__)
+
+REDACTED = "[REDACTED]"
+
+# Field names that must never appear in a log, whatever their value (§17): the
+# raw `initData` string and the full LLM prompt. Their contents aren't
+# key-shaped, so the pattern scrubber below can't catch them — only the name
+# can. Exact match (case-insensitive) so a metric like `prompt_tokens` survives.
+NEVER_LOG = frozenset({"init_data", "initdata", "prompt", "prompts"})
+
+# Key-shaped strings a call site might leak by accident. Anchored to whole
+# tokens so ordinary fields (a note, an amount, a category) survive:
+#   - a Telegram bot token   123456789:AA…
+#   - an sk- / sk-or- API key
+#   - any base64 run over 500 chars — a payload, not an id
+_SECRET = re.compile(
+    r"\d{6,}:[A-Za-z0-9_-]{30,}"
+    r"|sk-[A-Za-z0-9-]{20,}"
+    r"|[A-Za-z0-9+/]{500,}={0,2}"
+)
+
+
+def scrub(value, key: str | None = None):
+    """Redact secrets from a log value, recursively through nested dicts/lists.
+
+    A backstop, not a policy (§17): call sites must not pass secrets in the
+    first place. Named fields on the never-log list are dropped whole; every
+    string is swept for key-shaped substrings and long base64 blobs.
+    """
+    if key is not None and key.lower() in NEVER_LOG:
+        return REDACTED
+    if isinstance(value, str):
+        return _SECRET.sub(REDACTED, value)
+    if isinstance(value, dict):
+        return {k: scrub(v, key=k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [scrub(v) for v in value]
+    return value
 
 # The only three statuses (§17). ok = it happened; noop = a redelivery or a tap
 # with nothing to do; error = the handler raised (logged once, in the webhook).
@@ -58,7 +96,7 @@ def log_event(event: str, *, status: str, **fields) -> None:
     sink = _sink
     if sink is None:
         return
-    record = {"event": event, "status": status, **fields}
+    record = {"event": event, "status": status, **scrub(fields)}
     try:
         sink(record)
     except Exception:  # a broken sink must never break a handler (§17)

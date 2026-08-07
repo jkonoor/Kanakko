@@ -75,6 +75,50 @@ def test_file_sink_writes_json_lines(tmp_path):
     }
 
 
+def test_scrub_redacts_secrets_but_keeps_the_rest():
+    # A realistic payload: a bot token, an sk-or- key, a long base64 blob, and
+    # the raw initData string — each absent from the output, everything else
+    # intact. A scrubber that redacted everything would fail the survival asserts.
+    bot_token = "8123456789:AAExampleTokenThatLooksRealEnough_0123456789"
+    or_key = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef"
+    blob = "A" * 600
+    record = {
+        "event": "parse.completed",
+        "status": "ok",
+        "user_id": 42,
+        "amount": "500.00",
+        "note": "lunch at the airport",
+        "headers": {"authorization": bot_token},
+        "keys": [or_key, "keep-me"],
+        "raw": blob,
+        "init_data": "user=%7B...%7D&hash=deadbeef",
+    }
+    out = eventlog.scrub(record)
+    dumped = json.dumps(out)
+
+    assert bot_token not in dumped
+    assert or_key not in dumped
+    assert blob not in dumped
+    assert out["init_data"] == eventlog.REDACTED
+    assert out["headers"]["authorization"] == eventlog.REDACTED
+
+    # Surrounding fields survive, at every depth.
+    assert out["amount"] == "500.00"
+    assert out["note"] == "lunch at the airport"
+    assert out["user_id"] == 42
+    assert "keep-me" in out["keys"]
+
+
+def test_log_event_scrubs_before_the_sink():
+    records = []
+    eventlog.bind_sink(records.append)
+    eventlog.log_event(
+        "parse.completed", status="ok", note="hi", prompt="the full LLM prompt"
+    )
+    assert records[0]["prompt"] == eventlog.REDACTED
+    assert records[0]["note"] == "hi"
+
+
 def test_configure_logging_binds_only_when_log_dir_is_set(tmp_path, monkeypatch):
     # LOG_DIR unset (or empty — compose's `:-` trap) leaves the sink unbound so
     # `uv run pytest` writes no JSONL into the repo.

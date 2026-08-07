@@ -12,6 +12,46 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `71388bb` — §17 `LOG_DIR`/`TRACE_MODE`/`TRACE_KEEP` in `.env.example` and compose (Phase 8, task 8)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: adds the three §17 env vars to `.env.example` (empty, committed) and to
+compose's shared `x-app-env` with defaults (`LOG_DIR: ${LOG_DIR:-/app/logs}`,
+`TRACE_MODE: ${TRACE_MODE:-on}`, `TRACE_KEEP: ${TRACE_KEEP:-}`); ticks task 8 in
+`TASKS.md`. No code change — config wiring only.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **207 passed, 1 warning** (pre-existing Starlette/httpx
+  deprecation, unrelated).
+- `uv run pytest tests/test_compose.py -q` → **10 passed**.
+- **The missing-key guard reddens for its reason.** Simulated dropping `LOG_DIR`
+  from `.env.example` in a throwaway script reusing the guard's own parse logic:
+  `LOG_DIR` is in `COMPOSE_VARS` (True) but absent from env keys after the drop
+  (True) → `test_env_example_lists_every_key_compose_interpolates` would fail.
+  Restored file is green. Confirmed all three keys are both interpolated by
+  compose and present as empty keys in `.env.example`, so both guard directions
+  (`…_every_key_compose_interpolates` and `…_no_key_no_service_consumes`) hold.
+- **No values, no secrets.** `test_env_example_holds_no_values` passes; the three
+  keys carry empty values and none is a secret.
+- **Spec fit (`docs/DECISIONS.md` §17, lines 600–601, 665).** Names match
+  exactly — unprefixed `LOG_DIR`, `TRACE_MODE` (default on), `TRACE_KEEP`. Compose
+  defaults agree with the code reads: `trace.py:90` `os.environ.get("TRACE_MODE")
+  or "on"` and `_keep()` `int(os.environ.get("TRACE_KEEP") or 500)` both tolerate
+  compose's `:-` present-but-empty value (the §2 trap), and `__init__.py:26`
+  reads `LOG_DIR` with `.get` (unset/empty ⇒ disabled). The concrete `/app/logs`
+  default living in compose rather than code is correct: code treats unset as
+  "disabled" so `uv run pytest` writes nothing, while a prod deploy still logs.
+
+### Findings
+
+None. The change is a pure config-wiring commit that the existing
+`test_compose.py` guards already cover in both directions, the box in `TASKS.md`
+is ticked for work that is actually present, and every default matches §17.
+
+---
+
 ## 2026-08-07 — `7dbf6be` — §17 trace mode: per-update artefact folders (Phase 8, task 7)
 
 **Status: ✅ DONE** — no blocking issues.

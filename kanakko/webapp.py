@@ -350,6 +350,18 @@ app.addEventListener('change', e => {
   }).then(r => { if (r.ok) load(); });
 });
 load();
+// Reload when the Mini App comes back to the foreground. Without this the page
+// keeps whatever it rendered when first opened, so an expense logged in the chat
+// while the dashboard is minimized is invisible until it is fully closed and
+// reopened — the figures silently disagree with the ledger, which is the one
+// thing a finance dashboard must not do.
+//
+// `activated` is Telegram's own event for exactly this: "Occurs when the Mini App
+// becomes active (e.g., opened from minimized state or selected among tabs)"
+// (Bot API 8.0+, verified 2026-08-07). `visibilitychange` is the plain-web
+// fallback for clients older than 8.0, where onEvent('activated') never fires.
+if (tg.onEvent) { tg.onEvent('activated', load); }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 </script>
 </body>
 </html>

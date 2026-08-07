@@ -640,3 +640,28 @@ def test_txn_row_places_note_and_delete():
     assert "display: grid" in rule(".txn")
     assert "grid-row: 1" in rule(".del")  # delete button stays on the first row
     assert "grid-column: 1" in rule(".txn-note")  # note gets a row of its own
+
+
+def test_shell_reloads_when_the_mini_app_is_reopened():
+    """A restored Mini App refetches, rather than showing what it rendered on open.
+
+    The bug: `load()` ran once at startup and nothing rebound it, so logging an
+    expense in the chat while the dashboard was minimized left the figures stale
+    until the app was fully closed and reopened. A finance dashboard quietly
+    disagreeing with its own ledger is the failure mode worth guarding.
+
+    Both listeners are asserted because they cover different clients: Telegram's
+    `activated` fires "when the Mini App becomes active (e.g., opened from
+    minimized state)" but only on Bot API 8.0+, and `visibilitychange` is the
+    plain-web fallback for older clients. Dropping either one leaves a real
+    surface stale, so neither is redundant. This asserts the wiring — whether a
+    given Telegram build actually emits the event can only be seen on a device.
+    """
+    assert "tg.onEvent('activated', load)" in SHELL_HTML
+    # Anchor on the call, not the bare word: `visibilitychange` appears in the
+    # comment above the listener too, and splitting on that matched the prose.
+    call = "document.addEventListener('visibilitychange'"
+    assert call in SHELL_HTML
+    # and the handler must actually reload, not merely be registered
+    listener = SHELL_HTML.split(call, 1)[1].split("\n", 1)[0]
+    assert "load()" in listener

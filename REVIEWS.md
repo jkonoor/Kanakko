@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `8154340` — the §17 scrubber and never-log list (Phase 8, task 2)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `kanakko/eventlog.py` gains `scrub()` (recursive redaction) plus the
+`NEVER_LOG` name set and `_SECRET` pattern; `log_event` now routes `**fields`
+through `scrub()` before the sink. `tests/test_eventlog.py` adds two checks;
+`TASKS.md` ticks the scrubber task. Judged against §17 ("never logged … and a
+scrubber as the backstop: … redacts anything key-shaped and any base64 run over
+500 characters … a scrubber is a net, not a policy").
+
+### What I checked (commands and results)
+
+- `uv run pytest tests/test_eventlog.py -q` → **8 passed**; full `uv run pytest
+  -q` → **192 passed**, 1 unrelated Starlette/httpx deprecation warning. Matches
+  the commit's "192 passed."
+- **The load-bearing guard actually reddens.** Programmatically reverted
+  `**scrub(fields)` back to `**fields` in `log_event`, ran
+  `test_log_event_scrubs_before_the_sink` → **FAILED** (`'the full LLM prompt'
+  != '[REDACTED]'`), then restored the file and confirmed byte-identical. The
+  scrub wiring is load-bearing, not decorative.
+- **Tried to defeat the scrubber** with a probe script (`/tmp/probe.py`):
+  - `sk-or-v1-…` OpenRouter key → `[REDACTED]` ✓
+  - `8123456789:AA…` bot token → `[REDACTED]` ✓
+  - standard base64 blob of 600 chars → redacted ✓
+  - `prompt` nested one dict deep → redacted by name ✓ (recursion + name match)
+  - `Decimal('500.00')` → returned **unchanged** as `Decimal('500.00')` ✓ — the
+    money path is untouched; `scrub` falls through to `return value` for any
+    non-str/dict/list/tuple, so amounts and ids survive verbatim.
+- Read §17 (lines 660–663) and the task text: the check requirement — a bot
+  token, an `sk-or-` key, a long base64 blob each asserted absent *and* the
+  surrounding fields asserted present at depth — is met by
+  `test_scrub_redacts_secrets_but_keeps_the_rest`. A redact-everything scrubber
+  fails its survival asserts, so the test discriminates in both directions.
+
+### Findings
+
+**None blocking.** One note, deliberately below the bar for CHANGES REQUESTED:
+
+- **(low / note) `kanakko/eventlog.py:42` — the base64 catch-all misses the
+  URL-safe alphabet.** `_SECRET`'s third branch is `[A-Za-z0-9+/]{500,}={0,2}`,
+  i.e. standard base64 only. A 600-char **base64url** run (`-`/`_` instead of
+  `+`/`/`) passes through un-redacted — verified: `scrub('A'*300 + '-'*10 +
+  '_'*10 + 'B'*300)` returns the string intact. This is a heuristic backstop of
+  a backstop, and the real secrets are covered independently (bot token and
+  `sk-` keys by their own patterns; `initData`/`prompt` by name), so nothing
+  §17 names as never-log actually leaks. But "any base64 run over 500 chars" in
+  both the spec and the commit message reads as covering the url-safe variant
+  too — JWTs and many opaque tokens use it. If you want the guard to mean what
+  it says, widen the class to `[A-Za-z0-9+/_-]{500,}={0,2}`. Left as the
+  implementer's call since it changes no named-secret coverage.
+
+Not findings, checked and cleared: `event`/`status` are unscrubbed but they are
+controlled literals at call sites, never user data; `sk-[A-Za-z0-9-]{20,}`
+omits `_` (OpenAI `sk-proj-…_…` keys), but this project's key is OpenRouter
+`sk-or-v1-<hex>` which is fully covered; `tuple`→`list` coercion is invisible
+after JSON serialisation.
+
+---
+
 ## 2026-08-07 — `ab8eafc` — the §17 event-log seam (Phase 8, task 1)
 
 **Status: ✅ DONE** — no blocking issues.

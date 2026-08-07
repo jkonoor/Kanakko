@@ -12,6 +12,61 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `2d0eaca` — log the parse success side through the §17 seam (Phase 8, task 5)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `handle_text` emits one `parse.completed` (status `ok`) after a
+successful parse, carrying `duration_ms` (the parse call alone, retry included),
+the resolved `model`, and the §17 correlation fields (`update_id`, `source`,
+`user_id`). `resolve_model()` is extracted in `parse.py` so `build_request` and
+the log line share one definition of the model id. The 4xx/5xx paths log nothing
+here — Phase 6's WARNING owns the failure side. Judged against §17 (greppable
+event+status; `source` always present; never-log/scrubber; amounts/prompts not
+leaked) and TASKS.md task 5.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — the whole diff: `TASKS.md` (task 5 ticked), `handlers.py`
+  (+`parse_start` mark, +`parse.completed` log on success only), `parse.py`
+  (new `resolve_model`, `build_request` now calls it), `test_webhook.py` (one
+  new test).
+- `uv run pytest -q` → **197 passed**, 1 warning (pre-existing Starlette
+  testclient deprecation, unrelated).
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Reddened the guard myself**: removed the `parse.completed` `log_event` block
+  from `handlers.py` and ran the new test →
+  `test_handle_text_logs_the_parse_success_but_not_the_failure` **FAILED**
+  (1 failed). Restored (`git diff --stat` clean). The check fails for the reason
+  it exists.
+
+### Correctness notes (verified, not assumed)
+
+- **Success-only placement is right.** The `log_event` sits after all three
+  `except` branches — `ValidationError` and 4xx both `return None` before it, 5xx
+  `raise`s — so `parse.completed` fires only on a genuinely successful parse. The
+  model's own schema-failure retry lives inside `parse_message`, so only a final
+  success reaches the log line. The test asserts both directions (success logs
+  exactly one; a 402 logs none), so a future second call on the failure path
+  would redden it.
+- **`duration_ms` isolates model latency correctly.** `parse_start` is marked
+  immediately before `parse_message` (after `get_or_create_user`), and `start`
+  (line 155) still times the whole handler for `pending.created`. Two distinct
+  marks, no cross-contamination — the parse duration excludes the later
+  `send_message`/`save_pending`, which is the point.
+- **One definition of the model.** The log's `resolve_model()` and
+  `build_request`'s `resolve_model(model)` are the same function reading the same
+  env with the `or ""`-safe compose trap in one place. In the real flow both read
+  a process-stable `OPENROUTER_MODEL`, so the reported model equals the sent one;
+  no realistic path desyncs them.
+- **No secret or money exposure.** Only `model`, a duration, and correlation ids
+  are logged — no prompt, no `initData`, no amount; nothing on the never-log list
+  or key-shaped. No `float` and no money path touched.
+
+No findings. Clean, well-scoped commit; the box is honestly ticked.
+
+---
+
 ## 2026-08-07 — `0383f74` — log the dashboard money mutations through the §17 seam (Phase 8, task 4)
 
 **Status: ✅ DONE** — no blocking issues.

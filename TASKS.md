@@ -166,6 +166,41 @@ OpenRouter credits, then a 400 for the type-array schema, fixed in `f1320a1`).
       of the log line — it is in the request headers, not the body, but assert
       that in the check.
 
+## Phase 7 — Dashboard context: period-over-period comparison
+
+**Status: open, deferred by the user 2026-08-07** — Tiers 1 and 2 of the dashboard
+review (tap targets, accessible labels, period switcher, hero figure, bar
+percentages) were done attended; this is Tier 3, held back deliberately because it
+is the only part needing new SQL.
+
+The dashboard answers "what did I spend?" but never "is that a lot?", which is
+what makes a finance view worth opening more than once. The design research behind
+this: pairing a figure with a directional delta *"shows both the direction and
+scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
+2025-09) — a number with no baseline is a record, not an insight.
+
+- [ ] Add previous-period figures to the dashboard so each headline carries a
+      delta — `₹300 · ▼ 40% vs last month`. `db.month_summary` already takes an
+      arbitrary half-open range, so the previous month/week is the same query with
+      shifted bounds and needs no new SQL shape — but it *is* a second query per
+      period, so decide whether to widen the existing function or call it twice.
+      Boundaries stay `Asia/Kolkata` (§10); the previous month of January is
+      December of the prior year, which is the case the check must cover.
+      A delta against a zero baseline is undefined, not 100% — a first-ever month
+      must render "no comparison yet" rather than a fabricated percentage. That is
+      the guard worth writing: seed one month of data only, assert no percentage
+      is shown; then seed two and assert the sign and magnitude are right.
+      Colour follows the same rule as the rest of the dashboard: direction is
+      carried by the arrow glyph and the label, never by colour alone (WCAG 1.4.1),
+      and expenses stay in normal ink — the one accent is reserved for income.
+- [ ] Consider a per-day bar for the current week, using the existing
+      `active_transactions` reads. Only if it earns its place — seven bars of a
+      personal ledger may be noise rather than signal, and the honest test is
+      whether it changes a decision. Length-based bars remain the right form
+      (NN/g: length and 2D position are what people judge accurately; pie charts
+      *"should be avoided most of the time"*), so this stays CSS, no charting
+      library (§13).
+
 ---
 
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

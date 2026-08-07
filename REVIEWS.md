@@ -12,6 +12,67 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `5f3bc47` — log the bot-side money mutations through the §17 seam (Phase 8, task 3)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: every bot-side handler now emits one `log_event` (§17) — `pending.created`,
+`transaction.confirmed`, `transaction.undone`, `pending.cancelled`,
+`pending.recategorised` — with status following the outcome (`ok`/`noop`); the
+error side is logged once in the webhook (`update.handled`, `status="error"`)
+inside a single `try/except … raise` around the dispatch. `db.py`: `undo_last`
+now returns `txn_id`, and `confirm_pending` returns the stored row (dict) rather
+than a bare id so the amount is loggable. Tests in `test_db.py`/`test_webhook.py`
+updated for the dict return; two new webhook tests. Judged against §17 (three
+statuses `ok`/`error`/`noop`; error logged once in the webhook not seven
+handlers; amounts on the two ledger paths; `source` always present).
+
+### What I checked (commands and results)
+
+- Full `uv run pytest -q` → **194 passed**, 1 unrelated Starlette/httpx
+  deprecation warning. Matches the commit's "194 passed." `uv run ruff check
+  kanakko/` → **All checks passed!**
+- **Both load-bearing guards actually redden.** Programmatically:
+  - Mutated `handle_confirm`'s `noop` branch to log `status="ok"` →
+    `test_handle_confirm_logs_ok_then_noop_on_a_redelivery` **FAILED** (a
+    redelivered Confirm now looks like a second real confirm). Restored.
+  - Dropped only the `log_event(status="error", …)` from the webhook's
+    `except` (kept the bare `raise`) →
+    `test_webhook_logs_exactly_one_error_line_when_a_handler_raises` **FAILED**
+    (`len(errors) == 0`, not 1). Restored, `git diff` clean, full suite 194
+    again. Neither guard is decorative.
+- **Money stays `Decimal`.** `confirm_pending` logs `txn.amount` (Decimal off
+  the `Transaction` model); `undo_last` logs the `NUMERIC(12,2)` column value
+  (Decimal). `scrub()` returns non-str/dict/list values untouched, so a Decimal
+  reaches the sink intact and `file_sink`'s `default=str` serialises it. No
+  `float` enters any amount. The `test_db` check asserts `row["amount"] ==
+  Decimal("1234.56")`.
+- **Coverage is complete for the task's scope.** All five bot handlers log;
+  `handle_text`'s null-category branch still routes through `save_pending` and
+  reaches the `pending.created` line (`handlers.py:174-180`). The two ledger
+  paths carry `txn_id`+`amount`; the pending-only paths carry neither, exactly
+  as §17 and `TASKS.md` specify. The dashboard/miniapp paths and the audit
+  table are their own (still-unchecked) tasks — correctly out of scope here.
+- **`update.handled` on success is intentional**, replacing the pre-existing
+  `log.info("handled update …")` tail line; a successful update emits both its
+  per-handler event and the `update.handled` umbrella — matches the commit's
+  stated intent. The `claim_update` redelivery short-circuit returns before any
+  event, which is fine — it's not a money mutation and §17 doesn't require it.
+- **No secret/PII in the new lines.** `pending.created` carries only
+  `update_id`/`source`/`user_id`/`duration_ms` — no note or raw text; the
+  ledger lines add only `txn_id`+`amount`. The forged-tap `pending.recategorised`
+  omits `user_id` by design (commented).
+- The "does not commit — the caller owns the transaction" claim added to
+  `confirm_pending`'s docstring holds in the webhook: `claim_update` opens the
+  transaction first, so the inner `conn.transaction()` is a savepoint, matching
+  the identical `undo_last` docstring. Pre-existing behaviour, unchanged here.
+
+### Findings
+
+None blocking. Nothing cosmetic worth raising.
+
+---
+
 ## 2026-08-07 — `8154340` — the §17 scrubber and never-log list (Phase 8, task 2)
 
 **Status: ✅ DONE** — no blocking issues.

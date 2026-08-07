@@ -12,6 +12,73 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `e782b6f` — move the ledger's tenancy axis onto transactions (Phase 9)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope.** `migrations/007_transactions_household.sql` adds a **nullable**
+`transactions.household_id` (FK to `households`), backfills every existing row
+from migration 006's household-of-one mapping, adds a partial
+`(household_id, occurred_on)` report index, and recreates the `active_transactions`
+view so its `SELECT *` picks up the new column. `tests/test_migrate.py` gains
+`test_transactions_household_backfill_preserves_totals`. Migration only —
+NOT NULL and the confirm write-path are deferred to a new (unchecked) task.
+
+### What I checked (and what it returned)
+
+- `git show HEAD` / read the full diff, `migrations/007_transactions_household.sql`,
+  `migrations/006_households.sql`, `kanakko/migrate.py`, `tests/test_migrations.py`
+  (view guard), and `docs/DECISIONS.md` §16.
+- `uv run pytest tests/test_migrate.py -q` → **7 passed**.
+- `uv run pytest -q` → **228 passed** — the commit's claim holds.
+- **Defeated the central guard, confirmed it reddens.** Broke the backfill join
+  in the real migration file (`WHERE m.user_id = t.user_id` → `= t.user_id + 1`)
+  and ran the test:
+  `FAILED test_transactions_household_backfill_preserves_totals`. Restored the
+  file; `git diff --stat` clean. The test reads the UPDATE from the `.sql` file
+  (not paraphrased), so it guards the shipped SQL, not a copy.
+- **Spec fit (§16).** A household owns the money (`household_id`), a user owns
+  the entry (`user_id`) — the migration adds exactly the second axis §16 calls
+  for and homes each row from the one-membership-per-user mapping. §16's "exactly
+  one household per user" is enforced by 006's `UNIQUE(household_members.user_id)`,
+  so the backfill's `FROM household_members` join cannot fan a row into two
+  households.
+- **View change is safe.** The `active_transactions` view guard in
+  `test_migrations.py` re-runs against 007's new definition and still requires
+  `WHERE deleted_at IS NULL` on the last definition — passes. `CREATE OR REPLACE
+  VIEW ... SELECT *` legally appends the trailing `household_id` column, and the
+  test's SUM through `active_transactions` joined on `household_id` proves the
+  view now exposes it.
+- **No positional-unpacking breakage.** Grepped `kanakko/` — no read does
+  `SELECT *` from `active_transactions`; every read names its columns
+  (`db.py:358,383,389,413,496,…`), so the trailing column breaks nothing.
+- **Money exactness.** Test amounts are chosen so a float sum would drift
+  (`10.10+20.20`, `0.05+1.00`) and are stored via `parse_amount` (`Decimal`); the
+  final equality `dict(cur.fetchall()) == seeded` compares `Decimal` totals
+  through the view. No `float` enters the path.
+- **Soft-delete.** The seeded deleted row (500.00) is asserted homed
+  (`household_id IS NOT NULL`) yet absent from `active_transactions` and excluded
+  from the household total — the exact resurrection risk §6 guards.
+
+### Findings
+
+None blocking.
+
+- **Legitimacy of the tick.** The task box is ticked and the dangerous
+  requirement it names — "every pre-existing transaction still appears in exactly
+  one household's totals, with the same sum as before" — is genuinely proven by a
+  guard-verified test, not a stub. The split (nullable now, NOT NULL + write-path
+  next) is documented in both the commit and `TASKS.md`, and the deferred piece is
+  filed as a new unchecked task. Correct scoping, not a falsely-ticked box.
+- **Idempotency (non-issue, noted).** The migration's `ALTER TABLE ADD COLUMN`
+  and `CREATE INDEX` lack `IF NOT EXISTS`; only the `UPDATE` is guarded by
+  `household_id IS NULL`. This is fine because `migrate()` records applied files
+  in `schema_migrations` and runs the whole batch in one transaction, so 007
+  never re-executes and a mid-run failure rolls back cleanly. The comment's
+  idempotency claim is correctly scoped to the `UPDATE` alone.
+
+---
+
 ## 2026-08-07 — `56c93f6` — add households + household_members, backfill users (Phase 9)
 
 **Status: ✅ DONE** — no blocking issues.

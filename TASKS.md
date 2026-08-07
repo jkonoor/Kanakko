@@ -417,12 +417,15 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ### Onboarding
 
-- [ ] Add `/start` with deep-link payload handling. No handler exists today — an
+- [x] Add `/start` with deep-link payload handling. No handler exists today — an
       unknown user simply types and silently gets a ledger. Bare `/start` in
       `open` mode creates a household of one and explains the bot; `/start <code>`
       consumes an invite. Payload limits are **verified**: 64 chars, `A-Z a-z 0-9
       _ -` (§16). The check: a spent code, an expired code, and a garbage payload
       are each refused distinctly, and none creates a partial household.
+      Done: `handle_start` (routed **before** the gate, since consuming an invite
+      is how an unknown user becomes authorized), `db.consume_invite` +
+      `db.create_household_of_one`. `tests/test_start.py`.
 - [ ] Add `/invite` (owner only) — issues a labelled single-use household code and
       returns the `t.me/<bot>?start=<code>` link. Label so the operator can tell
       who is active (§16).
@@ -447,6 +450,17 @@ means transactions with no home. Each task leaves the tree green and deployable.
       member who logged nothing is still nudged even if a housemate was active.
       That per-person rule is the one most easily broken by a household-wide
       `logged_since`, so it gets the check.
+
+### Housekeeping
+
+- [ ] Split `db.py` into a `db/` package. CLAUDE.md pins this trigger to Phase 9
+      ("households, memberships and invites will push it past 600") and it has
+      fired: `db.py` is now 722 lines. Split by responsibility (users/households,
+      pending+confirm flow, reads/reports, reminders, invites, audit), not by
+      layer, keeping every import path (`from kanakko.db import …`) working via
+      the package `__init__`. Pure move — no behaviour change — so the whole suite
+      stays green with no test edits. Do this on its own, not folded into a
+      feature task.
 
 ---
 

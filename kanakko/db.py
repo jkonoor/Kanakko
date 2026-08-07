@@ -112,6 +112,96 @@ def user_exists(conn: psycopg.Connection, telegram_user_id: int) -> bool:
         return cur.fetchone() is not None
 
 
+def create_household_of_one(conn: psycopg.Connection, user_id: int) -> int | None:
+    """Home `user_id` in a new household of one, owned by themselves (§16).
+
+    The onboarding counterpart to migration 006's backfill: a user minted after
+    that migration (open-mode `/start`, or a consumed signup invite) has a `users`
+    row but no household, and `transactions.household_id` is NOT NULL (migration
+    008), so their first confirm would fail without this. Idempotent — a user who
+    already belongs to a household is left where they are (the UNIQUE on
+    `household_members.user_id` is the backstop), so a redelivered `/start` mints
+    nothing new. Returns the new `household_id`, or `None` if already a member.
+    Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO households (owner)"
+            " SELECT %s WHERE NOT EXISTS ("
+            "   SELECT 1 FROM household_members WHERE user_id = %s)"
+            " RETURNING household_id",
+            (user_id, user_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        (household_id,) = row
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (household_id, user_id),
+        )
+    return household_id
+
+
+def consume_invite(
+    conn: psycopg.Connection, code: str, telegram_user_id: int
+) -> str:
+    """Consume an invite `code` for a Telegram user, admitting them (§16).
+
+    The deep-link half of onboarding: a signup invite opens a household of one, a
+    household invite adds the user to the invite's household — either way the code
+    is single-use and stamped spent. Returns one of `"ok"`, `"spent"`, `"expired"`,
+    `"unknown"` so `/start` can refuse each distinctly.
+
+    Nothing is stored on a refused code (§16 — not even a user row): validity is
+    checked *before* `get_or_create_user`, so a spent, expired, or unknown code
+    mints no user, household, or membership. A redelivery whose code this same
+    user already consumed returns `"ok"` idempotently, not a spurious `"spent"`.
+    The claim (`UPDATE … WHERE used_by IS NULL`) settles two simultaneous
+    consumers — the loser gets `"spent"`. Does not commit — the caller owns the
+    transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT invite_id, kind, household_id, used_by,"
+            " (expires_at IS NOT NULL AND expires_at < now()) AS expired"
+            " FROM invites WHERE code = %s",
+            (code,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return "unknown"
+        invite_id, kind, household_id, used_by, expired = row
+        if used_by is not None:
+            cur.execute(
+                "SELECT user_id FROM users WHERE telegram_user_id = %s",
+                (telegram_user_id,),
+            )
+            existing = cur.fetchone()
+            if existing is not None and existing[0] == used_by:
+                return "ok"  # this user already consumed it — a redelivery
+            return "spent"
+        if expired:
+            return "expired"
+        user_id = get_or_create_user(conn, telegram_user_id)
+        cur.execute(
+            "UPDATE invites SET used_by = %s, used_at = now()"
+            " WHERE invite_id = %s AND used_by IS NULL",
+            (user_id, invite_id),
+        )
+        if cur.rowcount == 0:
+            return "spent"  # a concurrent consumer won the race
+        if kind == "household":
+            cur.execute(
+                "INSERT INTO household_members (household_id, user_id)"
+                " VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
+                (household_id, user_id),
+            )
+        else:
+            create_household_of_one(conn, user_id)
+    return "ok"
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:

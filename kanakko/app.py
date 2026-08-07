@@ -26,11 +26,13 @@ from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
     TextMessage,
+    _is_start,
     _is_undo,
     dispatch,
     handle_cancel,
     handle_category,
     handle_confirm,
+    handle_start,
     handle_text,
     handle_undo,
 )
@@ -277,6 +279,17 @@ async def webhook(request: Request) -> dict[str, bool]:
 
     action = dispatch(update)
     if action is None:
+        return {"ok": True}
+
+    # /start is onboarding and the one path that must run *before* the gate:
+    # consuming an invite is how an unknown user becomes authorized (§16), so the
+    # gate cannot precede it. It makes no LLM call and carries no per-message
+    # anchor, so it is neither metered nor claimed — `consume_invite` is
+    # idempotent on a redelivery (a code this same user already used returns
+    # success, not a refusal), which is what a `claim_update` would otherwise buy.
+    if isinstance(action, TextMessage) and _is_start(action.text):
+        with connect() as conn:
+            handle_start(conn, action)
         return {"ok": True}
 
     # One connection per handled update, committed on block exit. The claim and

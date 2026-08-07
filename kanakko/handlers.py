@@ -10,6 +10,7 @@ anything on a path that failed.
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -17,15 +18,19 @@ import httpx
 import psycopg
 from pydantic import ValidationError
 
+from kanakko.auth import signup_mode
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import category_prompt, confirm_card
 from kanakko.db import (
     cancel_pending,
     confirm_pending,
+    consume_invite,
+    create_household_of_one,
     get_or_create_user,
     save_pending,
     set_pending_category,
     undo_last,
+    user_exists,
 )
 from kanakko.eventlog import log_event, ms_since
 from kanakko.money import format_amount
@@ -146,6 +151,80 @@ CAP_REACHED = (
     "You've hit today's message limit — nothing was saved. Your entries so far "
     "are safe, and this resets at midnight (IST)."
 )
+
+START_COMMAND = "/start"
+
+# A /start deep-link payload: A-Z a-z 0-9 _ -, up to 64 chars (§16, verified
+# against core.telegram.org/bots/features). Anything else is a garbage payload.
+_START_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+
+WELCOME = (
+    "Welcome to Kanakko — your personal finance tracker.\n\n"
+    'Just tell me what you spent or earned — like "spent 500 on groceries" or '
+    '"got 20000 salary" — and I\'ll log it after a one-tap confirm. Use the menu '
+    "button any time to open your dashboard."
+)
+
+# Three distinct refusals so a user knows which problem they have (§16 onboarding
+# check): a spent link, an expired link, and a payload that was never a link.
+START_SPENT = "That invite link has already been used. Ask for a fresh one."
+START_EXPIRED = "That invite link has expired. Ask whoever invited you for a new one."
+START_BAD_CODE = "That invite link isn't valid."
+
+
+def _is_start(text: str) -> bool:
+    """True when `text` is the `/start` command — bare or `/start@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == START_COMMAND
+
+
+def _start_payload(text: str) -> str:
+    """The deep-link payload after `/start`, or `""` for a bare `/start`."""
+    parts = text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def handle_start(conn: psycopg.Connection, msg: TextMessage) -> str:
+    """Onboard a `/start`: consume an invite, or open a household of one (§16).
+
+    The bot's entry point, and the one handler that runs *before* the
+    authorization gate (`app.py`): consuming an invite is how an unknown user
+    becomes known, so the gate cannot precede it. `/start <code>` consumes the
+    invite — a signup code opens a household of one, a household code joins that
+    household — and a spent, expired, or invalid code is refused distinctly,
+    storing nothing (§16). A bare `/start` explains the bot: it opens a household
+    of one in `open` mode, welcomes an already-known user, and (in `invite` mode)
+    turns an unknown user toward an invite. The payload is verified — 64 chars,
+    `A-Z a-z 0-9 _ -` (§16) — and anything else is refused as invalid before any
+    lookup. Does not commit — the caller owns the transaction. Returns the outcome
+    slug for the log line.
+    """
+    start = time.perf_counter()
+    payload = _start_payload(msg.text)
+    if payload:
+        if _START_PAYLOAD_RE.match(payload):
+            outcome = consume_invite(conn, payload, msg.from_id)
+        else:
+            outcome = "unknown"  # a garbage payload — never a valid code (§16)
+        reply = {
+            "ok": WELCOME,
+            "spent": START_SPENT,
+            "expired": START_EXPIRED,
+            "unknown": START_BAD_CODE,
+        }[outcome]
+    elif signup_mode() == "open":
+        create_household_of_one(conn, get_or_create_user(conn, msg.from_id))
+        outcome, reply = "ok", WELCOME
+    elif user_exists(conn, msg.from_id):
+        outcome, reply = "ok", WELCOME  # a known user, already in a household
+    else:
+        outcome, reply = "refused", ACCESS_REFUSED  # invite mode, no invite
+
+    send_message(msg.chat_id, reply)
+    log_event("user.onboarded", status="ok" if outcome == "ok" else "noop",
+              update_id=msg.update_id, source=msg.source,
+              duration_ms=ms_since(start), outcome=outcome)
+    return outcome
 
 
 def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:

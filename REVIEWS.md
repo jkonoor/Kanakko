@@ -12,6 +12,64 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `7fbbd40` — add `invites` table and `SIGNUP_MODE` (Phase 9, task 2)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: migration `004_invites.sql` creates the `invites` table (§16), a new
+`kanakko/auth.py` with `signup_mode()`, and wires `SIGNUP_MODE` into
+`.env.example` and `docker-compose.yml`. The authorization *gate* itself is the
+next task (TASKS.md line 373, still unchecked), so `auth.py` holding only the
+config reader is the scoped deliverable, not a stub.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): 7 files, +129/-1. No money path, no timezone
+  bucketing, no soft-delete, no category path is touched. No secrets introduced.
+- **Table matches §16 and the TASKS.md column list exactly.** `code` unique,
+  `kind` CHECK `IN ('signup','household')`, `household_id` nullable, `label`
+  (NOT NULL — §16 requires codes be labelled), `created_by` REFERENCES users,
+  `used_by` nullable REFERENCES users, `used_at`, `expires_at`, `created_at`.
+  All three timestamp columns are `TIMESTAMPTZ`. `household_id` has no FK yet —
+  deliberate and documented; the households migration ALTERs it in two tasks
+  later.
+- **The CHECK is behavioural, not cosmetic.** `CHECK ((kind = 'household') =
+  (household_id IS NOT NULL))` enforces the §16 pairing both ways: signup ⇒ no
+  household, household ⇒ a household. Because `kind` is NOT NULL and
+  `IS NOT NULL` never yields NULL, the predicate is always TRUE/FALSE — no
+  NULL-passes-CHECK loophole.
+- **Defeat test on the guard.** Ran `pytest
+  tests/test_migrate.py::test_invite_kind_and_household_must_agree` → PASSED. I
+  then stripped the `CONSTRAINT invites_household_matches_kind` block from the
+  migration and re-ran: **FAILED** (the two violating INSERTs no longer raise
+  `CheckViolation`). Restored the file (`git status` clean). The guard fails for
+  the reason it exists.
+- **`signup_mode()` fails closed.** Reads `$SIGNUP_MODE` at call time; returns
+  `"open"` only for the exact string `open`, else `"invite"`. `pytest
+  tests/test_auth.py` → 10 passed, covering unset, `""`, `" "`, `"Open"`,
+  `"OPEN"`, `"open "` (trailing space), `"true"`, `"yes"` — all correctly stay
+  `invite`.
+- **Two-places default is safe here.** `.env.example` leaves `SIGNUP_MODE`
+  empty; compose defaults it to `invite`. Unlike §17's `LOG_DIR` (no code
+  default), the code *also* defaults to `invite` and fails closed regardless, so
+  the two cannot drift into an unsafe state — the code always resolves toward
+  closed. Not a "second definition" defect.
+- **Schema-wide migration guards cover 004.** `test_migrations.py`'s
+  money/timestamp scanners iterate every migration file; the full run confirms
+  004's `TIMESTAMPTZ` columns pass the naive-timestamp regex and it introduces
+  no `NUMERIC`/float columns.
+- **Full suite:** `uv run pytest -q` → **219 passed** on a real ephemeral
+  Postgres cluster. `git status` clean after the revert experiment.
+
+### Findings
+
+None blocking. One observation, not a finding: the `code` column has no length
+or charset CHECK for the §16 deep-link payload (≤64 chars, `A-Z a-z 0-9 _ -`).
+That validation belongs at code generation / the gate, not the DB, and codes are
+operator-issued — so its absence here is fine and consistent with the design.
+
+---
+
 ## 2026-08-07 — `af2f0a8` — resolve the user by `from.id`, not `chat.id` (Phase 9, task 1)
 
 **Status: ✅ DONE** — no blocking issues.

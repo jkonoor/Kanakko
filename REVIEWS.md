@@ -12,6 +12,59 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `b7e5649` — home confirmed transactions in the household, enforce NOT NULL (Phase 9)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope.** `kanakko/db.py`: `confirm_pending`'s INSERT now stamps
+`transactions.household_id` from a scalar subquery over the confirmer's
+`household_members` row. `migrations/008_transactions_household_not_null.sql`
+makes the column NOT NULL (the enforcement half of the 007 split). Tests:
+new `household_of` conftest helper mints a household-of-one for seeded users;
+two new guards in `test_db.py`, one in `test_migrate.py`; every direct
+transaction insert across 6 test modules routes through `household_of`, and
+`test_webapp`'s inline INSERTs collapse into `_insert_txn`. `TASKS.md` box ticked.
+
+### What I checked (and what it returned)
+
+- Read the full `git show HEAD`, `confirm_pending` (db.py:135-195),
+  `migrations/007`/`008`, `migrate.py`, `get_or_create_user`/`user_exists`,
+  `auth.py`, and DECISIONS §16.
+- `uv run pytest -q` → **231 passed** (clean).
+- **Guard verification — NOT NULL.** Replaced migration 008's body with a
+  no-op (`SELECT 1;`) and ran the two NOT NULL guards →
+  `test_confirm_without_a_household_is_refused` and
+  `test_transactions_household_id_is_not_null` both **FAILED**. Restored file,
+  tree clean. The guards fail for the reason they exist.
+- **Guard verification — homing.** Mutated the subquery to
+  `ORDER BY household_id DESC LIMIT 1` (wrong household when two exist) →
+  `test_confirm_homes_the_transaction_in_the_confirmers_household` **FAILED**.
+  Restored. The two-distinct-households setup genuinely catches cross-homing.
+- **Spec fit (§16).** `user_id` (who entered) is retained and `household_id`
+  (whose money) is added — the two axes §16 requires. `confirm_pending` is the
+  only production `INSERT INTO transactions` (grep confirmed), so no write path
+  is left un-homed. Scalar subquery is safe against multi-row: migration 006's
+  `UNIQUE(household_members.user_id)` guarantees ≤1 row.
+- Money path unchanged (`Decimal`/`NUMERIC` untouched); no float, no ORM, no new
+  dependency. `active_transactions` reads not in scope for this task.
+
+### Observation (non-blocking — future work, not a defect here)
+
+`get_or_create_user` mints a `users` row with **no** `household_members` row.
+Household-on-signup is the still-unchecked **Onboarding** task ("bare `/start`
+in `open` mode creates a household of one"). Consequence: if an operator sets
+`SIGNUP_MODE=open` *before* onboarding lands, a brand-new user's first Confirm
+tap hits the subquery → NULL → `NotNullViolation` → webhook 500. This is not
+reachable today: the default `invite` mode admits only pre-existing users (all
+backfilled into households by 006), and refuses unrecognised users before any
+row is minted. Before 008 the same open-mode user would have *silently orphaned*
+their money (the exact bug §16 forbids); 008 turns that silent orphaning into a
+loud failure, which is the safer of the two until onboarding creates the
+household. Flagged only so the ordering dependency (onboarding before `open`) is
+recorded, not a surprise. `TASKS.md` box for this commit is honestly ticked.
+
+---
+
 ## 2026-08-07 — `e782b6f` — move the ledger's tenancy axis onto transactions (Phase 9)
 
 **Status: ✅ DONE** — no blocking issues.

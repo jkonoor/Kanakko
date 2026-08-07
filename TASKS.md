@@ -388,11 +388,23 @@ means transactions with no home. Each task leaves the tree green and deployable.
       The migration is the risky part: it must be idempotent, and a user must end
       up in exactly one household (§16). Check it against a seeded multi-user
       database, not an empty one.
-- [ ] Move the ledger's tenancy axis: `transactions` gains `household_id` (whose
+- [x] Move the ledger's tenancy axis: `transactions` gains `household_id` (whose
       money) while `user_id` becomes "who entered it" (§16). Backfill from the
       household-of-one mapping. **This is the task that can corrupt the ledger** —
       the check must prove every pre-existing transaction still appears in exactly
       one household's totals, with the same sum as before the migration.
+      Split: migration `007` adds the column **nullable**, backfills existing
+      rows, recreates `active_transactions` (its `SELECT *` had frozen the column
+      list at `001`), and adds the `(household_id, occurred_on)` report index.
+      NOT NULL is deferred to the write-wiring task below — `confirm_pending` and
+      ~12 test insert sites still omit `household_id`, so enforcing it now would
+      break every insert.
+- [ ] Wire the write path to the household: `confirm_pending` sets
+      `household_id` from the entering user's `household_members` row, then a
+      migration makes `transactions.household_id` NOT NULL (the axis is only
+      moved once new money carries it, not just backfilled rows). Check: a
+      confirmed transaction lands in the confirmer's household, and a NULL
+      household_id insert is refused.
 - [ ] Re-scope every read to the household: `day_summary`, `month_summary`,
       `logged_since`, `recent_transactions`, `undo_last`. The §6 read-path guard
       already forces `active_transactions`; extend it so a read missing a

@@ -162,6 +162,88 @@ def test_household_backfill_migrates_seeded_users(conn):
     conn.rollback()
 
 
+def test_transactions_household_backfill_preserves_totals(conn):
+    """Moving the tenancy axis must not move a single rupee (§16).
+
+    The dangerous migration: transactions gains household_id, backfilled from the
+    household-of-one mapping. Exercised against a *seeded* multi-user ledger in
+    the real deploy state — users and their transactions exist, migration 006's
+    real backfill homes each user in a household of one, then 007's real backfill
+    (read from the file, not paraphrased) stamps every transaction with its
+    entering user's household. The proof the task demands: every pre-existing
+    transaction lands in exactly one household's total, and each household's
+    active total equals what its sole member spent before the column existed. A
+    backfill that orphaned a row (NULL household), cross-homed one, or dropped or
+    duplicated an amount reddens an assertion below — verified by breaking the
+    UPDATE, not by reading it. A soft-deleted row is included: it must still gain
+    a household (the column is on every row) yet stay out of the active total.
+    """
+    migrate(conn)
+    hh006 = (MIGRATIONS / "006_households.sql").read_text()
+    home_users = "WITH new_households" + hh006.split("WITH new_households", 1)[1]
+    txn007 = (MIGRATIONS / "007_transactions_household.sql").read_text()
+    home_txns = "UPDATE transactions t" + txn007.split("UPDATE transactions t", 1)[1].split(";", 1)[0]
+
+    with conn.cursor() as cur:
+        # Amounts chosen so a float sum would drift (10.10+20.20, 0.05+1.00).
+        seeded = {}  # user_id -> Decimal active total
+        for tg, amounts in [(9210, ["10.10", "20.20"]), (9220, ["0.05", "1.00"]), (9230, ["999.99"])]:
+            cur.execute("INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id", (tg,))
+            (uid,) = cur.fetchone()
+            for a in amounts:
+                cur.execute(
+                    "INSERT INTO transactions (user_id, amount, type, occurred_on)"
+                    " VALUES (%s, %s, 'expense', '2026-08-05')",
+                    (uid, parse_amount(a)),
+                )
+            seeded[uid] = sum((parse_amount(a) for a in amounts), Decimal("0"))
+
+        # A soft-deleted row on the first user: must be homed, yet stay out of totals.
+        first = next(iter(seeded))
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, occurred_on, deleted_at)"
+            " VALUES (%s, %s, 'expense', '2026-08-05', now()) RETURNING txn_id",
+            (first, parse_amount("500.00")),
+        )
+        (deleted_txn,) = cur.fetchone()
+
+        cur.execute(home_users)  # migration 006: home the seeded users
+        cur.execute(home_txns)   # migration 007: home their transactions
+        seeded_ids = list(seeded)
+
+        # No orphans: every transaction, deleted or not, now carries a household.
+        cur.execute(
+            "SELECT count(*) FROM transactions WHERE user_id = ANY(%s) AND household_id IS NULL",
+            (seeded_ids,),
+        )
+        assert cur.fetchone() == (0,)
+
+        # Each transaction is homed to its entering user's one household, never another's.
+        cur.execute(
+            "SELECT count(*) FROM transactions t JOIN household_members m ON m.user_id = t.user_id"
+            " WHERE t.user_id = ANY(%s) AND t.household_id <> m.household_id",
+            (seeded_ids,),
+        )
+        assert cur.fetchone() == (0,), "a transaction was homed to the wrong household"
+
+        # The deleted row is homed but absent from the active view.
+        cur.execute("SELECT household_id FROM transactions WHERE txn_id = %s", (deleted_txn,))
+        assert cur.fetchone()[0] is not None
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (deleted_txn,))
+        assert cur.fetchone() == (0,)
+
+        # Every household's active total equals its sole member's pre-migration spend,
+        # summed through active_transactions — which must now expose household_id.
+        cur.execute(
+            "SELECT m.user_id, SUM(a.amount) FROM active_transactions a"
+            " JOIN household_members m ON m.household_id = a.household_id"
+            " WHERE m.user_id = ANY(%s) GROUP BY m.user_id",
+            (seeded_ids,),
+        )
+        assert dict(cur.fetchall()) == seeded
+    conn.rollback()
+
+
 def test_parse_store_sum_by_category_stays_exact(conn):
     """The whole money path — parse → store → SUM(amount) GROUP BY category.
 

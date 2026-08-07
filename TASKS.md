@@ -208,9 +208,67 @@ scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
       position are what people judge accurately; pie charts *"should be avoided
       most of the time"*), so it stays CSS, no charting library (§13).
 
-## Phase 8 — Households, onboarding, and access control
+## Phase 8 — Logging, audit trail, and trace mode
 
-Implements [`docs/DECISIONS.md`](docs/DECISIONS.md) **§16**. Read it first — every
+Implements [`docs/DECISIONS.md`](docs/DECISIONS.md) **§17**. Read it first.
+
+**Ordered so the seam exists before the call sites.** Task 1 is the only one that
+is hard to change later — every task after it is call sites and sinks.
+
+**Decided 2026-08-07: this phase runs before households.** §16 puts other
+people's money in the ledger and the audit's finding was that no money path leaves
+any trace at all, so the trace should exist *before* the household logic is
+written rather than be retrofitted around it. Task 1 is the seam; everything in
+this phase and the next logs through it. The phases were renumbered so the file
+order the loop obeys matches the numbering.
+
+- [ ] Add `kanakko/eventlog.py`: `log_event(event, *, status, **fields)` writing
+      JSON Lines through a **module-level sink bound once at startup**, plus
+      `bind_sink` / `unbind_sink`. Unbound is a silent no-op so tests need no
+      mock (§17). **It must never raise** — wrap every write, because a logging
+      failure that 500s a webhook makes Telegram redeliver a message that already
+      succeeded. The check that earns its place: a sink that raises on every call
+      leaves `log_event` returning normally *and* the caller's work intact.
+- [ ] Add the scrubber and the never-log list (§17): redact key-shaped strings and
+      any base64 run over 500 characters, recursively through nested values. The
+      check must pass a realistic payload — a bot token, an `sk-or-` key, a long
+      base64 blob — and assert each is absent from the output *and* that the
+      surrounding fields survived. A scrubber that redacts everything passes a
+      naive test.
+- [ ] Log every money mutation (§17) — confirm, cancel, `/undo`, category change,
+      dashboard delete and recategorise. Each carries `update_id` as the
+      correlation id, `user_id`, `duration_ms`, and the transaction id. This is
+      the audit's original finding; six handlers currently log nothing.
+- [ ] Log the parse path: the OpenRouter call's duration, model, and outcome. The
+      Phase 6 `WARNING` already covers the failure; this adds the success side, so
+      a slow model is visible before it becomes a complaint about the bot feeling
+      sluggish.
+- [ ] Add `migrations/003_transaction_events.sql` and write an audit row **in the
+      same transaction as the money change** (§17). Columns: the transaction, the
+      acting user, the action, before/after as `jsonb`, the `update_id`, and when.
+      The point is atomicity, so the check is the one that proves it: a handler
+      that raises after the ledger write must leave **neither** the transaction nor
+      its audit row — assert both are absent, not just one.
+- [ ] Add trace mode (§17): a per-update artefact folder, **on by default**, gated
+      by an env var, with the outcome in each filename so a directory listing is
+      the summary. Rotate to the last N folders, N from env. The check: a failed
+      parse leaves a file whose *name* identifies the failure, and the rotation
+      actually deletes — a rotation that never fires is the bug that fills a disk.
+- [ ] Add `LOG_DIR`, `TRACE_MODE` and `TRACE_KEEP` to `.env.example` and to
+      compose's shared app env, alongside the other keys. **`.env.example` carries
+      keys with empty values** (CLAUDE.md) and `tests/test_compose.py` enforces
+      both that and the rule that every documented key is consumed by a service —
+      so the defaults live in compose (`${TRACE_MODE:-on}`) or in code, the way
+      `OPENROUTER_MODEL` already does. Note the §2 trap: compose's `:-` makes the
+      variable *present but empty*, so read it with `or`, not `get(key, default)`.
+- [ ] `[human]` Mount a volume on **both** `kanakko-web` and `kanakko-cron` in
+      Dokploy — they are separate applications and the jobs log too. Only `pgdata`
+      exists today. Verify a container restart preserves the log, which is the
+      whole reason for the volume: without it every deploy wipes the evidence.
+
+## Phase 9 — Households, onboarding, and access control
+
+Implements [`docs/DECISIONS.md`](docs/DECISIONS.md) **§16**. Runs *after* Phase 8 — the money paths log through the seam that phase builds. Read it first — every
 rule below comes from there, and the ambiguous cases were decided by the user on
 2026-08-07, not left to judgement.
 
@@ -302,59 +360,6 @@ means transactions with no home. Each task leaves the tree green and deployable.
       member who logged nothing is still nudged even if a housemate was active.
       That per-person rule is the one most easily broken by a household-wide
       `logged_since`, so it gets the check.
-
-## Phase 9 — Logging, audit trail, and trace mode
-
-Implements [`docs/DECISIONS.md`](docs/DECISIONS.md) **§17**. Read it first.
-
-**Ordered so the seam exists before the call sites.** Task 1 is the only one that
-is hard to change later — every task after it is call sites and sinks.
-
-**Ordering is an open decision, not settled by the numbering.** The loop takes
-tasks in *file* order, which currently puts Phase 8 first. There is a real case
-for pulling this phase forward: §16 puts other people's money in the ledger, the
-audit's finding was that no money path leaves any trace at all, and the household
-logic of Phase 8 is exactly the code you would most want a trace of while
-building it. At minimum, task 1 below (the seam) is cheap and everything else —
-here and in Phase 8 — can log through it. Decide deliberately before starting
-either.
-
-- [ ] Add `kanakko/logging.py`: `log_event(event, *, status, **fields)` writing
-      JSON Lines through a **module-level sink bound once at startup**, plus
-      `bind_sink` / `unbind_sink`. Unbound is a silent no-op so tests need no
-      mock (§17). **It must never raise** — wrap every write, because a logging
-      failure that 500s a webhook makes Telegram redeliver a message that already
-      succeeded. The check that earns its place: a sink that raises on every call
-      leaves `log_event` returning normally *and* the caller's work intact.
-- [ ] Add the scrubber and the never-log list (§17): redact key-shaped strings and
-      any base64 run over 500 characters, recursively through nested values. The
-      check must pass a realistic payload — a bot token, an `sk-or-` key, a long
-      base64 blob — and assert each is absent from the output *and* that the
-      surrounding fields survived. A scrubber that redacts everything passes a
-      naive test.
-- [ ] Log every money mutation (§17) — confirm, cancel, `/undo`, category change,
-      dashboard delete and recategorise. Each carries `update_id` as the
-      correlation id, `user_id`, `duration_ms`, and the transaction id. This is
-      the audit's original finding; six handlers currently log nothing.
-- [ ] Log the parse path: the OpenRouter call's duration, model, and outcome. The
-      Phase 6 `WARNING` already covers the failure; this adds the success side, so
-      a slow model is visible before it becomes a complaint about the bot feeling
-      sluggish.
-- [ ] Add `migrations/003_transaction_events.sql` and write an audit row **in the
-      same transaction as the money change** (§17). Columns: the transaction, the
-      acting user, the action, before/after as `jsonb`, the `update_id`, and when.
-      The point is atomicity, so the check is the one that proves it: a handler
-      that raises after the ledger write must leave **neither** the transaction nor
-      its audit row — assert both are absent, not just one.
-- [ ] Add trace mode (§17): a per-update artefact folder, **on by default**, gated
-      by an env var, with the outcome in each filename so a directory listing is
-      the summary. Rotate to the last N folders, N from env. The check: a failed
-      parse leaves a file whose *name* identifies the failure, and the rotation
-      actually deletes — a rotation that never fires is the bug that fills a disk.
-- [ ] `[human]` Mount a volume on **both** `kanakko-web` and `kanakko-cron` in
-      Dokploy — they are separate applications and the jobs log too. Only `pgdata`
-      exists today. Verify a container restart preserves the log, which is the
-      whole reason for the volume: without it every deploy wipes the evidence.
 
 ---
 

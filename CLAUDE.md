@@ -72,7 +72,7 @@ jobs, the seam is usually already visible in its own docstring.
 
 `db.py` is the one file over that line (426) and is deliberately left alone: it is
 17 small functions doing one job, and splitting by entity would be splitting by
-layer. **Its trigger is Phase 8** — households, memberships and invites will push
+layer. **Its trigger is Phase 9** — households, memberships and invites will push
 it past 600, and that is the point to make `db/` a package. Splitting a file that
 has one responsibility just to hit a number is how a codebase gets worse.
 

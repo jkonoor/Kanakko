@@ -577,6 +577,19 @@ change history** and **who acted**, and "who" only becomes a real question when
 
 ### The call
 
+**Names are pinned here** so they are an interface rather than something each
+task invents: the module is **`kanakko/eventlog.py`** (not `logging.py` — sitting
+beside `import logging` is a trap for a reader even though Python 3's absolute
+imports make it safe), the call is **`log_event`**, the seam is
+**`bind_sink`/`unbind_sink`**, the audit table is **`transaction_events`**, and
+the environment reads **`LOG_DIR`**, **`TRACE_MODE`** (default on) and
+**`TRACE_KEEP`** — unprefixed, matching `SIGNUP_MODE` and `DATABASE_URL` rather
+than inventing a `KANAKKO_` convention that exists nowhere else here.
+
+`ha-backend` names its call `logStep` around a `documentId` and a `stepName`.
+Those are its domain, not this one: here the unit is a Telegram update, so the
+correlation id is `update_id` and the noun is an event.
+
 One function, and its signature is the seam:
 
 ```python

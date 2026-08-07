@@ -153,7 +153,7 @@ Some need an operator to break something deliberately.
 
 ## 6. Access control and households
 
-**Phase 8 — not built yet.** Leave ⛔ until it ships; listed now so the plan is
+**Phase 9 — not built yet.** Leave ⛔ until it ships; listed now so the plan is
 testable the day it lands.
 
 ### 6a. Signup gate

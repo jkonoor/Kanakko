@@ -131,6 +131,41 @@ the plan's order and it matters.
 - [ ] `[human]` Trigger a manual backup, restore it into a scratch database, verify the row count
 - [ ] `[human]` Confirm every secret lives in Dokploy env and none is in the repo
 
+
+## Phase 6 — Upstream failure handling
+
+**Status: open — this is the next loop-able work.** Every Phase 5 task is
+`[human]`, so the loop takes the first task below.
+
+Raised 2026-08-07 from a real outage: the bot was silently dead in production
+for the whole of Phases 0-4. `parse.call()` raised, `/webhook` 500'd, Telegram
+redelivered forever, and the user saw *nothing at all* — no card, no error, no
+hint. Two separate upstream failures hid behind that silence (a 402 for exhausted
+OpenRouter credits, then a 400 for the type-array schema, fixed in `f1320a1`).
+
+- [ ] Tell the user when a parse fails for a non-transient reason, instead of
+      failing mute. `handle_text` already converts a `ValidationError` into the
+      rephrase prompt (§3); this extends that to upstream failures. An
+      `httpx.HTTPStatusError` whose status is **4xx** is permanent — a bad key
+      (401), exhausted credits (402), a rejected schema (400) — and no amount of
+      redelivery fixes it, so answer the user with something like "I can't reach
+      my parser right now — your message wasn't saved, try again shortly" and
+      return 200 so Telegram stops retrying. **5xx and network/timeout errors
+      must keep 500ing**, because those *are* transient and redelivery is the
+      recovery — that behaviour is deliberate (see the Handle Confirm task in
+      Phase 1) and must not regress. Store nothing in either case.
+      The check that earns its place: a stubbed `parse_message` raising a 402
+      results in a sent message and a 200, and one raising a 503 results in no
+      sent message and the exception propagating. Assert both directions — a test
+      that only covers the 4xx branch would pass if every error were swallowed,
+      which is the more dangerous bug.
+- [ ] Log the upstream failure at `WARNING` with the status code and provider
+      body, so the next occurrence is diagnosable from the container log rather
+      than by reconstructing the request by hand. `configure_logging` (task 84)
+      already makes this visible; nothing currently logs it. Keep the API key out
+      of the log line — it is in the request headers, not the body, but assert
+      that in the check.
+
 ---
 
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

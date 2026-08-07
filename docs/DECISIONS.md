@@ -521,6 +521,116 @@ the free tier. The gate and the plan are orthogonal.
 
 ---
 
+## 17. Logging: one call, two sinks, a trace mode
+
+Decided 2026-08-07, after auditing the codebase and studying the pipeline-debug
+logger in the `ha-backend` project.
+
+**The problem.** Six log calls existed in the whole application, five of them the
+jobs' one-liners. **Every money-mutating path logged nothing** — confirm, cancel,
+`/undo`, category change, dashboard delete. A user saying "my total is wrong" left
+nothing to reconstruct. That was tolerable while one person used it and remembered
+what they did; §16 makes it other people's money.
+
+### The idea worth stealing, and the one worth leaving
+
+`ha-backend` writes one JSON file per operation into a per-document folder, with
+the outcome **in the filename** — `fn__save_result_to_supabase__error.json`. Its
+strength is that `ls` is the summary: an agent lists a folder, sees what failed,
+and opens one small file, rather than parsing an interleaved stream. Numeric
+prefixes make alphabetical order chronological. Secrets are scrubbed, writes are
+wrapped so logging can never break processing, and folders rotate.
+
+**Adopted:** the outcome in the identifier, one call on *both* the success and
+error path, never throwing, a scrubber plus an explicit never-log list, a duration
+on every event, and a correlation id.
+
+**Not adopted:** the ~30 hand-written typed methods (`logOcrInput`,
+`logDocumentTypeOutput`, …). `ha-backend`'s own folders no longer match the layout
+documented at the top of that service — they are full of generic `fn__`/`step__`
+files, because the codebase converged on a single generic `logStep`. Copy what a
+project converged *on*, not what it converged *away from*.
+
+**Why the shape still differs here.** A document there is 30 steps over ~40
+seconds and has a story worth reconstructing; a Kanakko message is ~4 steps over
+~2 seconds and has almost none. So the folder-per-entity form is kept for the
+trace mode, and ordinary operation logs one line per event.
+
+### Two sinks, because there are two needs
+
+| | Operational log | Audit trail |
+|---|---|---|
+| Answers | "what happened, and how long did it take?" | "who changed this row, when, from what to what?" |
+| Store | JSON Lines on a mounted volume | Postgres |
+| Retention | rotated | permanent |
+
+**The audit trail is in Postgres and not on the volume, deliberately.** The audit
+row is written **in the same transaction as the money change**, so it cannot
+disagree with the ledger. A file write cannot be atomic with a database write: a
+process death between the two leaves an audit that is wrong, which is worse than
+one that is absent. It is also queryable, and it rides the existing backup.
+
+Some of this trail already exists implicitly — §6's soft delete keeps
+`deleted_at`, and rows carry `created_at`. What is genuinely missing is **category
+change history** and **who acted**, and "who" only becomes a real question when
+§16 puts several people in one household.
+
+### The call
+
+One function, and its signature is the seam:
+
+```python
+log_event("transaction.confirmed", status="ok", update_id=…, user_id=…,
+          duration_ms=…, txn_id=…, amount=…)
+```
+
+- **The event name and status are the greppable identifier** — the flat-file
+  equivalent of `ls | grep __error` is `jq 'select(.status=="error")'`.
+- **It never raises.** Every sink write is wrapped; a logging failure must never
+  fail a webhook. Telegram would redeliver a message that actually succeeded.
+- **Writes go through a module-level sink, bound once at startup.** Swapping the
+  backing store later — a remote aggregator, a database table, a hosted service —
+  is a new sink and **zero call-site changes**. This is why `ha-backend` made its
+  signature `async` despite being synchronous; a bound sink achieves the same in
+  Python without forcing `await` through handlers that are otherwise sync.
+- **Unbound is a silent no-op**, so unit tests need no mock.
+
+**Never logged, and a scrubber as the backstop:** the bot token, the OpenRouter
+key, the full `initData` string, and full LLM prompts. The scrubber redacts
+anything key-shaped and any base64 run over 500 characters, but call sites must
+not pass them in the first place — a scrubber is a net, not a policy.
+
+### Trace mode: on by default, and reviewed before real customers
+
+**Decided:** the `ha-backend`-style artefact folder, per update, **enabled by
+default**, gated by an env var so it can be turned off without a deploy.
+
+**What that means, stated plainly:** every message a user sends — the raw text,
+the prompt built from it, the model's response — is written to disk and kept until
+rotation. That is exactly what makes a hard parse bug diagnosable, and it is the
+right trade during a beta among friends.
+
+**It is the wrong trade once strangers pay for this**, and the decision is
+recorded so it is not discovered later: before the first paying customer, this
+must be revisited against whatever §16's `UNVERIFIED` data-protection question
+resolves to. Rotation bounds the disk, not the exposure.
+
+**Rotation:** the last N update folders, N from an env var. The volume is small
+and shared with the operational log.
+
+### Storage
+
+A single volume mounted on **both** `kanakko-web` and `kanakko-cron` — they are
+separate Dokploy applications and the jobs log too. Only `pgdata` exists today, so
+this is new infrastructure and a `[human]` step.
+
+Rotation uses stdlib `logging.handlers`; **no new dependency.** `structlog` was
+considered and rejected: its value is context binding, and a correlation id passed
+explicitly is clearer than one bound ambiently — and one fewer dependency in a
+project whose §7 and §8 are largely about what was left out.
+
+---
+
 ## Deliberately deferred
 
 Each gets a `ponytail:` comment in the code naming its ceiling and upgrade path.

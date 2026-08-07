@@ -12,6 +12,56 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `af2f0a8` — resolve the user by `from.id`, not `chat.id` (Phase 9, task 1)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: separates identity from delivery address (§16). `TextMessage` and
+`ButtonPress` gain a `from_id` field, captured in `dispatch` from
+`message.from.id` / `callback_query.from.id`; all five handlers now resolve the
+user via `get_or_create_user(conn, X.from_id)` while `chat_id` stays the send
+target. `from_id` falls back to `chat_id` in `__post_init__` when unset.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): the only production change is `chat_id →
+  from_id` in the `get_or_create_user` call of all five handlers
+  (`handle_text` 178, `handle_undo` 244, `handle_confirm` 272, `handle_cancel`
+  300, `handle_category` 341), plus the two new dataclass fields, the two
+  `__post_init__` fallbacks, and the two `dispatch` captures. No money, timezone,
+  soft-delete, or category path is touched. `chat_id` is still used correctly for
+  every `send_message`/`delete_message`/`edit_message_text` (the delivery
+  address), verified by grep.
+- **All handlers covered.** `grep` for `get_or_create_user`/`from_id`/`chat_id`
+  across `kanakko/` confirms no sixth handler and no other constructor of
+  `TextMessage`/`ButtonPress` was left resolving by `chat_id`. `app.py`'s three
+  Mini App routes resolve by `telegram_user_id` from the verified `initData`
+  (lines 121/183/227) — the correct identity source there, rightly unchanged.
+- **`dispatch` null-safety.** `from_id=(message.get("from") or {}).get("id")`
+  tolerates a missing `from` block (→ `None` → falls back to `chat_id` in
+  `__post_init__`). Real private-chat messages always carry `from.id == chat.id`,
+  so the fallback only serves the pre-existing test construction sites, as
+  claimed.
+- **Full suite:** `uv run pytest -q` → **208 passed, 1 warning**.
+- **Guard reddens without the fix.** Temporarily reverted `handle_text`'s
+  resolution to `msg.chat_id` and ran
+  `test_handle_text_resolves_the_user_by_from_id_not_chat_id` → **1 failed**
+  (pending row landed under 12345, `chat_as_user` ≠ 0). Restored via
+  `git checkout`. The new test is exactly the guard §16 asked for — impossible to
+  write before the split, since `from_id == chat_id` in a private chat — and it
+  asserts the *behaviour* (which user row the pending row keys to, and that the
+  chat id never became a user) rather than a surface string. The two dispatch
+  field-tests correctly assert `from_id` is captured and distinct from `chat_id`.
+
+### Findings
+
+None. The change is minimal, correctly scoped, and its guard fails for the
+reason it exists. `TASKS.md` tick is legitimate: `from.id` is captured in
+`dispatch`, the user is resolved from it in every handler, `chat_id` stays the
+send target, and the differing-id guard is present and effective.
+
+---
+
 ## 2026-08-07 — `71388bb` — §17 `LOG_DIR`/`TRACE_MODE`/`TRACE_KEEP` in `.env.example` and compose (Phase 8, task 8)
 
 **Status: ✅ DONE** — no blocking issues.

@@ -410,7 +410,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       already forces `active_transactions`; extend it so a read missing a
       `household_id` predicate is caught the same way. A household read that
       leaks another household's rows is the worst bug this phase can ship.
-- [ ] Enforce the per-member rules (§16): `/undo` removes **your own** last entry,
+- [x] Enforce the per-member rules (§16): `/undo` removes **your own** last entry,
       and the dashboard's delete and recategorise act only on rows you entered.
       Two checks, both about the *other* member: A cannot undo B's entry, and A's
       delete of B's row is refused.

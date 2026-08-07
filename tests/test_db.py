@@ -401,6 +401,80 @@ def test_household_reads_span_members_and_never_leak(conn):
     conn.rollback()
 
 
+def _member(conn, telegram_user_id: int, household_id: int) -> int:
+    """A second user joined into an existing household (§16), not a household of one."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id",
+            (telegram_user_id,),
+        )
+        (user_id,) = cur.fetchone()
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (household_id, user_id),
+        )
+    return user_id
+
+
+def test_undo_removes_your_own_entry_not_a_housemates(conn):
+    """Within one household, `/undo` removes the caller's entry, never a housemate's (§16).
+
+    The read is shared but undo is personal (§16): A and B share household H, so the
+    `household_id` predicate passes for both members' rows — only the `user_id`
+    scope keeps A off B's row. B's entry is the newest in the household, so a
+    household-wide undo would delete it; A's undo must instead walk back to A's own
+    older row. Dropping `user_id = %s` from `undo_last` reddens this.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 84001)
+    hh = household_of(conn, a)
+    b = _member(conn, 84002, hh)
+    a_txn = _confirm(conn, a, 8401, "100.00")  # A's entry (older)
+    _confirm(conn, b, 8402, "999.99")  # B's entry — newest in the household
+
+    removed = undo_last(conn, a, source="webhook", update_id=None)
+    assert removed["amount"] == Decimal("100.00")  # A's own row, not B's newer one
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT deleted_at FROM transactions WHERE txn_id = %s", (a_txn,))
+        assert cur.fetchone()[0] is not None  # A's own entry was the one removed
+        cur.execute("SELECT deleted_at FROM transactions WHERE user_id = %s", (b,))
+        assert cur.fetchone()[0] is None  # B's entry untouched
+    conn.rollback()
+
+
+def test_dashboard_delete_and_recategorise_refuse_a_housemates_row(conn):
+    """A member cannot delete or recategorise a housemate's row (§16).
+
+    A and B share household H; B logs a row. Both dashboard mutations are scoped to
+    the acting `user_id`, so A acting on B's `txn_id` matches no row and returns
+    `None` (a 404 at the route), leaving B's row live and its category unchanged.
+    Dropping the `user_id` scope from either function lets A act on B's row; this
+    reddens then.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 85001)
+    hh = household_of(conn, a)
+    b = _member(conn, 85002, hh)
+    b_txn = _confirm(conn, b, 8501, "42.00")  # B's row, category = EXPENSE_CATEGORIES[0]
+
+    assert soft_delete_transaction(
+        conn, a, b_txn, source="miniapp", update_id=None
+    ) is None
+    assert set_transaction_category(
+        conn, a, b_txn, EXPENSE_CATEGORIES[3], source="miniapp", update_id=None
+    ) is None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT deleted_at, category FROM transactions WHERE txn_id = %s", (b_txn,)
+        )
+        deleted_at, category = cur.fetchone()
+    assert deleted_at is None  # B's row still live
+    assert category == EXPENSE_CATEGORIES[0]  # and its category unchanged
+    conn.rollback()
+
+
 # --- §17 audit trail: transaction_events, written in db.py inside the money tx ---
 
 

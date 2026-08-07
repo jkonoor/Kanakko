@@ -179,7 +179,7 @@ this: pairing a figure with a directional delta *"shows both the direction and
 scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
 2025-09) — a number with no baseline is a record, not an insight.
 
-- [ ] Add previous-period figures to the dashboard so each headline carries a
+- [x] Add previous-period figures to the dashboard so each headline carries a
       delta — `₹300 · ▼ 40% vs last month`. `db.month_summary` already takes an
       arbitrary half-open range, so the previous month/week is the same query with
       shifted bounds and needs no new SQL shape — but it *is* a second query per

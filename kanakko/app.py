@@ -43,6 +43,7 @@ from kanakko.webapp import (
     current_month_ist,
     current_week_ist,
     dashboard_html,
+    previous_month_first,
     validate_init_data,
     user_id_from_init_data,
     SHELL_HTML,
@@ -121,11 +122,24 @@ def mini_app_data(request: Request) -> str:
         a_income, a_expenses, a_top = month_summary(
             conn, user_id, date.min, date.max
         )
+        # Previous-period expenses give each hero a baseline — a figure with none
+        # is a record, not an insight. Same generic query, shifted bounds: the week
+        # before (a plain 7-day step back) and the month before (its 1st, which for
+        # January is December of the prior year — see `previous_month_first`). Both
+        # derive from the *current* bounds, so no second clock read can disagree
+        # with them at a month/week rollover. All-time has no prior period.
+        prev_m_first = previous_month_first(first)
+        _, pw_expenses, _ = month_summary(
+            conn, user_id, w_first - timedelta(days=7), w_first
+        )
+        _, pm_expenses, _ = month_summary(conn, user_id, prev_m_first, first)
         recent = recent_transactions(conn, user_id)
     return dashboard_html(
         [
-            Period("week", "Week", "this week", w_income, w_expenses, w_top),
-            Period("month", "Month", first.strftime("%B %Y"), m_income, m_expenses, m_top),
+            Period("week", "Week", "this week", w_income, w_expenses, w_top,
+                   pw_expenses, "vs last week"),
+            Period("month", "Month", first.strftime("%B %Y"), m_income, m_expenses,
+                   m_top, pm_expenses, "vs last month"),
             Period("all", "All", "all time", a_income, a_expenses, a_top),
         ],
         recent,

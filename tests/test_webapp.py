@@ -27,6 +27,7 @@ from kanakko.webapp import (
     current_month_ist,
     current_week_ist,
     dashboard_html,
+    previous_month_first,
     recent_list,
     user_id_from_init_data,
     validate_init_data,
@@ -268,6 +269,50 @@ def test_each_period_gets_its_own_breakdown():
     assert "Food" in month_panel and "Transport" not in month_panel
 
 
+def test_previous_month_first_steps_january_back_to_december():
+    """January's previous month is December of the *prior year* (§10, task Phase 7).
+
+    The one boundary a naive `month - 1` gets wrong, and the case the delta must
+    cover — the previous-period baseline for a January dashboard is December.
+    """
+    assert previous_month_first(date(2026, 1, 1)) == date(2025, 12, 1)
+    # A mid-year month is unremarkable, but pin it so the helper can't regress the
+    # common case while getting January right.
+    assert previous_month_first(date(2026, 8, 1)) == date(2026, 7, 1)
+
+
+def _delta_period(expenses, prev_expenses):
+    """A month panel with only the figures the delta reads set."""
+    return [Period("month", "Month", "August 2026", Decimal("0"), Decimal(expenses),
+                   [], Decimal(prev_expenses) if prev_expenses is not None else None,
+                   "vs last month")]
+
+
+def test_hero_delta_says_no_comparison_against_a_zero_baseline():
+    """A first-ever period has no baseline: "no comparison yet", never a fabricated
+    percentage (a delta against zero is undefined, not 100%)."""
+    html = dashboard_html(_delta_period("500", "0"), [])
+    assert "no comparison yet" in html
+    assert "%" not in html  # no fabricated percentage anywhere on the panel
+
+
+def test_hero_delta_shows_direction_and_magnitude():
+    """Two periods: the sign (arrow) and magnitude must be right, both directions."""
+    down = dashboard_html(_delta_period("300", "500"), [])  # spent less
+    assert "▼ 40% vs last month" in down  # (300-500)/500 = -40%
+    up = dashboard_html(_delta_period("300", "200"), [])  # spent more
+    assert "▲ 50% vs last month" in up  # (300-200)/200 = +50%
+
+
+def test_all_time_panel_carries_no_delta():
+    """An all-time range has no prior period, so its hero shows no delta at all."""
+    period = [Period("all", "All", "all time", Decimal("0"), Decimal("500"), [])]
+    html = dashboard_html(period, [], selected="all")
+    assert "vs last" not in html
+    assert "no comparison" not in html
+    assert 'class="delta"' not in html
+
+
 def test_current_month_ist_buckets_in_kolkata():
     """00:30 IST on Aug 1 (= 19:00 UTC Jul 31) is August, not July (§10)."""
     now = datetime(2026, 7, 31, 19, 0, tzinfo=timezone.utc)
@@ -364,6 +409,40 @@ def test_dashboard_route_renders_totals_and_current_month(conn, monkeypatch):
         "</section>", 1)[0]
     assert "Transport" in all_panel and "Food" in all_panel
     assert "Transport" not in month_panel
+
+
+def test_dashboard_route_month_delta_needs_a_baseline(conn, monkeypatch):
+    """The month hero's delta is undefined until a previous month exists, then
+    carries the real sign and magnitude (§13, Phase 7).
+
+    Drives the real route + `db.month_summary` against Postgres over the actual
+    previous-month range. Seed one month only → "no comparison yet". Seed the
+    prior month too → the delta is that month-over-month change, exact.
+    """
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+    uid = get_or_create_user(conn, 42)
+    first, _ = current_month_ist()
+    init_data = _sign(FIELDS)
+
+    # One month of data only — no previous month to compare against.
+    _insert_txn(conn, uid, "500.00", "expense", "Food", first)
+    body = client.get("/app/data", headers={"Authorization": "tma " + init_data}).text
+    month_panel = body.split('<section class="panel" data-period="month"', 1)[1].split(
+        "</section>", 1)[0]
+    assert "no comparison yet" in month_panel
+    assert "vs last month" not in month_panel  # no fabricated percentage
+
+    # Now seed the previous month: 300 last month, 500 this month → +67%.
+    _insert_txn(conn, uid, "300.00", "expense", "Transport", previous_month_first(first))
+    body = client.get("/app/data", headers={"Authorization": "tma " + init_data}).text
+    conn.rollback()
+    month_panel = body.split('<section class="panel" data-period="month"', 1)[1].split(
+        "</section>", 1)[0]
+    assert "▲ 67% vs last month" in month_panel  # (500-300)/300 = 66.7% → 67
 
 
 def test_dashboard_route_rejects_a_forged_payload(conn, monkeypatch):

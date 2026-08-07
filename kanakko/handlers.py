@@ -40,21 +40,34 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TextMessage:
-    """A user typed something — a transaction to parse (§2)."""
+    """A user typed something — a transaction to parse (§2).
+
+    `update_id`/`source` are the §17 correlation fields, set by `dispatch`: the
+    `update_id` is what ties every event of one Telegram delivery together, and
+    `source` is always `webhook` here. They default so the many test
+    construction sites that predate §17 stay valid.
+    """
 
     chat_id: int
     message_id: int
     text: str
+    update_id: int | None = None
+    source: str = "webhook"
 
 
 @dataclass(frozen=True)
 class ButtonPress:
-    """A user tapped an inline button — Confirm/Cancel/category (§4, §5)."""
+    """A user tapped an inline button — Confirm/Cancel/category (§4, §5).
+
+    `update_id`/`source`: see `TextMessage` — the §17 correlation fields.
+    """
 
     chat_id: int
     message_id: int
     callback_query_id: str
     data: str
+    update_id: int | None = None
+    source: str = "webhook"
 
 
 def dispatch(update: dict) -> TextMessage | ButtonPress | None:
@@ -66,6 +79,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
     these live in the following tasks (parse→confirm card, Confirm, Cancel,
     category buttons).
     """
+    update_id = update.get("update_id")
     message = update.get("message") or {}
     if isinstance(message.get("text"), str):
         chat = message.get("chat") or {}
@@ -73,6 +87,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             chat_id=chat.get("id"),
             message_id=message.get("message_id"),
             text=message["text"],
+            update_id=update_id,
         )
 
     callback = update.get("callback_query") or {}
@@ -84,6 +99,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             message_id=msg.get("message_id"),
             callback_query_id=callback.get("id"),
             data=callback["data"],
+            update_id=update_id,
         )
     return None
 

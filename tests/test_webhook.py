@@ -46,25 +46,35 @@ def _set_secret(monkeypatch, value=SECRET):
 
 
 def test_text_message_is_dispatched_with_its_fields():
+    # The update_id is the §17 correlation id — dispatch must carry it onto the
+    # action, not drop it for the webhook to read separately (gap 1).
     action = dispatch(
-        {"message": {"message_id": 7, "chat": {"id": 42}, "text": "spent 500 on food"}}
+        {
+            "update_id": 4242,
+            "message": {"message_id": 7, "chat": {"id": 42}, "text": "spent 500 on food"},
+        }
     )
-    assert action == TextMessage(chat_id=42, message_id=7, text="spent 500 on food")
+    assert action == TextMessage(
+        chat_id=42, message_id=7, text="spent 500 on food", update_id=4242
+    )
+    assert action.source == "webhook"
 
 
 def test_button_press_is_dispatched_with_its_fields():
     action = dispatch(
         {
+            "update_id": 4243,
             "callback_query": {
                 "id": "cbq1",
                 "data": "confirm",
                 "message": {"message_id": 9, "chat": {"id": 42}},
-            }
+            },
         }
     )
     assert action == ButtonPress(
-        chat_id=42, message_id=9, callback_query_id="cbq1", data="confirm"
+        chat_id=42, message_id=9, callback_query_id="cbq1", data="confirm", update_id=4243
     )
+    assert action.source == "webhook"
 
 
 def test_irrelevant_updates_are_ignored():

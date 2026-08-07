@@ -253,7 +253,7 @@ dashboard delete, dashboard recategorise. `handle_cancel`, `handle_category` and
 `handle_text` touch only pending rows: they get an operational line and no audit
 row, because there is no `txn_id` to hang one on.
 
-- [ ] Add `kanakko/eventlog.py`: `log_event(event, *, status, **fields)` writing
+- [x] Add `kanakko/eventlog.py`: `log_event(event, *, status, **fields)` writing
       JSON Lines through a **module-level sink bound once at startup**, plus
       `bind_sink` / `unbind_sink`. Unbound is a silent no-op so tests need no
       mock (§17). **It must never raise** — wrap every write, because a logging

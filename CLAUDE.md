@@ -58,6 +58,29 @@ category string literal in another module.
 **One definition per thing.** Two places that must agree will eventually
 disagree — a command in both the Dockerfile and compose, a version in both
 `pyproject.toml` and `__init__.py`. Put it in one place and derive the other.
+This has already happened twice: `MODEL_DEFAULT` drifted from `DECISIONS.md` §2
+while production ran a third model, and three Mini App routes each carried their
+own copy of the auth preamble. **The second copy is a warning; the third is the
+bug.** That applies to prose as well as code — three route docstrings re-explained
+the same header scheme, and they drifted too.
+
+**Files stay under 300 lines, split by responsibility rather than by layer.**
+`webapp.py` reached 545 lines holding HMAC verification and CSS side by side, and
+`app.py` 509 holding the HTTP surface, the update layer, and the Mini App routes.
+Security code never shares a file with presentation. When a module is doing two
+jobs, the seam is usually already visible in its own docstring.
+
+`db.py` is the one file over that line (426) and is deliberately left alone: it is
+17 small functions doing one job, and splitting by entity would be splitting by
+layer. **Its trigger is Phase 8** — households, memberships and invites will push
+it past 600, and that is the point to make `db/` a package. Splitting a file that
+has one responsibility just to hit a number is how a codebase gets worse.
+
+**A fan-out over users isolates failures per user.** One bad recipient must never
+stop the rest, and must never roll back work that already succeeded — the jobs
+looped without a `try`, so a single blocked user silenced everyone after them
+*and* discarded the `reminder_log` rows written before them. Each user gets its
+own savepoint; failures are collected and raised together at the end.
 
 **No new dependency without a reason in the commit message.** The design
 deliberately excludes an ORM, Celery, Redis, and any charting library — see

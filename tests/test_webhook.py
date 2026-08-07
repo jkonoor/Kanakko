@@ -675,7 +675,7 @@ def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909, amount="250.00")
-    row = db.confirm_pending(conn, user_id, 909)
+    row = db.confirm_pending(conn, user_id, 909, source="webhook", update_id=None)
     assert isinstance(row["txn_id"], int)
     sent = {}
     monkeypatch.setattr(
@@ -725,9 +725,9 @@ def test_a_redelivered_undo_does_not_soft_delete_a_second_row(conn, monkeypatch)
     """
     migrate(conn)
     uid, _ = _seed_pending(conn, chat_id=555, card_message_id=11, amount="250.00")
-    db.confirm_pending(conn, uid, 11)
+    db.confirm_pending(conn, uid, 11, source="webhook", update_id=None)
     _seed_pending(conn, chat_id=555, card_message_id=12, amount="100.00")
-    db.confirm_pending(conn, uid, 12)
+    db.confirm_pending(conn, uid, 12, source="webhook", update_id=None)
 
     monkeypatch.setattr(handlers, "send_message", lambda *a, **k: None)
     # connect() yields the shared test connection; __exit__ must not close it, so

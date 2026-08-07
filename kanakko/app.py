@@ -181,7 +181,8 @@ async def mini_app_delete(request: Request) -> Response:
     start = time.perf_counter()
     with connect() as conn:
         user_id = get_or_create_user(conn, telegram_user_id)
-        deleted = soft_delete_transaction(conn, user_id, txn_id)
+        deleted = soft_delete_transaction(conn, user_id, txn_id,
+                                          source="miniapp", update_id=None)
     # ponytail: log_event is a synchronous write inside an async route — fine at
     # this scale (one line, no fsync). Move to a queue only if the sink ever
     # blocks the event loop. No `update_id`: a Mini App POST is not a Telegram
@@ -224,7 +225,8 @@ async def mini_app_category(request: Request) -> Response:
     start = time.perf_counter()
     with connect() as conn:
         user_id = get_or_create_user(conn, telegram_user_id)
-        updated = set_transaction_category(conn, user_id, txn_id, category)
+        updated = set_transaction_category(conn, user_id, txn_id, category,
+                                           source="miniapp", update_id=None)
     # ponytail: synchronous log write in an async route — see /app/delete above
     # for the ceiling and upgrade path. No `update_id` (§17 gap 2); 404 is `noop`.
     if updated is None:

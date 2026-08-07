@@ -305,7 +305,7 @@ row, because there is no `txn_id` to hang one on.
       Phase 6 `WARNING` already covers the failure; this adds the success side, so
       a slow model is visible before it becomes a complaint about the bot feeling
       sluggish.
-- [ ] Add `migrations/003_transaction_events.sql` and write an audit row **inside
+- [x] Add `migrations/003_transaction_events.sql` and write an audit row **inside
       the same `conn.transaction()` block as the money statement, in `db.py`, not
       in the calling handler** (§17 — read the paragraph, it explains why the
       handler version is atomic today only by accident and fails silently the

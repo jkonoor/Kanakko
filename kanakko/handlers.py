@@ -208,7 +208,7 @@ def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.chat_id)
-    removed = undo_last(conn, user_id)
+    removed = undo_last(conn, user_id, source=msg.source, update_id=msg.update_id)
     if removed is None:
         send_message(msg.chat_id, "Nothing to undo.")
         log_event("transaction.undone", status="noop", update_id=msg.update_id,
@@ -236,7 +236,8 @@ def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, press.chat_id)
-    row = confirm_pending(conn, user_id, press.message_id)
+    row = confirm_pending(conn, user_id, press.message_id,
+                          source=press.source, update_id=press.update_id)
     answer_callback_query(
         press.callback_query_id, "Saved ✅" if row else "Already saved"
     )

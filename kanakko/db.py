@@ -11,14 +11,57 @@ number (a float) would be refused there, so a float can never reach the ledger.
 Reads elsewhere go through `active_transactions` (§6).
 """
 
+import json
 import os
 from datetime import date, datetime
 from decimal import Decimal
+from functools import partial
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from kanakko.parse import Transaction
+
+# `default=str` renders the `Decimal` amount and the `date` a ledger row carries;
+# JSONB stores them as their canonical strings ("12.50", "2026-08-05"), never a
+# float (§9).
+_json_dumps = partial(json.dumps, default=str)
+
+
+def _record_event(
+    cur: psycopg.Cursor,
+    *,
+    txn_id: int,
+    user_id: int,
+    action: str,
+    before: dict | None,
+    after: dict | None,
+    source: str,
+    update_id: int | None,
+) -> None:
+    """Write one `transaction_events` audit row (§17).
+
+    Called on the *same cursor*, inside each money function's own
+    `conn.transaction()` block, so the audit row commits and rolls back with the
+    money statement — physical adjacency is the only form of this that cannot come
+    apart (§17). `before`/`after` are the row's fields; the side that doesn't
+    exist for an action is `None` (a confirm has no before, an undo/delete no
+    after).
+    """
+    cur.execute(
+        "INSERT INTO transaction_events"
+        " (txn_id, user_id, action, before, after, source, update_id)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (
+            txn_id,
+            user_id,
+            action,
+            Jsonb(before, dumps=_json_dumps) if before is not None else None,
+            Jsonb(after, dumps=_json_dumps) if after is not None else None,
+            source,
+            update_id,
+        ),
+    )
 
 
 def connect() -> psycopg.Connection:
@@ -74,7 +117,12 @@ def save_pending(
 
 
 def confirm_pending(
-    conn: psycopg.Connection, user_id: int, telegram_message_id: int
+    conn: psycopg.Connection,
+    user_id: int,
+    telegram_message_id: int,
+    *,
+    source: str,
+    update_id: int | None,
 ) -> dict | None:
     """Write user's pending row for `telegram_message_id` to `transactions`, clear it.
 
@@ -83,13 +131,16 @@ def confirm_pending(
     write another user's pending transaction. `save_pending` stores `user_id`;
     this reverses it with the same scoping.
 
-    The read → insert → delete run in one transaction so a crash can never store
-    a transaction while leaving its pending row live (a later double confirm), nor
-    clear the pending row with nothing stored. Returns the stored row — `txn_id`
-    plus its fields, so the caller can log the amount (§17) — or `None` when there
-    is no pending row (Telegram redelivers taps it already got a 200 for, so
-    confirming twice must not write the transaction twice). Does not commit — the
-    caller owns the transaction.
+    The read → insert → delete → audit run in one transaction so a crash can never
+    store a transaction while leaving its pending row live (a later double
+    confirm), nor clear the pending row with nothing stored, nor write the ledger
+    row without its audit trail (§17). `source`/`update_id` are the acting update's
+    correlation id, taken as arguments so the audit write cannot come apart from
+    the money write (§17). Returns the stored row — `txn_id` plus its fields, so
+    the caller can log the amount (§17) — or `None` when there is no pending row
+    (Telegram redelivers taps it already got a 200 for, so confirming twice must
+    not write the transaction twice). Does not commit — the caller owns the
+    transaction.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -111,14 +162,16 @@ def confirm_pending(
         )
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))
-    return {
-        "txn_id": txn_id,
-        "amount": txn.amount,
-        "type": txn.type,
-        "category": txn.category,
-        "note": txn.note,
-        "occurred_on": txn.date,
-    }
+        stored = {
+            "amount": txn.amount,
+            "type": txn.type,
+            "category": txn.category,
+            "note": txn.note,
+            "occurred_on": txn.date,
+        }
+        _record_event(cur, txn_id=txn_id, user_id=user_id, action="confirm",
+                      before=None, after=stored, source=source, update_id=update_id)
+    return {"txn_id": txn_id, **stored}
 
 
 def set_pending_category(
@@ -154,7 +207,13 @@ def set_pending_category(
     return txn
 
 
-def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
+def undo_last(
+    conn: psycopg.Connection,
+    user_id: int,
+    *,
+    source: str,
+    update_id: int | None,
+) -> dict | None:
     """Soft-delete the user's most recent confirmed transaction, return its fields (§5, §6).
 
     `/undo` corrects the last entry: it sets `deleted_at` on the newest live row
@@ -163,12 +222,14 @@ def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
     rows — so a *second* `/undo` walks back to the previous entry instead of
     re-deleting the one just removed (reading `transactions` directly would keep
     latching onto the already-deleted newest row). Scoped by `user_id` (§1).
-    Returns the removed row's fields — including its `txn_id` (§17) — for the
-    confirmation reply and the event log, or `None` when
+    The soft-delete and its audit row (§17) share one `conn.transaction()`, so a
+    crash between them is impossible; `source`/`update_id` are the correlation id
+    of the update doing the undo. Returns the removed row's fields — including its
+    `txn_id` (§17) — for the confirmation reply and the event log, or `None` when
     there is no live transaction to undo. Does not commit — the caller owns the
     transaction.
     """
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE transactions SET deleted_at = now()"
             " WHERE txn_id = ("
@@ -179,17 +240,19 @@ def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
             (user_id,),
         )
         row = cur.fetchone()
-    if row is None:
-        return None
-    txn_id, amount, type_, category, note, occurred_on = row
-    return {
-        "txn_id": txn_id,
-        "amount": amount,
-        "type": type_,
-        "category": category,
-        "note": note,
-        "occurred_on": occurred_on,
-    }
+        if row is None:
+            return None
+        txn_id, amount, type_, category, note, occurred_on = row
+        removed = {
+            "amount": amount,
+            "type": type_,
+            "category": category,
+            "note": note,
+            "occurred_on": occurred_on,
+        }
+        _record_event(cur, txn_id=txn_id, user_id=user_id, action="undo",
+                      before=removed, after=None, source=source, update_id=update_id)
+    return {"txn_id": txn_id, **removed}
 
 
 def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
@@ -305,7 +368,12 @@ def recent_transactions(
 
 
 def soft_delete_transaction(
-    conn: psycopg.Connection, user_id: int, txn_id: int
+    conn: psycopg.Connection,
+    user_id: int,
+    txn_id: int,
+    *,
+    source: str,
+    update_id: int | None,
 ) -> dict | None:
     """Soft-delete one live transaction by id, scoped to `user_id` (§6, §13).
 
@@ -315,26 +383,46 @@ def soft_delete_transaction(
     `active_transactions`, so deleting an already-deleted (or another user's) row
     is a no-op returning `None`, not a second write — the subquery yields no
     `txn_id`, and `WHERE txn_id = NULL` matches nothing. Mirrors `undo_last`'s
-    read-through-the-view pattern. Returns the deleted row — `txn_id` plus its
-    amount so the caller can log it (§17) — or `None`. Does not commit — the
-    caller owns the transaction.
+    read-through-the-view pattern. The delete and its audit row (§17) share one
+    `conn.transaction()`; `source`/`update_id` are the correlation id (a Mini App
+    delete carries `source="miniapp"` and no `update_id`, §17 gap 2). Returns the
+    deleted row — `txn_id` plus its amount so the caller can log it (§17) — or
+    `None`. Does not commit — the caller owns the transaction.
     """
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE transactions SET deleted_at = now()"
             " WHERE txn_id = ("
             "   SELECT txn_id FROM active_transactions"
             "   WHERE user_id = %s AND txn_id = %s"
             " )"
-            " RETURNING txn_id, amount",
+            " RETURNING txn_id, amount, type, category, note, occurred_on",
             (user_id, txn_id),
         )
         row = cur.fetchone()
-    return {"txn_id": row[0], "amount": row[1]} if row else None
+        if row is None:
+            return None
+        tid, amount, type_, category, note, occurred_on = row
+        before = {
+            "amount": amount,
+            "type": type_,
+            "category": category,
+            "note": note,
+            "occurred_on": occurred_on,
+        }
+        _record_event(cur, txn_id=tid, user_id=user_id, action="delete",
+                      before=before, after=None, source=source, update_id=update_id)
+    return {"txn_id": tid, "amount": amount}
 
 
 def set_transaction_category(
-    conn: psycopg.Connection, user_id: int, txn_id: int, category: str
+    conn: psycopg.Connection,
+    user_id: int,
+    txn_id: int,
+    category: str,
+    *,
+    source: str,
+    update_id: int | None,
 ) -> dict | None:
     """Set the category of one live transaction, scoped to `user_id` (§5, §13).
 
@@ -344,11 +432,25 @@ def set_transaction_category(
     `active_transactions`, so a deleted or foreign id yields no `txn_id` and the
     UPDATE matches nothing, returning `None` rather than a stray write. The caller
     validates `category` against the closed set (`categories.py`) before this runs.
-    Mirrors `soft_delete_transaction`. Returns the updated row — `txn_id` plus its
-    amount so the caller can log it (§17) — or `None`. Does not commit — the
-    caller owns the transaction.
+    Mirrors `soft_delete_transaction`.
+
+    Category change history is the audit data §17 names as genuinely missing, so
+    the old category is read with a `SELECT` before the `UPDATE`, in the same
+    transaction — Postgres 16 here has no `RETURNING OLD.*` form — and both flank
+    the audit row's `before`/`after`. `source`/`update_id` are the correlation id.
+    Returns the updated row — `txn_id` plus its amount so the caller can log it
+    (§17) — or `None`. Does not commit — the caller owns the transaction.
     """
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT category FROM active_transactions"
+            " WHERE user_id = %s AND txn_id = %s",
+            (user_id, txn_id),
+        )
+        old = cur.fetchone()
+        if old is None:
+            return None
+        (old_category,) = old
         cur.execute(
             "UPDATE transactions SET category = %s"
             " WHERE txn_id = ("
@@ -358,8 +460,11 @@ def set_transaction_category(
             " RETURNING txn_id, amount",
             (category, user_id, txn_id),
         )
-        row = cur.fetchone()
-    return {"txn_id": row[0], "amount": row[1]} if row else None
+        tid, amount = cur.fetchone()
+        _record_event(cur, txn_id=tid, user_id=user_id, action="recategorise",
+                      before={"category": old_category}, after={"category": category},
+                      source=source, update_id=update_id)
+    return {"txn_id": tid, "amount": amount}
 
 
 def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:

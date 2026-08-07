@@ -12,6 +12,53 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `0383f74` — log the dashboard money mutations through the §17 seam (Phase 8, task 4)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: the two Mini App money routes now emit one `log_event` each —
+`transaction.deleted` (`/app/delete`) and `transaction.recategorised`
+(`/app/category`) — with `source="miniapp"` and **no `update_id`** (an HTTP POST
+is not a Telegram update, §17 gap 2), status following the outcome (`ok` with
+`txn_id`+`amount`; a 404 → `noop` with no amount). `db.soft_delete_transaction`
+and `set_transaction_category` now return the touched row (`{txn_id, amount}`)
+instead of a bare id, mirroring the bot-side pair. Two new `test_webapp.py`
+tests. Judged against §17 (three statuses; `source` always present; `update_id`
+absent on a Mini App event; amount on the operational log) and TASKS.md task 4.
+
+### What I checked (commands and results)
+
+- Full `uv run pytest -q` → **196 passed**, 1 unrelated Starlette/httpx
+  deprecation warning — matches the commit's "196 passed." `uv run ruff check
+  kanakko/ tests/` → **All checks passed!**
+- **The load-bearing guard actually reddens.** Programmatically dropped the
+  `log_event(status="ok", …)` line from `mini_app_delete` →
+  `test_delete_route_logs_the_money_mutation` **FAILED** (the events list no
+  longer starts with the `ok` line). Restored; tree clean (`git diff --stat`
+  empty).
+- **Scope is correct.** This task is the *operational* log only. The §17 audit
+  row (`transaction_events`, written inside the money statement's
+  `conn.transaction()` in `db.py`) is task 6, still unchecked in TASKS.md — so
+  logging *after* the `with connect()` block commits is right here, not the
+  atomicity trap §17 warns about. The `ponytail:` comments name the real
+  ceiling (a synchronous sink in an async route) and upgrade path (a queue).
+- **`amount` is a genuine `Decimal`, not a float.** It flows straight from
+  `RETURNING txn_id, amount` on a `NUMERIC(12,2)` column through psycopg's
+  cursor into the dict — no arithmetic touches it. (Noted: the test's
+  `== Decimal("300.00")` would also pass for a float `300.0`, so the assertion
+  alone doesn't *pin* the type, but the code path introduces no float, and the
+  default sink serialises with `default=str`, so nothing float-shaped is stored.)
+- **`noop` carries no amount, `ok` does.** Confirmed in both routes: the `None`
+  branch passes only `user_id`+`duration_ms`; the tests assert `"amount" not in
+  events[1]`. The cross-user 404 (delete/recategorise another user's row) is
+  scoped through `active_transactions`, so it correctly logs `noop`, not `ok`.
+- `update_id` genuinely absent (not `None`): the routes never pass it and the
+  test asserts `"update_id" not in events[0]`.
+
+No findings.
+
+---
+
 ## 2026-08-07 — `5f3bc47` — log the bot-side money mutations through the §17 seam (Phase 8, task 3)
 
 **Status: ✅ DONE** — no blocking issues.

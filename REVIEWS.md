@@ -12,6 +12,62 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `991c883` — log upstream parse failures at WARNING (Phase 6, task 2)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `handle_text`'s `except httpx.HTTPStatusError` handler now emits a
+`log.warning("parse upstream failure: status=%s body=%s", ...)` before the
+transient/permanent branch, so both the swallowed 4xx and the re-raised 5xx
+carry the provider status and body into the container log (§6, task 2). One new
+test; `_http_error` test helper gains an optional `body`; TASKS.md box ticked.
+
+### What I checked
+
+- **`git show HEAD`** — the diff is exactly the three files claimed
+  (`kanakko/app.py`, `tests/test_webhook.py`, `TASKS.md`), no drive-by changes.
+- **Placement.** The `log.warning` sits at `app.py:326`, *before* the
+  `if not 400 <= status < 500: raise` at `app.py:331`. So a 5xx is logged and
+  then re-raised, and a 4xx is logged and then swallowed — both branches log,
+  which is what the task asked for. The prior task's swallow/re-raise routing is
+  untouched.
+- **Full suite green.** `uv run pytest -q` → **178 passed, 1 warning**. The
+  lone warning is the pre-existing Starlette/httpx testclient deprecation, not
+  from this change.
+- **The guard fires for the reason it exists.** Reverted the fix in place
+  (`uv run python` to delete the `log.warning` block) and ran
+  `test_handle_text_logs_upstream_failure_at_warning_without_the_api_key`
+  → **1 failed**; restored with `git checkout` → **1 passed**. The test is a
+  real red, not a decorative one: without the log line, caplog has no WARNING
+  record and the `(record,) = [...]` unpack raises. The commit's reddened-by-revert
+  claim holds.
+- **No leak path.** The only interpolated values are `exc.response.status_code`
+  (an int) and `exc.response.text` (the provider body). The OpenRouter key
+  travels in the `Authorization` request header (`parse.py`), never the response
+  body, so it cannot reach this line. Nothing money/timezone/`active_transactions`/
+  category-related is touched — this is a pure logging addition.
+
+### Findings
+
+- **(minor, non-blocking) The "without the API key" assertion is close to
+  vacuous — it can't fail for the reason it exists.**
+  `tests/test_webhook.py:337` asserts `"sk-secret-key-value" not in line`, but
+  the key is only placed in the environment via `monkeypatch.setenv`; it is
+  never put into the `httpx.Request`/`Response` that `_http_error` builds, and
+  the log line only interpolates `status` + `body`. So the assertion would still
+  pass even if the log line were changed to dump `exc.request.headers` — the
+  stub request carries no `Authorization` header to leak. The real safety comes
+  from the code logging only body+status, which is fine; the *assertion* just
+  doesn't independently defend it. Not worth a change on its own (the log line is
+  fixed and correct), but if this guard is ever leaned on, give `_http_error` a
+  request built with a real `Authorization: Bearer sk-...` header and assert that
+  token is absent — then the guard would actually catch a headers-in-log
+  regression.
+
+Verdict: correct, minimal, and the new test genuinely reddens on revert. ✅ DONE.
+
+---
+
 ## 2026-08-07 — `4c625d0` — warn the user when a parse fails permanently (Phase 6, task 1)
 
 **Status: ✅ DONE** — no blocking issues.

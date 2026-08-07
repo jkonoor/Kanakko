@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from kanakko import configure_logging
 from kanakko.db import all_users, connect, day_summary, log_reminder
+from kanakko.jobs import fan_out
 from kanakko.money import format_amount
 from kanakko.tg import send_message
 
@@ -51,14 +52,20 @@ def summary_text(count: int, spent: Decimal, received: Decimal) -> str:
 
 
 def run(conn) -> int:
-    """Send each user their day summary; return how many were sent."""
+    """Send each user their day summary; return how many were sent.
+
+    Unconditional (§12), so every user is delivered to. `fan_out` isolates a
+    failed send so one blocked recipient cannot silence the rest.
+    """
     day = today_ist()
-    users = all_users(conn)
-    for user_id, telegram_user_id in users:
+
+    def deliver(user_id: int, telegram_user_id: int) -> bool:
         count, spent, received = day_summary(conn, user_id, day)
         send_message(telegram_user_id, summary_text(count, spent, received))
         log_reminder(conn, user_id, "evening")
-    return len(users)
+        return True
+
+    return fan_out(conn, all_users(conn), deliver)
 
 
 def main() -> None:

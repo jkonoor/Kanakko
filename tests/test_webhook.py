@@ -13,7 +13,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
-from kanakko.app import WEBHOOK_SECRET_HEADER, ButtonPress, TextMessage, app, dispatch
+from kanakko import db
+from kanakko import handlers
+from kanakko.app import WEBHOOK_SECRET_HEADER, app
+from kanakko.handlers import ButtonPress, TextMessage, dispatch
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import get_or_create_user, save_pending
@@ -161,14 +164,14 @@ def test_handle_text_keys_the_pending_row_on_the_sent_card(conn, monkeypatch):
             "note": "spent 500 on food",
         }
     )
-    monkeypatch.setattr(app_module, "parse_message", lambda text: txn)
+    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
     sent = {}
 
     def fake_send(chat_id, text, reply_markup=None):
         sent.update(chat_id=chat_id, text=text)
         return {"ok": True, "result": {"message_id": 909}}
 
-    monkeypatch.setattr(app_module, "send_message", fake_send)
+    monkeypatch.setattr(handlers, "send_message", fake_send)
 
     pending_id = app_module.handle_text(
         conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on food")
@@ -212,20 +215,20 @@ def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkey
             }
         )
 
-    monkeypatch.setattr(app_module, "parse_message", raise_validation)
+    monkeypatch.setattr(handlers, "parse_message", raise_validation)
     sent = {}
 
     def fake_send(chat_id, text, reply_markup=None):
         sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
         return {"ok": True, "result": {"message_id": 909}}
 
-    monkeypatch.setattr(app_module, "send_message", fake_send)
+    monkeypatch.setattr(handlers, "send_message", fake_send)
 
     result = app_module.handle_text(
         conn, TextMessage(chat_id=12345, message_id=1, text="how's it going")
     )
     assert result is None  # nothing to confirm
-    assert sent["text"] == app_module.REPHRASE_PROMPT
+    assert sent["text"] == handlers.REPHRASE_PROMPT
     assert sent["reply_markup"] is None  # a rephrase prompt, not a confirm card
 
     user_id = get_or_create_user(conn, 12345)
@@ -268,7 +271,7 @@ def test_handle_text_tells_the_user_when_a_4xx_parse_fails_permanently(conn, mon
     """
     migrate(conn)
     monkeypatch.setattr(
-        app_module, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
+        handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
     )
     sent = {}
 
@@ -276,13 +279,13 @@ def test_handle_text_tells_the_user_when_a_4xx_parse_fails_permanently(conn, mon
         sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
         return {"ok": True, "result": {"message_id": 909}}
 
-    monkeypatch.setattr(app_module, "send_message", fake_send)
+    monkeypatch.setattr(handlers, "send_message", fake_send)
 
     result = app_module.handle_text(
         conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on lunch")
     )
     assert result is None
-    assert sent["text"] == app_module.PARSER_DOWN_PROMPT
+    assert sent["text"] == handlers.PARSER_DOWN_PROMPT
     assert sent["reply_markup"] is None
 
     user_id = get_or_create_user(conn, 12345)
@@ -304,10 +307,10 @@ def test_handle_text_lets_a_5xx_parse_failure_propagate(conn, monkeypatch):
     """
     migrate(conn)
     monkeypatch.setattr(
-        app_module, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(503))
+        handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(503))
     )
     sent = []
-    monkeypatch.setattr(app_module, "send_message", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(handlers, "send_message", lambda *a, **k: sent.append(a))
 
     with pytest.raises(httpx.HTTPStatusError):
         app_module.handle_text(
@@ -330,10 +333,10 @@ def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
     migrate(conn)
     body = "Insufficient credits. Add more at openrouter.ai/credits"
     monkeypatch.setattr(
-        app_module, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402, body))
+        handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402, body))
     )
     monkeypatch.setattr(
-        app_module, "send_message", lambda *a, **k: {"result": {"message_id": 1}}
+        handlers, "send_message", lambda *a, **k: {"result": {"message_id": 1}}
     )
     monkeypatch.setenv("OPENROUTER_API_KEY", API_KEY)
 
@@ -375,14 +378,14 @@ def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypa
             "note": "spent 500 somewhere",
         }
     )
-    monkeypatch.setattr(app_module, "parse_message", lambda text: txn)
+    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
     sent = {}
 
     def fake_send(chat_id, text, reply_markup=None):
         sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
         return {"ok": True, "result": {"message_id": 909}}
 
-    monkeypatch.setattr(app_module, "send_message", fake_send)
+    monkeypatch.setattr(handlers, "send_message", fake_send)
 
     pending_id = app_module.handle_text(
         conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 somewhere")
@@ -431,7 +434,7 @@ def test_handle_confirm_writes_the_ledger_row_and_acknowledges(conn, monkeypatch
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     acked = {}
     monkeypatch.setattr(
-        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
 
     txn_id = app_module.handle_confirm(
@@ -455,7 +458,7 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     acks = []
     monkeypatch.setattr(
-        app_module, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+        handlers, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
 
@@ -554,11 +557,11 @@ def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909, amount="250.00")
-    txn_id = app_module.confirm_pending(conn, user_id, 909)
+    txn_id = db.confirm_pending(conn, user_id, 909)
     assert isinstance(txn_id, int)
     sent = {}
     monkeypatch.setattr(
-        app_module, "send_message", lambda chat_id, text, reply_markup=None: sent.update(chat_id=chat_id, text=text)
+        handlers, "send_message", lambda chat_id, text, reply_markup=None: sent.update(chat_id=chat_id, text=text)
     )
 
     removed = app_module.handle_undo(
@@ -579,7 +582,7 @@ def test_handle_undo_with_nothing_to_undo_replies_and_stores_nothing(conn, monke
     migrate(conn)
     sent = {}
     monkeypatch.setattr(
-        app_module, "send_message", lambda chat_id, text, reply_markup=None: sent.update(text=text)
+        handlers, "send_message", lambda chat_id, text, reply_markup=None: sent.update(text=text)
     )
 
     result = app_module.handle_undo(
@@ -604,11 +607,11 @@ def test_a_redelivered_undo_does_not_soft_delete_a_second_row(conn, monkeypatch)
     """
     migrate(conn)
     uid, _ = _seed_pending(conn, chat_id=555, card_message_id=11, amount="250.00")
-    app_module.confirm_pending(conn, uid, 11)
+    db.confirm_pending(conn, uid, 11)
     _seed_pending(conn, chat_id=555, card_message_id=12, amount="100.00")
-    app_module.confirm_pending(conn, uid, 12)
+    db.confirm_pending(conn, uid, 12)
 
-    monkeypatch.setattr(app_module, "send_message", lambda *a, **k: None)
+    monkeypatch.setattr(handlers, "send_message", lambda *a, **k: None)
     # connect() yields the shared test connection; __exit__ must not close it, so
     # the first delivery's claim is visible to the redelivery on the same session.
     class _Reuse:
@@ -645,10 +648,10 @@ def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypat
     acked = {}
     removed = []
     monkeypatch.setattr(
-        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
     monkeypatch.setattr(
-        app_module, "delete_message", lambda chat_id, message_id: removed.append((chat_id, message_id)) or True
+        handlers, "delete_message", lambda chat_id, message_id: removed.append((chat_id, message_id)) or True
     )
 
     pending_id = app_module.handle_cancel(
@@ -680,13 +683,13 @@ def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     _seed_pending(conn, chat_id=12345, card_message_id=909)
     acks = []
     monkeypatch.setattr(
-        app_module, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+        handlers, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
     # A redelivered Cancel deletes a card that is already gone: the Bot API
     # answers 400, `delete_message` returns False, and the handler must carry on
     # to the ack rather than raise — a raise here would 500 and make Telegram
     # redeliver the same tap forever.
-    monkeypatch.setattr(app_module, "delete_message", lambda chat_id, message_id: False)
+    monkeypatch.setattr(handlers, "delete_message", lambda chat_id, message_id: False)
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
 
     first = app_module.handle_cancel(conn, press)
@@ -721,14 +724,14 @@ def test_handle_category_updates_the_pending_row_and_re_renders_the_card(conn, m
     edited = {}
     acked = {}
     monkeypatch.setattr(
-        app_module,
+        handlers,
         "edit_message_text",
         lambda chat_id, message_id, text, reply_markup=None: edited.update(
             chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
         ),
     )
     monkeypatch.setattr(
-        app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
 
     chosen = EXPENSE_CATEGORIES[0]
@@ -764,9 +767,9 @@ def test_handle_category_ignores_a_forged_unknown_category(conn, monkeypatch):
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     edits = []
     monkeypatch.setattr(
-        app_module, "edit_message_text", lambda *a, **k: edits.append(a)
+        handlers, "edit_message_text", lambda *a, **k: edits.append(a)
     )
-    monkeypatch.setattr(app_module, "answer_callback_query", lambda cbq, text=None: None)
+    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
 
     result = app_module.handle_category(
         conn,
@@ -788,7 +791,7 @@ def test_cancel_is_scoped_to_the_user(conn):
     a_user, _ = _seed_pending(conn, chat_id=111, card_message_id=555, amount="100.00")
     b_user, _ = _seed_pending(conn, chat_id=222, card_message_id=555, amount="999.99")
 
-    cancelled = app_module.cancel_pending(conn, a_user, 555)
+    cancelled = db.cancel_pending(conn, a_user, 555)
     assert cancelled is not None
 
     with conn.cursor() as cur:

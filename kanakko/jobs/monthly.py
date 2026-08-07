@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from kanakko import configure_logging
 from kanakko.db import all_users, connect, log_reminder, month_summary
+from kanakko.jobs import fan_out
 from kanakko.jobs.evening import IST
 from kanakko.money import format_amount
 from kanakko.tg import send_message
@@ -66,12 +67,14 @@ def run(conn) -> int:
     """Send each user their previous-month report; return how many were sent."""
     first, next_first = previous_month_ist()
     label = first.strftime("%B %Y")
-    users = all_users(conn)
-    for user_id, telegram_user_id in users:
+
+    def deliver(user_id: int, telegram_user_id: int) -> bool:
         income, expenses, top = month_summary(conn, user_id, first, next_first)
         send_message(telegram_user_id, report_text(label, income, expenses, top[:TOP_N]))
         log_reminder(conn, user_id, "monthly")
-    return len(users)
+        return True
+
+    return fan_out(conn, all_users(conn), deliver)
 
 
 def main() -> None:

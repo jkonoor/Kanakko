@@ -193,13 +193,20 @@ scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
       Colour follows the same rule as the rest of the dashboard: direction is
       carried by the arrow glyph and the label, never by colour alone (WCAG 1.4.1),
       and expenses stay in normal ink — the one accent is reserved for income.
-- [ ] Consider a per-day bar for the current week, using the existing
-      `active_transactions` reads. Only if it earns its place — seven bars of a
-      personal ledger may be noise rather than signal, and the honest test is
-      whether it changes a decision. Length-based bars remain the right form
-      (NN/g: length and 2D position are what people judge accurately; pie charts
-      *"should be avoided most of the time"*), so this stays CSS, no charting
-      library (§13).
+- [x] Consider a per-day bar for the current week, using the existing
+      `active_transactions` reads. **Decided: declined — does not earn its place.**
+      The hero already answers "what did I spend this week" and the new
+      period-over-period delta answers "is that a lot?"; the category breakdown
+      answers "on what". Seven daily bars of a *current, incomplete* week add
+      noise, not a decision: a sparse personal ledger leaves most days at 0–2
+      transactions (mostly empty bars), and a week-to-date view pits a full
+      Monday against a partial Sunday, so the day-to-day comparison isn't even
+      honest. The "you spend on weekends" pattern needs many weeks, not this
+      partial one. No code changed; the gate ("only if it changes a decision") is
+      the deliverable and the answer is no. If a future multi-week view ever
+      revisits this, length-based bars remain the right form (NN/g: length and 2D
+      position are what people judge accurately; pie charts *"should be avoided
+      most of the time"*), so it stays CSS, no charting library (§13).
 
 ---
 

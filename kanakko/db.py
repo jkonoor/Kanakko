@@ -97,6 +97,21 @@ def get_or_create_user(conn: psycopg.Connection, telegram_user_id: int) -> int:
     return user_id
 
 
+def user_exists(conn: psycopg.Connection, telegram_user_id: int) -> bool:
+    """True if a `users` row already exists for this Telegram id — a pure lookup
+    that creates nothing, unlike `get_or_create_user`.
+
+    The §16 authorization gate uses it to refuse an unrecognised user *before* any
+    LLM call, without minting the very row §16 says must not be stored for a
+    refused update.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM users WHERE telegram_user_id = %s", (telegram_user_id,)
+        )
+        return cur.fetchone() is not None
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:

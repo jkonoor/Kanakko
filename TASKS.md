@@ -370,7 +370,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       `used_by` nullable, `used_at`, `expires_at`. Single-use: a code with
       `used_by` set is spent. §16 keeps the two kinds distinct on purpose — a
       household invite implies signup, a signup invite joins nobody.
-- [ ] Gate every inbound update on authorization, before any LLM call. An
+- [x] Gate every inbound update on authorization, before any LLM call. An
       unrecognised user in `invite` mode gets a polite refusal and **nothing is
       stored — not even a user row** (§16). The check that earns its place: an
       unknown user's message creates no rows *and* makes no OpenRouter call, since

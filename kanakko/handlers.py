@@ -137,6 +137,11 @@ PARSER_DOWN_PROMPT = (
     "Please try again shortly."
 )
 
+ACCESS_REFUSED = (
+    "This bot is invite-only right now. Ask whoever told you about it for an "
+    "invite link to get started."
+)
+
 
 def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """Parse a typed message and send its confirm card (§2, §4) — first half of

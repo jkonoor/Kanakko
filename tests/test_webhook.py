@@ -102,6 +102,7 @@ def test_webhook_returns_200_for_a_text_update(monkeypatch):
     # exercises the routing, not a live DB. A handler exception is deliberately
     # left to 500 so Telegram redelivers a transiently-failed transaction.
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: None)
     response = client.post(
         "/webhook",
@@ -633,6 +634,7 @@ def test_webhook_logs_exactly_one_error_line_when_a_handler_raises(monkeypatch):
     """
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
 
     def boom(conn, msg):
         raise RuntimeError("handler down")
@@ -667,6 +669,7 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     _set_secret(monkeypatch)
     opened = []
     monkeypatch.setattr(app_module, "connect", lambda: opened.append(True) or _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
     confirmed, cancelled, texted, categorised = [], [], [], []
     monkeypatch.setattr(app_module, "handle_confirm", lambda conn, press: confirmed.append(press))
     monkeypatch.setattr(app_module, "handle_cancel", lambda conn, press: cancelled.append(press))
@@ -710,6 +713,7 @@ def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
     """
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
     undone, texted = [], []
     monkeypatch.setattr(app_module, "handle_undo", lambda conn, msg: undone.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))

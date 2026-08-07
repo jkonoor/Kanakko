@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from kanakko import __version__, configure_logging
+from kanakko.auth import is_authorized
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import (
@@ -22,6 +23,7 @@ from kanakko.db import (
 )
 from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
+    ACCESS_REFUSED,
     TextMessage,
     _is_undo,
     dispatch,
@@ -31,6 +33,7 @@ from kanakko.handlers import (
     handle_text,
     handle_undo,
 )
+from kanakko.tg import send_message
 from kanakko.webapp import (
     SHELL_HTML,
     InitDataError,
@@ -282,6 +285,16 @@ async def webhook(request: Request) -> dict[str, bool]:
     start = time.perf_counter()
     update_id = update.get("update_id")
     with connect() as conn:
+        # §16: is this user permitted at all? — the one check before any LLM call
+        # (§2 costs money). An unrecognised user in invite mode is refused here and
+        # nothing is stored: the gate reads with `user_exists`, so the update is
+        # turned away before `claim_update` or any handler mints a row. `open` mode
+        # admits everyone; `invite` mode admits only users who already have a row.
+        if not is_authorized(conn, action.from_id):
+            send_message(action.chat_id, ACCESS_REFUSED)
+            log_event("update.refused", status="noop", update_id=update_id,
+                      source="webhook", duration_ms=ms_since(start))
+            return {"ok": True}
         if isinstance(update_id, int) and not claim_update(conn, update_id):
             return {"ok": True}  # a prior delivery of this update was handled
         try:

@@ -29,13 +29,14 @@ from kanakko.db import (
 )
 from kanakko.eventlog import log_event, ms_since
 from kanakko.money import format_amount
-from kanakko.parse import Transaction, parse_message, resolve_model
+from kanakko.parse import Transaction, build_request, parse_message, resolve_model
 from kanakko.tg import (
     answer_callback_query,
     delete_message,
     edit_message_text,
     send_message,
 )
+from kanakko.trace import open_trace
 
 log = logging.getLogger(__name__)
 
@@ -154,10 +155,18 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.chat_id)
+    # Trace mode (§17): the raw text, the prompt built from it, and the outcome —
+    # written to a per-update folder so a hard parse bug is diagnosable. On by
+    # default, a no-op when disabled or unconfigured, and it never raises.
+    tr = open_trace(msg.update_id)
+    tr.write("input", {"text": msg.text, "user_id": user_id,
+                       "update_id": msg.update_id, "source": msg.source})
+    tr.write("request", build_request(msg.text))
     parse_start = time.perf_counter()
     try:
         txn = parse_message(msg.text)
-    except ValidationError:
+    except ValidationError as exc:
+        tr.write("parse", {"error": str(exc)}, outcome="invalid")
         send_message(msg.chat_id, REPHRASE_PROMPT)
         return None
     except httpx.HTTPStatusError as exc:
@@ -168,10 +177,14 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
             exc.response.status_code,
             exc.response.text,
         )
+        tr.write("parse", {"status": exc.response.status_code,
+                           "body": exc.response.text},
+                 outcome=f"upstream_{exc.response.status_code}")
         if not 400 <= exc.response.status_code < 500:
             raise  # 5xx is transient — let it 500 so Telegram redelivers
         send_message(msg.chat_id, PARSER_DOWN_PROMPT)
         return None
+    tr.write("parse", txn.model_dump(), outcome="ok")
     # §17: the success side of the parse — Phase 6's WARNING covers the failure.
     # `duration_ms` is the call alone (retry included) so a slow model is visible
     # before it reads as the bot feeling sluggish.

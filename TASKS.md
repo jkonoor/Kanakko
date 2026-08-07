@@ -324,7 +324,7 @@ row, because there is no `txn_id` to hang one on.
       its audit row — assert both are absent, not just one. Note what that check
       does *not* prove: it exercises today's call ordering, which is exactly why
       the write's location is specified rather than left to judgement.
-- [ ] Add trace mode (§17): a per-update artefact folder, **on by default**, gated
+- [x] Add trace mode (§17): a per-update artefact folder, **on by default**, gated
       by an env var, with the outcome in each filename so a directory listing is
       the summary. Rotate to the last N folders, N from env. The check: a failed
       parse leaves a file whose *name* identifies the failure, and the rotation

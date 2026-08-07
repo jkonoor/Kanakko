@@ -222,6 +222,37 @@ written rather than be retrofitted around it. Task 1 is the seam; everything in
 this phase and the next logs through it. The phases were renumbered so the file
 order the loop obeys matches the numbering.
 
+**Five things §17 assumes that the code does not currently provide.** Found by
+walking every money path on 2026-08-07, before any of this was written, and
+settled by the user. They are listed here once rather than rediscovered per task:
+
+1. **`update_id` never reaches a handler.** `dispatch` (`handlers.py:60`) builds
+   `TextMessage`/`ButtonPress` and drops it; the webhook reads it separately
+   (`app.py:257`). §17 pins it as *the* correlation id. Both dataclasses gain
+   `update_id` and `source`, set in `dispatch`. All 16 construction sites in
+   `tests/test_webhook.py` are keyword-based, so only the two equality assertions
+   (`:52`, `:65`) change — and they should now assert the correlation id is
+   captured, which is the point.
+2. **The Mini App mutations have no `update_id`.** Hence `source` and a nullable
+   column (§17).
+3. **`undo_last` does not return the row's id** (`db.py:168`). The audit row needs
+   it as a foreign key and every money event carries it: add `txn_id` to the
+   `RETURNING` list.
+4. **The money functions return bare ids**, so no call site can log an amount.
+   Each returns the row it touched (or `None`) instead; `undo_last` already has
+   that shape. One shape across all four (§17).
+5. **Nothing logs the error side**, because handlers deliberately let exceptions
+   escape. One `try/except … log … raise` in the webhook, not seven (§17).
+
+**Eight call sites, not six** — TASKS' original "category change" is two different
+operations, and only one touches the ledger. `handle_category` rewrites a *pending*
+row the user is still editing; `set_transaction_category` changes a *confirmed*
+one, and that second is the "category change history" §17 names as the genuinely
+missing audit data. Audit rows come from exactly four operations — confirm, undo,
+dashboard delete, dashboard recategorise. `handle_cancel`, `handle_category` and
+`handle_text` touch only pending rows: they get an operational line and no audit
+row, because there is no `txn_id` to hang one on.
+
 - [ ] Add `kanakko/eventlog.py`: `log_event(event, *, status, **fields)` writing
       JSON Lines through a **module-level sink bound once at startup**, plus
       `bind_sink` / `unbind_sink`. Unbound is a silent no-op so tests need no
@@ -229,26 +260,70 @@ order the loop obeys matches the numbering.
       failure that 500s a webhook makes Telegram redeliver a message that already
       succeeded. The check that earns its place: a sink that raises on every call
       leaves `log_event` returning normally *and* the caller's work intact.
+      The default sink is stdlib: `json.dumps` into a `RotatingFileHandler` on a
+      dedicated `kanakko.events` logger under `LOG_DIR` — that is where §17's "no
+      new dependency" rotation comes from, and it is the same decision as task 6's.
+      **Bind inside the existing `configure_logging()`** (`kanakko/__init__.py:6`)
+      rather than adding a second startup hook: it is already idempotent and
+      already called from `app.py:45` and all three jobs. **`LOG_DIR` unset leaves
+      it unbound**, which is what keeps `uv run pytest` from writing JSONL into the
+      repo when `tests/test_app.py` imports `kanakko.app`. Read it with `or`, not
+      `get(key, default)` — the §2 compose trap. Also in this task, because it is
+      the seam and not a call site: `update_id` and `source` onto both dataclasses
+      (gap 1 above), and pin `ok` | `error` | `noop` as the only statuses (§17).
 - [ ] Add the scrubber and the never-log list (§17): redact key-shaped strings and
       any base64 run over 500 characters, recursively through nested values. The
       check must pass a realistic payload — a bot token, an `sk-or-` key, a long
       base64 blob — and assert each is absent from the output *and* that the
       surrounding fields survived. A scrubber that redacts everything passes a
       naive test.
-- [ ] Log every money mutation (§17) — confirm, cancel, `/undo`, category change,
-      dashboard delete and recategorise. Each carries `update_id` as the
-      correlation id, `user_id`, `duration_ms`, and the transaction id. This is
-      the audit's original finding; six handlers currently log nothing.
+- [ ] Log the bot-side money mutations: `transaction.confirmed`
+      (`handlers.py:192`) and `transaction.undone` (`handlers.py:171`), plus the
+      pending-only paths that share the file — `pending.cancelled`
+      (`handlers.py:210`), `pending.recategorised` (`handlers.py:235`) and
+      `pending.created` (`handlers.py:102`) — and replace the bare
+      `log.info` at `app.py:271` with the webhook's `update.handled`, whose
+      `try/except … raise` is where `status="error"` is logged for all of them
+      (gap 5). Each event carries `update_id`, `source`, `user_id`, `duration_ms`
+      and — on the two ledger paths — the transaction id and amount. Gaps 3 and 4
+      land here: `undo_last` gains `txn_id`, and `confirm_pending` returns the row
+      rather than a bare id, which is what makes the amount loggable.
+      `duration_ms` is one `time.perf_counter()` at the top of each site plus an
+      `ms_since` helper in `eventlog` — no decorator, no context manager.
+      The check: a redelivered Confirm logs `status="noop"`, not `ok`, and a
+      handler that raises still produces exactly one `status="error"` line.
+- [ ] Log the dashboard money mutations: `transaction.deleted` (`app.py:158`) and
+      `transaction.recategorised` (`app.py:189`), `source="miniapp"` and **no
+      `update_id`** — these are HTTP routes, not Telegram updates (gap 2). The 404
+      paths (already deleted, or never this user's) are `status="noop"`, and they
+      are the reason `noop` exists. `soft_delete_transaction` and
+      `set_transaction_category` return the row they touched, like the bot-side
+      pair. **`log_event` here is a synchronous write inside an `async def`
+      route** — fine at this scale, so it carries a `ponytail:` comment naming the
+      ceiling and the upgrade path rather than a queue nobody needs yet.
 - [ ] Log the parse path: the OpenRouter call's duration, model, and outcome. The
       Phase 6 `WARNING` already covers the failure; this adds the success side, so
       a slow model is visible before it becomes a complaint about the bot feeling
       sluggish.
-- [ ] Add `migrations/003_transaction_events.sql` and write an audit row **in the
-      same transaction as the money change** (§17). Columns: the transaction, the
-      acting user, the action, before/after as `jsonb`, the `update_id`, and when.
+- [ ] Add `migrations/003_transaction_events.sql` and write an audit row **inside
+      the same `conn.transaction()` block as the money statement, in `db.py`, not
+      in the calling handler** (§17 — read the paragraph, it explains why the
+      handler version is atomic today only by accident and fails silently the
+      moment §16's identity fix reorders the calls). Columns: the transaction, the
+      acting user, the action, before/after as `jsonb`, `source`, a **nullable**
+      `update_id`, and when. Four operations write one: confirm, undo, dashboard
+      delete, dashboard recategorise. The four money functions therefore take the
+      acting user and the correlation id as arguments — the accepted price of the
+      arrangement that cannot come apart.
+      Postgres here is 16 (`docker-compose.yml:29`), so `set_transaction_category`
+      reads the old category with a `SELECT` before its `UPDATE`, in the same
+      transaction, rather than reaching for a `RETURNING OLD.*` form that this
+      server does not have.
       The point is atomicity, so the check is the one that proves it: a handler
       that raises after the ledger write must leave **neither** the transaction nor
-      its audit row — assert both are absent, not just one.
+      its audit row — assert both are absent, not just one. Note what that check
+      does *not* prove: it exercises today's call ordering, which is exactly why
+      the write's location is specified rather than left to judgement.
 - [ ] Add trace mode (§17): a per-update artefact folder, **on by default**, gated
       by an env var, with the outcome in each filename so a directory listing is
       the summary. Rotate to the last N folders, N from env. The check: a failed

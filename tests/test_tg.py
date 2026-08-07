@@ -129,3 +129,38 @@ def test_edit_still_raises_on_other_400(monkeypatch):
     monkeypatch.setattr(tg.httpx, "post", lambda url, json, timeout: _StatusResponse(400, payload))
     with pytest.raises(httpx.HTTPStatusError):
         tg.edit_message_text(1, 2, "x")
+
+
+def test_delete_message_posts_the_card_id(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T0KEN")
+    calls = _capture(monkeypatch)
+    assert tg.delete_message(12345, 909) is True
+    assert calls[0]["url"].endswith("/deleteMessage")
+    assert calls[0]["json"] == {"chat_id": 12345, "message_id": 909}
+
+
+def test_delete_message_returns_false_when_the_card_cannot_be_deleted(monkeypatch):
+    """A card past the Bot API's 48-hour window answers 400 — that must not raise.
+
+    Cancel deletes the card it was tapped on. If the card is too old (verified
+    limit: "A message can only be deleted if it was sent less than 48 hours ago")
+    or already gone on a redelivered tap, Telegram answers 400. Raising here would
+    500 the webhook and make Telegram redeliver the same Cancel forever — the
+    failure the `editMessageText` no-op swallow above already exists to prevent.
+    The card simply stays put and the handler carries on to the ack.
+    """
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T0KEN")
+    payload = {"ok": False, "error_code": 400,
+               "description": "Bad Request: message can't be deleted for everyone"}
+    monkeypatch.setattr(tg.httpx, "post", lambda url, json, timeout: _StatusResponse(400, payload))
+    assert tg.delete_message(1, 2) is False
+
+
+def test_delete_message_still_raises_on_a_non_400(monkeypatch):
+    # Only "can't delete" is tolerated. A 500 from Telegram is transient and must
+    # propagate so the tap is redelivered rather than silently dropped.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T0KEN")
+    monkeypatch.setattr(tg.httpx, "post",
+                        lambda url, json, timeout: _StatusResponse(500, {"ok": False}))
+    with pytest.raises(httpx.HTTPStatusError):
+        tg.delete_message(1, 2)

@@ -84,6 +84,29 @@ def edit_message_text(
         raise
 
 
+def delete_message(chat_id: int, message_id: int) -> bool:
+    """Remove a message from the chat. True if it went, False if it couldn't.
+
+    Used by Cancel to take the discarded confirm card out of the chat instead of
+    leaving a dead card with live buttons behind (§5 — Cancel and retype is the
+    correction path, so the cancelled card is litter).
+
+    The Bot API allows this for our own outgoing messages in a private chat, but
+    only within **48 hours** of sending (verified against the deleteMessage docs,
+    2026-08-07). Past that — or if the message is already gone — it answers 400.
+    That is not an error worth raising: the card simply stays, and a 500 here
+    would make Telegram redeliver the same Cancel tap forever. So any 400 returns
+    False and the caller carries on; anything else still raises.
+    """
+    try:
+        _call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        return True
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400:
+            return False
+        raise
+
+
 def _is_not_modified(exc: httpx.HTTPStatusError) -> bool:
     """The edit was a no-op — Bot API 400 "message is not modified"."""
     if exc.response.status_code != 400:

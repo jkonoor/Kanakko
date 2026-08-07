@@ -31,7 +31,12 @@ from kanakko.db import (
 )
 from kanakko.money import format_amount
 from kanakko.parse import Transaction, parse_message
-from kanakko.tg import answer_callback_query, edit_message_text, send_message
+from kanakko.tg import (
+    answer_callback_query,
+    delete_message,
+    edit_message_text,
+    send_message,
+)
 from kanakko.webapp import (
     InitDataError,
     current_month_ist,
@@ -358,6 +363,12 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     """
     user_id = get_or_create_user(conn, press.chat_id)
     pending_id = cancel_pending(conn, user_id, press.message_id)
+    # Take the cancelled card out of the chat rather than leaving a dead card
+    # with live buttons. The toast still reports what happened, and the user's
+    # own message stays — only the bot's card goes. `delete_message` returns
+    # False for a card older than the Bot API's 48-hour window; that just leaves
+    # it in place, which is better than 500ing the tap into a redelivery loop.
+    delete_message(press.chat_id, press.message_id)
     answer_callback_query(
         press.callback_query_id, "Discarded ❌" if pending_id else "Already gone"
     )

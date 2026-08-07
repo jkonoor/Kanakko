@@ -525,8 +525,12 @@ def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypat
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     acked = {}
+    removed = []
     monkeypatch.setattr(
         app_module, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+    monkeypatch.setattr(
+        app_module, "delete_message", lambda chat_id, message_id: removed.append((chat_id, message_id)) or True
     )
 
     pending_id = app_module.handle_cancel(
@@ -534,6 +538,9 @@ def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypat
     )
     assert isinstance(pending_id, int)
     assert acked == {"cbq": "cbq1", "text": "Discarded ❌"}
+    # The cancelled card is taken out of the chat, not left as a dead card with
+    # live buttons — and it is *that* card, by the id the tap carried.
+    assert removed == [(12345, 909)]
 
     with conn.cursor() as cur:
         cur.execute(
@@ -557,6 +564,11 @@ def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     monkeypatch.setattr(
         app_module, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
+    # A redelivered Cancel deletes a card that is already gone: the Bot API
+    # answers 400, `delete_message` returns False, and the handler must carry on
+    # to the ack rather than raise — a raise here would 500 and make Telegram
+    # redeliver the same tap forever.
+    monkeypatch.setattr(app_module, "delete_message", lambda chat_id, message_id: False)
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
 
     first = app_module.handle_cancel(conn, press)

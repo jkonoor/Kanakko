@@ -375,7 +375,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       stored — not even a user row** (§16). The check that earns its place: an
       unknown user's message creates no rows *and* makes no OpenRouter call, since
       the cost is the reason this exists. Assert both.
-- [ ] Add the per-user daily cap — env var, default 50, never hardcoded (§16).
+- [x] Add the per-user daily cap — env var, default 50, never hardcoded (§16).
       `processed_updates` already stores one row per handled update but only
       `update_id`; add `user_id` and count per IST day. Enforce *before* the LLM
       call. The check: the 51st message in a day is refused and costs nothing,

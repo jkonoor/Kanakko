@@ -142,6 +142,11 @@ ACCESS_REFUSED = (
     "invite link to get started."
 )
 
+CAP_REACHED = (
+    "You've hit today's message limit — nothing was saved. Your entries so far "
+    "are safe, and this resets at midnight (IST)."
+)
+
 
 def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """Parse a typed message and send its confirm card (§2, §4) — first half of

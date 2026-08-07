@@ -7,10 +7,16 @@ plain SQL in `db.py`; the config that governs them lives here.
 """
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import psycopg
 
-from kanakko.db import user_exists
+from kanakko.db import count_updates_on_day, user_exists
+
+IST = ZoneInfo("Asia/Kolkata")
+
+DEFAULT_DAILY_CAP = 50
 
 
 def signup_mode() -> str:
@@ -34,3 +40,34 @@ def is_authorized(conn: psycopg.Connection, telegram_user_id: int) -> bool:
     `user_exists`, never `get_or_create_user`.
     """
     return signup_mode() == "open" or user_exists(conn, telegram_user_id)
+
+
+def daily_message_cap() -> int:
+    """Max handled messages per user per IST day, from $DAILY_MESSAGE_CAP (§16).
+
+    Never hardcoded: the operator raises or lowers the cost cap with one env
+    change (§16), the way `OPENROUTER_MODEL` and `SIGNUP_MODE` are config. Read
+    with `or` (the §2 compose trap: `:-` leaves the var present-but-empty), and an
+    unset or non-integer value falls back to the §16 default of 50 rather than
+    crashing the webhook — a fat-fingered env must never take the bot down.
+    """
+    raw = os.environ.get("DAILY_MESSAGE_CAP") or ""
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_DAILY_CAP
+
+
+def within_daily_cap(
+    conn: psycopg.Connection, user_id: int, *, now: datetime | None = None
+) -> bool:
+    """True while `user_id` is still under today's message cap (§16 cost control).
+
+    Checked *before* the LLM call (§2 costs money): counts the user's already-
+    handled updates on the current IST day (§10) and admits them while that count
+    is below `daily_message_cap()`. The current update is not yet claimed when this
+    runs, so a cap of 50 admits 50 messages and refuses the 51st. `now` defaults to
+    the current instant; a test pins it to prove the IST-midnight rollover.
+    """
+    ist_day = (now or datetime.now(IST)).astimezone(IST).date()
+    return count_updates_on_day(conn, user_id, ist_day) < daily_message_cap()

@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from kanakko import __version__, configure_logging
-from kanakko.auth import is_authorized
+from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import (
@@ -24,6 +24,7 @@ from kanakko.db import (
 from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
+    CAP_REACHED,
     TextMessage,
     _is_undo,
     dispatch,
@@ -295,7 +296,23 @@ async def webhook(request: Request) -> dict[str, bool]:
             log_event("update.refused", status="noop", update_id=update_id,
                       source="webhook", duration_ms=ms_since(start))
             return {"ok": True}
-        if isinstance(update_id, int) and not claim_update(conn, update_id):
+        user_id = get_or_create_user(conn, action.from_id)
+        # §16 cost control: every message is one LLM call (§2), so a runaway user
+        # is an unbounded bill on the owner's OpenRouter credits. Meter it here,
+        # before the parse — and only on the parse path: /undo and the Confirm/
+        # Cancel/category taps cost nothing and are never capped, so a user at the
+        # cap can still finish or undo a pending card. Counted off the yet-unclaimed
+        # count, so the (cap+1)th message is the one refused.
+        if (
+            isinstance(action, TextMessage)
+            and not _is_undo(action.text)
+            and not within_daily_cap(conn, user_id)
+        ):
+            send_message(action.chat_id, CAP_REACHED)
+            log_event("update.capped", status="noop", update_id=update_id,
+                      source="webhook", user_id=user_id, duration_ms=ms_since(start))
+            return {"ok": True}
+        if isinstance(update_id, int) and not claim_update(conn, update_id, user_id):
             return {"ok": True}  # a prior delivery of this update was handled
         try:
             if isinstance(action, TextMessage):

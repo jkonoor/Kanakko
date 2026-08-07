@@ -270,8 +270,8 @@ def undo_last(
     return {"txn_id": txn_id, **removed}
 
 
-def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
-    """Record `update_id` as processed; True the first time, False on a repeat (§14).
+def claim_update(conn: psycopg.Connection, update_id: int, user_id: int) -> bool:
+    """Record `update_id` as processed by `user_id`; True the first time, False on a repeat (§14).
 
     Telegram redelivers any update it did not answer 2xx for, so the webhook calls
     this before running a handler and skips the handler when it returns False —
@@ -282,14 +282,42 @@ def claim_update(conn: psycopg.Connection, update_id: int) -> bool:
     total. The INSERT runs in the caller's transaction, so the claim commits with
     the handler's writes and rolls back with them — a handler that 500s is
     retried. Does not commit — the caller owns the transaction.
+
+    `user_id` stamps the row so `count_updates_on_day` can meter the §16 daily cost
+    cap off this same table.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO processed_updates (update_id) VALUES (%s)"
+            "INSERT INTO processed_updates (update_id, user_id) VALUES (%s, %s)"
             " ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
-            (update_id,),
+            (update_id, user_id),
         )
         return cur.fetchone() is not None
+
+
+def count_updates_on_day(
+    conn: psycopg.Connection, user_id: int, ist_day: date
+) -> int:
+    """How many updates this user has had handled on `ist_day` (§16 cost cap).
+
+    The metering read behind the per-user daily message cap: every inbound message
+    is one LLM call (§2), so an unbounded user is an unbounded bill. Counts
+    `processed_updates` rows the user claimed, bucketed on `processed_at`
+    **`AT TIME ZONE 'Asia/Kolkata'`** so the day rolls over at IST midnight, not
+    UTC (§10) — a message at 23:50 IST counts against that IST day, not the next
+    one it falls into in UTC. `ist_day` is the current IST date the caller
+    computes, keeping the one clock read in the webhook. Reads the base table, not
+    `active_transactions` — this counts updates, not ledger rows.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM processed_updates"
+            " WHERE user_id = %s"
+            " AND (processed_at AT TIME ZONE 'Asia/Kolkata')::date = %s",
+            (user_id, ist_day),
+        )
+        (n,) = cur.fetchone()
+    return n
 
 
 def all_users(conn: psycopg.Connection) -> list[tuple[int, int]]:

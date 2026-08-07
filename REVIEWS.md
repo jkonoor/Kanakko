@@ -12,6 +12,53 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `1b21b1d` — meter the daily cap on LLM calls only (Phase 9, QA of 1f6c28d)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: the fix for finding 1 of the `1f6c28d` review. The webhook now stamps
+`processed_updates.user_id` only on the metered text-parse claim
+(`metered_user = user_id if is_parse else None`, `app.py:315-316`); the free
+Confirm/Cancel/category/undo claims pass `None`, so `count_updates_on_day`'s
+`WHERE user_id = %s` counts exactly the LLM calls, not the free taps.
+`claim_update` now takes `user_id: int | None`. No new column, no new migration.
+
+**What I checked (live):**
+
+- Read the full diff, and `app.py:288-336`, `auth.py:45-73`, `db.py:293-327`,
+  `migrations/005`. The premise holds against the code: `handle_confirm`,
+  `handle_cancel`, `handle_category`, `handle_undo` make no LLM call — only
+  `handle_text` on the non-undo text path does. §16 counts "the thing that costs
+  money"; the fix now counts exactly that.
+- `uv run pytest tests/test_cap.py -q` → **4 passed**.
+- `uv run pytest -q` → **226 passed** (matches the commit claim).
+- **Defeated-the-guard check:** temporarily reverted the guard to
+  `metered_user = user_id` (stamp every claim) and ran
+  `test_callback_tap_does_not_consume_the_cap` → **1 failed** (`assert
+  count_updates_on_day(...) == 0`). Restored; suite green again. The new test
+  fails for the reason it exists.
+- Idempotency preserved: the test also asserts the Confirm row is still claimed
+  (`SELECT count(*) ... update_id=30` → 1); the NULL only drops it from the
+  *count*, not from the conflict-based dedupe. `claim_update`'s `ON CONFLICT
+  (update_id) DO NOTHING` is unaffected by the `user_id` value.
+- Spec fit: `AT TIME ZONE 'Asia/Kolkata'` bucketing (§10) and the pre-claim cap
+  check (cap-th admitted, (cap+1)th refused) are unchanged by this commit and
+  still covered by `test_message_under_the_cap_is_served` /
+  `test_message_past_the_cap_is_refused_and_costs_nothing`.
+
+**Non-blocking note (no fix required):**
+
+- `migrations/005_processed_updates_user.sql:12` still reads "New claims always
+  carry the user." That is now false — callback/undo claims carry NULL. The
+  migration is not editable once applied (CLAUDE.md), and the count is unaffected
+  (it filters on a specific non-null `user_id`), so this is stale prose in an
+  applied migration, not a defect. Left as-is deliberately.
+
+No `float` on a money path, no `transactions`-direct read, no secret, no
+timezone regression introduced by this change.
+
+---
+
 ## 2026-08-07 — `1f6c28d` — per-user daily message cap (Phase 9, task 4)
 
 **Status: ✅ RESOLVED** (finding 1 fixed in the next commit) — the cap counted

@@ -383,7 +383,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ### Households — the schema change
 
-- [ ] Add `households` (owner, `plan` default `'beta'`, created_at) and
+- [x] Add `households` (owner, `plan` default `'beta'`, created_at) and
       `household_members`, and migrate every existing user to a household of one.
       The migration is the risky part: it must be idempotent, and a user must end
       up in exactly one household (§16). Check it against a seeded multi-user

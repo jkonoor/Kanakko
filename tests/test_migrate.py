@@ -88,6 +88,10 @@ def test_invite_kind_and_household_must_agree(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO users (telegram_user_id) VALUES (7) RETURNING user_id")
         (uid,) = cur.fetchone()
+        # A real household to reference — migration 006 added the FK on
+        # invites.household_id, so a made-up id would now trip the FK, not the CHECK.
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (uid,))
+        (hh,) = cur.fetchone()
 
         # Valid: signup with no household, household with a household.
         cur.execute(
@@ -97,12 +101,13 @@ def test_invite_kind_and_household_must_agree(conn):
         )
         cur.execute(
             "INSERT INTO invites (code, kind, household_id, label, created_by)"
-            " VALUES ('hh-1', 'household', 42, 'priya', %s)",
-            (uid,),
+            " VALUES ('hh-1', 'household', %s, 'priya', %s)",
+            (hh, uid),
         )
 
-        # Violations: signup with a household, household with none.
-        for code, kind, hid in [("sig-2", "signup", 42), ("hh-2", "household", None)]:
+        # Violations: signup with a (real) household, household with none — so the
+        # CHECK is what fires, not the FK.
+        for code, kind, hid in [("sig-2", "signup", hh), ("hh-2", "household", None)]:
             with pytest.raises(psycopg.errors.CheckViolation):
                 cur.execute(
                     "INSERT INTO invites (code, kind, household_id, label, created_by)"
@@ -110,6 +115,50 @@ def test_invite_kind_and_household_must_agree(conn):
                     (code, kind, hid, uid),
                 )
             conn.rollback()
+    conn.rollback()
+
+
+def test_household_backfill_migrates_seeded_users(conn):
+    """Every pre-existing user ends up in exactly one household, owning it (§16).
+
+    The backfill (migration 006) is exercised against a *seeded* multi-user
+    database, not an empty one: three users are inserted first, then the backfill
+    statement — the real SQL, read from the file, not a paraphrase — runs over
+    them. A backfill that missed a user, double-homed one, or made someone else
+    the owner would redden the exactly-one-self-owned assertion. Re-running it
+    then proves idempotency: the WHERE NOT EXISTS guard plus the UNIQUE on
+    household_members.user_id make the second pass a no-op, so a retried migration
+    completes rather than duplicating households.
+    """
+    migrate(conn)
+    text = (MIGRATIONS / "006_households.sql").read_text()
+    backfill = "WITH new_households" + text.split("WITH new_households", 1)[1]
+    with conn.cursor() as cur:
+        seeded = []
+        for tg in (9010, 9020, 9030):
+            cur.execute("INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id", (tg,))
+            (uid,) = cur.fetchone()
+            seeded.append(uid)
+
+        cur.execute(backfill)
+
+        for uid in seeded:
+            cur.execute(
+                "SELECT h.owner FROM households h"
+                " JOIN household_members m USING (household_id)"
+                " WHERE m.user_id = %s",
+                (uid,),
+            )
+            assert cur.fetchall() == [(uid,)], f"user {uid} not in exactly one self-owned household"
+        cur.execute("SELECT count(*) FROM households WHERE owner = ANY(%s)", (seeded,))
+        assert cur.fetchone() == (len(seeded),)
+
+        # Idempotent: a second backfill creates nothing for the already-homed users.
+        cur.execute(backfill)
+        cur.execute("SELECT count(*) FROM households WHERE owner = ANY(%s)", (seeded,))
+        assert cur.fetchone() == (len(seeded),)
+        cur.execute("SELECT count(*) FROM household_members WHERE user_id = ANY(%s)", (seeded,))
+        assert cur.fetchone() == (len(seeded),)
     conn.rollback()
 
 

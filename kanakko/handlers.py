@@ -45,6 +45,13 @@ log = logging.getLogger(__name__)
 class TextMessage:
     """A user typed something — a transaction to parse (§2).
 
+    `from_id` is *who sent it* (Telegram `message.from.id`), the identity every
+    handler resolves the user from (§16); `chat_id` is only the send target.
+    They coincide in a private chat, so the two split apart the moment a
+    household or a group exists. `from_id` falls back to `chat_id` when unset —
+    the private-chat truth — which keeps the many test sites that predate the
+    split valid.
+
     `update_id`/`source` are the §17 correlation fields, set by `dispatch`: the
     `update_id` is what ties every event of one Telegram delivery together, and
     `source` is always `webhook` here. They default so the many test
@@ -54,23 +61,34 @@ class TextMessage:
     chat_id: int
     message_id: int
     text: str
+    from_id: int | None = None
     update_id: int | None = None
     source: str = "webhook"
+
+    def __post_init__(self) -> None:
+        if self.from_id is None:
+            object.__setattr__(self, "from_id", self.chat_id)
 
 
 @dataclass(frozen=True)
 class ButtonPress:
     """A user tapped an inline button — Confirm/Cancel/category (§4, §5).
 
-    `update_id`/`source`: see `TextMessage` — the §17 correlation fields.
+    `from_id` is the sender's identity, `chat_id` the send target — see
+    `TextMessage`. `update_id`/`source`: the §17 correlation fields.
     """
 
     chat_id: int
     message_id: int
     callback_query_id: str
     data: str
+    from_id: int | None = None
     update_id: int | None = None
     source: str = "webhook"
+
+    def __post_init__(self) -> None:
+        if self.from_id is None:
+            object.__setattr__(self, "from_id", self.chat_id)
 
 
 def dispatch(update: dict) -> TextMessage | ButtonPress | None:
@@ -90,6 +108,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             chat_id=chat.get("id"),
             message_id=message.get("message_id"),
             text=message["text"],
+            from_id=(message.get("from") or {}).get("id"),
             update_id=update_id,
         )
 
@@ -102,6 +121,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             message_id=msg.get("message_id"),
             callback_query_id=callback.get("id"),
             data=callback["data"],
+            from_id=(callback.get("from") or {}).get("id"),
             update_id=update_id,
         )
     return None
@@ -149,12 +169,13 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     row is still written (keyed by the sent card's id) so the category press can
     update it; the amount, not the category, is what makes it a transaction.
 
-    In a private chat the chat id is the user's Telegram id, so it doubles as the
-    `telegram_user_id`. Does not commit — the caller owns the transaction.
+    The user is resolved from `from_id` (the sender), never `chat_id` (the send
+    target) — they coincide in a private chat but split under a household or group
+    (§16). Does not commit — the caller owns the transaction.
     Returns the new `pending_id`, or `None` when the message couldn't be parsed.
     """
     start = time.perf_counter()
-    user_id = get_or_create_user(conn, msg.chat_id)
+    user_id = get_or_create_user(conn, msg.from_id)
     # Trace mode (§17): the raw text, the prompt built from it, and the outcome —
     # written to a per-update folder so a hard parse bug is diagnosable. On by
     # default, a no-op when disabled or unconfigured, and it never raises.
@@ -220,7 +241,7 @@ def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     commit — the caller owns the transaction. Returns the removed row, or `None`.
     """
     start = time.perf_counter()
-    user_id = get_or_create_user(conn, msg.chat_id)
+    user_id = get_or_create_user(conn, msg.from_id)
     removed = undo_last(conn, user_id, source=msg.source, update_id=msg.update_id)
     if removed is None:
         send_message(msg.chat_id, "Nothing to undo.")
@@ -248,7 +269,7 @@ def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     Returns the new `txn_id`, or `None` when there was nothing to confirm.
     """
     start = time.perf_counter()
-    user_id = get_or_create_user(conn, press.chat_id)
+    user_id = get_or_create_user(conn, press.from_id)
     row = confirm_pending(conn, user_id, press.message_id,
                           source=press.source, update_id=press.update_id)
     answer_callback_query(
@@ -276,7 +297,7 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     when there was nothing to cancel.
     """
     start = time.perf_counter()
-    user_id = get_or_create_user(conn, press.chat_id)
+    user_id = get_or_create_user(conn, press.from_id)
     pending_id = cancel_pending(conn, user_id, press.message_id)
     # Take the cancelled card out of the chat rather than leaving a dead card
     # with live buttons. The toast still reports what happened, and the user's
@@ -317,7 +338,7 @@ def handle_category(conn: psycopg.Connection, press: ButtonPress) -> Transaction
         log_event("pending.recategorised", status="noop", update_id=press.update_id,
                   source=press.source, duration_ms=ms_since(start))
         return None
-    user_id = get_or_create_user(conn, press.chat_id)
+    user_id = get_or_create_user(conn, press.from_id)
     txn = set_pending_category(conn, user_id, press.message_id, category)
     if txn is None:
         answer_callback_query(press.callback_query_id, "That card's gone")

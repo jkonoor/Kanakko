@@ -357,7 +357,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ### Access control — closes a live hole, ship first
 
-- [ ] Separate identity from delivery address. `handle_text` uses `msg.chat_id` as
+- [x] Separate identity from delivery address. `handle_text` uses `msg.chat_id` as
       the user's identity and never reads `message.from.id`; in a private chat the
       two coincide, so it works today and is wrong the moment a household or a
       group exists. Capture `from.id` in `dispatch` onto `TextMessage`/`ButtonPress`,

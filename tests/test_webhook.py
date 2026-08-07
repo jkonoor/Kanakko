@@ -51,12 +51,19 @@ def test_text_message_is_dispatched_with_its_fields():
     action = dispatch(
         {
             "update_id": 4242,
-            "message": {"message_id": 7, "chat": {"id": 42}, "text": "spent 500 on food"},
+            "message": {
+                "message_id": 7,
+                "chat": {"id": 42},
+                "from": {"id": 99},
+                "text": "spent 500 on food",
+            },
         }
     )
     assert action == TextMessage(
-        chat_id=42, message_id=7, text="spent 500 on food", update_id=4242
+        chat_id=42, message_id=7, text="spent 500 on food", from_id=99, update_id=4242
     )
+    # §16: identity is the sender (from.id), send target is the chat (chat.id).
+    assert action.from_id == 99 and action.chat_id == 42
     assert action.source == "webhook"
 
 
@@ -67,13 +74,17 @@ def test_button_press_is_dispatched_with_its_fields():
             "callback_query": {
                 "id": "cbq1",
                 "data": "confirm",
+                "from": {"id": 99},
                 "message": {"message_id": 9, "chat": {"id": 42}},
             },
         }
     )
     assert action == ButtonPress(
-        chat_id=42, message_id=9, callback_query_id="cbq1", data="confirm", update_id=4243
+        chat_id=42, message_id=9, callback_query_id="cbq1", data="confirm",
+        from_id=99, update_id=4243,
     )
+    # The tap's identity is the tapper (callback_query.from.id), not the chat.
+    assert action.from_id == 99 and action.chat_id == 42
     assert action.source == "webhook"
 
 
@@ -199,6 +210,57 @@ def test_handle_text_keys_the_pending_row_on_the_sent_card(conn, monkeypatch):
     assert card_message_id == 909  # the card's id, not the inbound message's (1)
     assert telegram_user_id == 12345  # chat id resolved to a users row
     assert parsed["amount"] == "500.00"  # §9: stored as a string, not a float
+    conn.rollback()
+
+
+def test_handle_text_resolves_the_user_by_from_id_not_chat_id(conn, monkeypatch):
+    """Identity is the sender (from_id), the chat is only the send target (§16).
+
+    Impossible to write before the split: in a private chat from_id == chat_id, so
+    a handler resolving by chat_id passed silently. Here from_id (777) differs from
+    chat_id (12345), so the pending row must belong to 777 and *no* user row may
+    exist for 12345 — resolving by chat_id would redden both asserts. The card
+    still goes back to chat_id, which stays the delivery address.
+    """
+    migrate(conn)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "spent 500 on food",
+        }
+    )
+    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(handlers, "send_message", fake_send)
+
+    pending_id = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, from_id=777,
+                          text="spent 500 on food")
+    )
+    assert sent["chat_id"] == 12345  # the card still goes to the chat
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT u.telegram_user_id"
+            " FROM pending_transactions p JOIN users u USING (user_id)"
+            " WHERE pending_id = %s",
+            (pending_id,),
+        )
+        (telegram_user_id,) = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM users WHERE telegram_user_id = %s", (12345,)
+        )
+        (chat_as_user,) = cur.fetchone()
+    assert telegram_user_id == 777  # resolved by from_id, the sender
+    assert chat_as_user == 0  # the chat id never became a user
     conn.rollback()
 
 

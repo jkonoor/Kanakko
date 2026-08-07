@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
+from kanakko import eventlog
 from kanakko.app import app
 from kanakko.migrate import migrate
 from kanakko.webapp import (
@@ -589,6 +590,55 @@ def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
     conn.rollback()
 
 
+def test_delete_route_logs_the_money_mutation(conn, monkeypatch):
+    """The dashboard delete emits one §17 `transaction.deleted` line carrying the
+    amount, `source="miniapp"` and no `update_id` (an HTTP route is not a Telegram
+    update, gap 2); a 404 (another user's row) is `status="noop"` with no amount —
+    the reason `noop` exists. Both directions asserted: a scrubber-passes-everything
+    line and an over-eager `ok` would each be caught."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    other = get_or_create_user(conn, 99)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (uid, Decimal("300.00"), "expense", "Transport", "", date(2026, 8, 6)),
+        )
+        (mine,) = cur.fetchone()
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (theirs,) = cur.fetchone()
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        ok = client.post("/app/delete", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": mine})
+        miss = client.post("/app/delete", headers={"Authorization": "tma " + _fresh_init_data()},
+                           json={"id": theirs})
+    finally:
+        eventlog.unbind_sink()
+
+    assert (ok.status_code, miss.status_code) == (204, 404)
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("transaction.deleted", "ok"),
+        ("transaction.deleted", "noop"),
+    ]
+    assert events[0]["source"] == "miniapp" and "update_id" not in events[0]
+    assert events[0]["txn_id"] == mine and events[0]["amount"] == Decimal("300.00")
+    assert "amount" not in events[1]  # a noop touched no row
+    conn.rollback()
+
+
 # --- Per-row category change from the dashboard (§13, task 101) ---
 
 
@@ -636,6 +686,53 @@ def test_category_route_changes_the_users_row(conn, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("SELECT category FROM active_transactions WHERE txn_id = %s", (txn_id,))
         assert cur.fetchone()[0] == "Transport"
+    conn.rollback()
+
+
+def test_category_route_logs_the_money_mutation(conn, monkeypatch):
+    """The dashboard recategorise emits one §17 `transaction.recategorised` line —
+    `source="miniapp"`, no `update_id`, and the amount on the `ok` path; a 404
+    (another user's row) is `noop` with no amount."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    other = get_or_create_user(conn, 99)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (mine,) = cur.fetchone()
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (other, Decimal("70.00"), "expense", "Food", "", date(2026, 8, 6)),
+        )
+        (theirs,) = cur.fetchone()
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        ok = client.post("/app/category", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": mine, "category": "Transport"})
+        miss = client.post("/app/category", headers={"Authorization": "tma " + _fresh_init_data()},
+                           json={"id": theirs, "category": "Transport"})
+    finally:
+        eventlog.unbind_sink()
+
+    assert (ok.status_code, miss.status_code) == (204, 404)
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("transaction.recategorised", "ok"),
+        ("transaction.recategorised", "noop"),
+    ]
+    assert events[0]["source"] == "miniapp" and "update_id" not in events[0]
+    assert events[0]["txn_id"] == mine and events[0]["amount"] == Decimal("500.00")
+    assert "amount" not in events[1]
     conn.rollback()
 
 

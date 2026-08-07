@@ -292,7 +292,7 @@ row, because there is no `txn_id` to hang one on.
       `ms_since` helper in `eventlog` — no decorator, no context manager.
       The check: a redelivered Confirm logs `status="noop"`, not `ok`, and a
       handler that raises still produces exactly one `status="error"` line.
-- [ ] Log the dashboard money mutations: `transaction.deleted` (`app.py:158`) and
+- [x] Log the dashboard money mutations: `transaction.deleted` (`app.py:158`) and
       `transaction.recategorised` (`app.py:189`), `source="miniapp"` and **no
       `update_id`** — these are HTTP routes, not Telegram updates (gap 2). The 404
       paths (already deleted, or never this user's) are `status="noop"`, and they

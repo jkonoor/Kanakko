@@ -306,7 +306,7 @@ def recent_transactions(
 
 def soft_delete_transaction(
     conn: psycopg.Connection, user_id: int, txn_id: int
-) -> int | None:
+) -> dict | None:
     """Soft-delete one live transaction by id, scoped to `user_id` (§6, §13).
 
     The dashboard's per-row delete: sets `deleted_at` on the row so the ledger
@@ -315,8 +315,9 @@ def soft_delete_transaction(
     `active_transactions`, so deleting an already-deleted (or another user's) row
     is a no-op returning `None`, not a second write — the subquery yields no
     `txn_id`, and `WHERE txn_id = NULL` matches nothing. Mirrors `undo_last`'s
-    read-through-the-view pattern. Returns the deleted `txn_id`, or `None`. Does
-    not commit — the caller owns the transaction.
+    read-through-the-view pattern. Returns the deleted row — `txn_id` plus its
+    amount so the caller can log it (§17) — or `None`. Does not commit — the
+    caller owns the transaction.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -325,16 +326,16 @@ def soft_delete_transaction(
             "   SELECT txn_id FROM active_transactions"
             "   WHERE user_id = %s AND txn_id = %s"
             " )"
-            " RETURNING txn_id",
+            " RETURNING txn_id, amount",
             (user_id, txn_id),
         )
         row = cur.fetchone()
-    return row[0] if row else None
+    return {"txn_id": row[0], "amount": row[1]} if row else None
 
 
 def set_transaction_category(
     conn: psycopg.Connection, user_id: int, txn_id: int, category: str
-) -> int | None:
+) -> dict | None:
     """Set the category of one live transaction, scoped to `user_id` (§5, §13).
 
     The dashboard's per-row category change (task 101): corrects the most-often-
@@ -343,8 +344,9 @@ def set_transaction_category(
     `active_transactions`, so a deleted or foreign id yields no `txn_id` and the
     UPDATE matches nothing, returning `None` rather than a stray write. The caller
     validates `category` against the closed set (`categories.py`) before this runs.
-    Mirrors `soft_delete_transaction`. Returns the updated `txn_id`, or `None`.
-    Does not commit — the caller owns the transaction.
+    Mirrors `soft_delete_transaction`. Returns the updated row — `txn_id` plus its
+    amount so the caller can log it (§17) — or `None`. Does not commit — the
+    caller owns the transaction.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -353,11 +355,11 @@ def set_transaction_category(
             "   SELECT txn_id FROM active_transactions"
             "   WHERE user_id = %s AND txn_id = %s"
             " )"
-            " RETURNING txn_id",
+            " RETURNING txn_id, amount",
             (category, user_id, txn_id),
         )
         row = cur.fetchone()
-    return row[0] if row else None
+    return {"txn_id": row[0], "amount": row[1]} if row else None
 
 
 def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> bool:

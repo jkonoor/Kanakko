@@ -34,9 +34,14 @@ from kanakko.money import parse_amount
 KOLKATA = ZoneInfo("Asia/Kolkata")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# §2: default model is claude-opus-5. `or` (not get's default) because compose
-# sets OPENROUTER_MODEL="" when unset, so get("...", default) would return "".
-MODEL_DEFAULT = "claude-opus-5"
+# §2: default model, revised 2026-08-07 from claude-opus-5 on a measured
+# comparison — same 8/8 extraction accuracy across three runs, ~3x faster and
+# ~12.5x cheaper, and it invented nothing on the must-not-parse cases. The table
+# is in §2. Namespaced id: OpenRouter aliases some bare slugs but not all, and
+# the namespaced form is the one its model list actually publishes.
+# `or` (not get's default) because compose sets OPENROUTER_MODEL="" when unset,
+# so get("...", default) would return "".
+MODEL_DEFAULT = "google/gemini-2.5-flash"
 
 _SYSTEM_PROMPT = (
     "You extract a single personal-finance transaction from a short "

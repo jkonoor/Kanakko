@@ -26,16 +26,47 @@ omitting `user_id` (guarantees a schema migration later).
 ## 2. LLM parse on every message, via OpenRouter
 
 **Decided:** One LLM call per inbound message. Provider is **OpenRouter** so the
-model is a config value. Default model `claude-opus-5`. Request structured
-output via `response_format: {type: "json_schema", ...}` with
-`require_parameters: true` in provider preferences.
+model is a config value. Default model **`google/gemini-2.5-flash`** (revised
+2026-08-07 — see below; was `claude-opus-5`). Request structured output via
+`response_format: {type: "json_schema", ...}` with `require_parameters: true` in
+provider preferences.
 
 **Why:** Cost is not a constraint at this scale. Verified first-party rates
 (cached 2026-06-24): Haiku 4.5 $1/$5 per MTok, Sonnet 5 $3/$15, Opus 5 $5/$25.
 A parse is ~300 input + ~60 output tokens, so roughly ₹0.05–₹0.25 per
-transaction — under ₹40/month at personal volume. Opus 5 is chosen for
-extraction accuracy; cost only starts mattering around ~1,000 users, and that
-is exactly the switch OpenRouter exists to make cheap.
+transaction — under ₹40/month at personal volume. Opus 5 was chosen originally
+for extraction accuracy, on the reasoning that cost only starts mattering around
+~1,000 users and that switching is exactly what OpenRouter makes cheap.
+
+**Revised 2026-08-07 — the switch was made early, on measurement rather than on
+the user threshold.** Once the parse path actually worked in production (it never
+had — see the schema caveat below), the models were compared on this app's real
+workload instead of assumed: 8 extraction cases plus 2 messages that must *not*
+parse, run against the live API, three times over for the shortlist.
+
+| Model | Correct | Invented a transaction | ~sec/parse | Per parse |
+|---|---|---|---|---|
+| `claude-opus-5` | 8/8 | 0 | 5.2 | $0.0040 |
+| `claude-sonnet-5` | 8/8 | 0 | 5.1 | $0.0016 |
+| **`google/gemini-2.5-flash`** | **8/8 ×3** | **0** | **1.6** | **$0.00032** |
+| `openai/gpt-5-nano` | 8/8 | 0 | 9.6 | $0.000052 |
+| `mistralai/mistral-small-24b` | 7/8 ×3 | 0 | 2.2 | $0.000026 |
+| `google/gemini-2.5-flash-lite` | 7/8 ×3 | **2 of 3 runs** | 1.4 | $0.000072 |
+
+Gemini 2.5 Flash matched Opus perfectly across three runs while being ~3× faster
+and ~12.5× cheaper (≈₹4/month at 5 transactions/day). Latency is the part that
+shows: the user waits on this call before a confirm card appears.
+
+**The must-not-parse cases are the important half of that table**, and any future
+comparison keeps them. `gemini-2.5-flash-lite` fabricated a transaction from
+`"hello how are you"` — ₹150, Entertainment — in two of three runs. In a ledger
+whose whole value is being trusted, inventing money is disqualifying at any
+price, and a pure accuracy score would have ranked it acceptable. The cheaper
+models that did *not* invent instead failed relative dates ("last friday"), which
+is a quieter wrongness that §10's prompt-injected date exists to prevent.
+
+**Unchanged:** the model stays a config value (`OPENROUTER_MODEL`), so this is a
+default and not a lock-in. Revisit on the same evidence — a table, not a vibe.
 
 **Rejected:**
 - *Regex/rules with LLM fallback.* Looks thrifty; is the classic three-rewrite

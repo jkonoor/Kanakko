@@ -9,6 +9,7 @@ default swallowed by compose's empty-string env var.
 
 import json
 import os
+import pathlib
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -205,3 +206,19 @@ def test_http_error_is_not_retried(monkeypatch):
     with pytest.raises(httpx.HTTPError):
         parse_message("x")
     assert len(calls) == 1
+
+
+def test_spec_and_code_agree_on_the_default_model():
+    """`docs/DECISIONS.md` §2 and `MODEL_DEFAULT` name the same model.
+
+    CLAUDE.md: "Two places that must agree will eventually disagree." These two
+    did — production ran `google/gemini-2.5-flash` via `OPENROUTER_MODEL` for a
+    day while §2 still declared `claude-opus-5`, so the spec stopped describing
+    what actually ran and no check noticed. The spec is the authority, so this
+    reads the model out of it and holds the code to it; changing one without the
+    other now fails here rather than silently.
+    """
+    spec = pathlib.Path(__file__).resolve().parent.parent / "docs" / "DECISIONS.md"
+    declared = re.search(r"Default model \*\*`([^`]+)`\*\*", spec.read_text())
+    assert declared, "§2 no longer declares a default model in the expected form"
+    assert declared.group(1) == MODEL_DEFAULT

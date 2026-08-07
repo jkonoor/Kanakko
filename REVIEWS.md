@@ -12,6 +12,68 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `d561153` — period-over-period delta on each dashboard hero (Phase 7)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: each period hero gains a same-length prior-period comparison line
+(`▼ 40% vs last month` / `vs last week`); all-time has no prior period and shows
+nothing. New `previous_month_first` helper, `_delta` renderer, two extra
+`month_summary` queries in `/app/data`.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **183 passed**. `uv run pytest tests/test_webapp.py -q`
+  → **50 passed**.
+- **Guard actually reddens.** Temporarily deleted the
+  `+ _delta(period.expenses, …)` line from `_period_panel` (reverting the fix)
+  and ran the delta tests: **3 failed** —
+  `test_hero_delta_says_no_comparison_against_a_zero_baseline`,
+  `test_hero_delta_shows_direction_and_magnitude`,
+  `test_dashboard_route_month_delta_needs_a_baseline`. Restored via
+  `git checkout`. The tests fail for the reason they exist.
+- **Exercised `_delta` and `previous_month_first` directly:**
+  - `_delta(300, 500)` → `▼ 40% vs last month`; `_delta(300, 200)` → `▲ 50%`;
+    `_delta(500, 300)` → `▲ 67%` (66.7 → 67).
+  - `_delta(500, 0)` → `no comparison yet` (no `%` — division-by-zero is not
+    fabricated as 100%); `_delta(500, None)` → `''` (all-time); equal figures →
+    `about the same`.
+  - `type(round((500-300)/300*100))` is `int` off `Decimal` operands — **no
+    float touches the amount** (§9). ✅
+  - `previous_month_first(2026-01-01)` → `2025-12-01` (January → December of the
+    prior year); `previous_month_first(2026-03-01)` → `2026-02-01` (correct
+    across February's short length). ✅
+
+### Spec / convention conformance
+
+- **Decimal throughout** — `pct` is `round()` of a `Decimal` expression; `abs()`
+  of an int. No `float`. (§9) ✅
+- **Reads via `active_transactions`** — both new queries route through
+  `month_summary`, which reads the view; soft-deleted rows stay out of the
+  baseline. (§6) ✅
+- **Boundaries in IST** — `previous_month_first` is pure calendar arithmetic on
+  a boundary `current_month_ist` already computed in `Asia/Kolkata`; the prev-week
+  bound is `w_first - 7d` off the IST Monday. Both derive from the *current*
+  bounds — no second `datetime.now()` that could disagree at a rollover
+  (`app.py:131-135`). (§10) ✅
+- **No new dependency, no charting lib, no state machine.** ✅
+- **Direction by glyph + label, never colour** — `.delta` stays in hint ink;
+  arrow + text carry the sign (WCAG 1.4.1). ✅
+- `html.escape` applied to the label before interpolation (constant strings
+  today, but escaped regardless). ✅
+
+### Notes (non-blocking, no action needed)
+
+- `round()` on `Decimal` uses banker's rounding (`ROUND_HALF_EVEN`), so e.g. a
+  2.5% change displays as `2%`. This is a display percentage, not a money path;
+  acceptable.
+- `TASKS.md` box ticked matches delivered work; the per-day week bar remains
+  correctly unticked.
+
+No blocking issues. `d561153` is **✅ DONE**.
+
+---
+
 ## 2026-08-07 — `991c883` — log upstream parse failures at WARNING (Phase 6, task 2)
 
 **Status: ✅ DONE** — no blocking issues.

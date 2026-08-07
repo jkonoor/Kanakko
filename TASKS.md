@@ -364,7 +364,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       resolve the *user* from it, and keep `chat_id` purely as the send target. The
       check: an update whose `from.id` differs from `chat.id` resolves the user by
       `from.id` — that guard is impossible to write today and is the whole point.
-- [ ] Add the `invites` table and `SIGNUP_MODE` (env, `invite` | `open`, default
+- [x] Add the `invites` table and `SIGNUP_MODE` (env, `invite` | `open`, default
       `invite` — fails closed like §15's secret). Columns: `code` unique, `kind`
       (`signup` | `household`), `household_id` nullable, `label`, `created_by`,
       `used_by` nullable, `used_at`, `expires_at`. Single-use: a code with

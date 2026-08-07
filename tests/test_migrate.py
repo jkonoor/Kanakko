@@ -9,6 +9,7 @@ pass once and then fail on every later run.
 
 from decimal import Decimal
 
+import psycopg
 import pytest
 
 from kanakko.categories import EXPENSE_CATEGORIES
@@ -71,6 +72,44 @@ def test_schema_stores_money_exactly(conn):
         cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (txn_id,))
         cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
         assert cur.fetchone() == (0,)
+    conn.rollback()
+
+
+def test_invite_kind_and_household_must_agree(conn):
+    """The §16 invariant is structural, not a hope: a household invite carries a
+    household, a signup invite carries none.
+
+    Without the CHECK a mislabelled row grants the wrong thing at the gate — a
+    signup code that quietly drops someone into a household, or a household code
+    that joins nobody. The constraint only holds if the server enforces it, so
+    this exercises the applied schema, both violating rows and both valid ones.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7) RETURNING user_id")
+        (uid,) = cur.fetchone()
+
+        # Valid: signup with no household, household with a household.
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by)"
+            " VALUES ('sig-1', 'signup', NULL, 'ravi', %s)",
+            (uid,),
+        )
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by)"
+            " VALUES ('hh-1', 'household', 42, 'priya', %s)",
+            (uid,),
+        )
+
+        # Violations: signup with a household, household with none.
+        for code, kind, hid in [("sig-2", "signup", 42), ("hh-2", "household", None)]:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cur.execute(
+                    "INSERT INTO invites (code, kind, household_id, label, created_by)"
+                    " VALUES (%s, %s, %s, 'x', %s)",
+                    (code, kind, hid, uid),
+                )
+            conn.rollback()
     conn.rollback()
 
 

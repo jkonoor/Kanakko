@@ -12,6 +12,69 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `7dbf6be` — §17 trace mode: per-update artefact folders (Phase 8, task 7)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: adds `kanakko/trace.py` (per-update folder under `LOG_DIR/trace/<update_id>/`,
+one JSON step-file with the outcome in the filename, rotation to the last
+`TRACE_KEEP` folders, never raises) and wires `open_trace` into `handle_text`;
+ticks task 7 in `TASKS.md`; new `tests/test_trace.py`.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **207 passed, 1 warning** (pre-existing Starlette/httpx
+  deprecation, unrelated). `uv run pytest tests/test_trace.py -q` → **6 passed**.
+- `uv run ruff check kanakko/trace.py kanakko/handlers.py tests/test_trace.py`
+  → **All checks passed**.
+- **Guard 1 reddens for its reason.** Made `_rotate` early-return (no-op), ran
+  `test_rotation_deletes_the_oldest` → **FAILED** (`'1' != '4'`, oldest folders
+  not deleted). Restored.
+- **Guard 2 reddens for its reason.** Dropped the `tr.write("parse", …,
+  outcome="invalid")` line in `handle_text`, ran
+  `test_failed_parse_names_the_failure` → **FAILED** (no `*invalid*` artefact).
+  Restored. `git status` clean afterward.
+- **Spec fit (§17 / DECISIONS.md:524).** Env names match the pinned interface
+  (`LOG_DIR`, `TRACE_MODE` default-on, `TRACE_KEEP`); outcome-in-filename,
+  rotation-from-env, never-raises, and scrub-backstop are all present and
+  match the "adopted" list. `TRACE_KEEP` is read with `or` (not `get(k, default)`)
+  so compose's `:-` empty-string trap is handled, and clamped to `max(1, …)` so
+  it can't delete the live folder — verified by reading `_keep()`.
+- **No secret leak.** `build_request` returns `model`/`messages`/`response_format`/
+  `provider` — no key (the API key rides in headers, not the body), so writing the
+  request to disk is the deliberate §17 prompt-capture, not a credential leak.
+  `NEVER_LOG` (`prompt`) doesn't collide with any key in that dict, so the prompt
+  content is written as intended. `scrub` still sweeps for key-shaped substrings —
+  `test_write_never_raises_and_scrubs` confirms an `sk-or-v1-…` value is redacted
+  while `lunch` survives.
+- **Rotation ordering.** Runs after the current folder is `mkdir`-ed, sorts by
+  numeric `update_id` (monotonic per Telegram), non-numeric names sort to `-1`
+  and get culled first — no clock/mtime read, current folder always kept.
+- **Never-raises envelope.** Both `write` and `open_trace` wrap in bare
+  `except Exception` and downgrade to no tracing; `default=str` in `json.dumps`
+  serialises the `Decimal`/`date` a parse carries.
+
+### Findings
+
+**Low — `build_request` (and the input dict) are evaluated on every text
+message, even when tracing is off.** `kanakko/handlers.py:164`
+`tr.write("request", build_request(msg.text))` evaluates `build_request` as an
+argument before `write` checks `folder is None`, so with `TRACE_MODE=off` or
+`LOG_DIR` unset the full request (including `parse_schema()`) is built and
+discarded — and when tracing is on (the prod default) `build_request` runs
+twice per message, once here and once inside `parse_message`. Pure function, no
+network, no correctness impact (207 tests green); purely wasted CPU. Not
+blocking. If it ever matters, guard the two writes behind `if tr.folder:` or
+add a cheap `Trace.enabled` property. Noting only so it's a known, deliberate
+cost rather than an accident.
+
+Minor test-gap (not a finding to fix): no test exercises `write` swallowing an
+actual filesystem/serialisation failure — the `except` is there and reasoned,
+but only the disabled-no-op path is asserted. Acceptable for a never-raises
+backstop.
+
+---
+
 ## 2026-08-07 — `762fb9a` — write the §17 audit trail inside the money transaction (Phase 8, task 6)
 
 **Status: ✅ DONE** — no blocking issues.

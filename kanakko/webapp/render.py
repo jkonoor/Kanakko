@@ -5,7 +5,6 @@ string that reaches the markup and is HTML-escaped here; nothing else is.
 """
 
 import html
-from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import CATEGORIES_BY_TYPE

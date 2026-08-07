@@ -270,7 +270,9 @@ def undo_last(
     return {"txn_id": txn_id, **removed}
 
 
-def claim_update(conn: psycopg.Connection, update_id: int, user_id: int) -> bool:
+def claim_update(
+    conn: psycopg.Connection, update_id: int, user_id: int | None
+) -> bool:
     """Record `update_id` as processed by `user_id`; True the first time, False on a repeat (§14).
 
     Telegram redelivers any update it did not answer 2xx for, so the webhook calls
@@ -284,7 +286,9 @@ def claim_update(conn: psycopg.Connection, update_id: int, user_id: int) -> bool
     retried. Does not commit — the caller owns the transaction.
 
     `user_id` stamps the row so `count_updates_on_day` can meter the §16 daily cost
-    cap off this same table.
+    cap off this same table — but only for the metered (text-parse) path; the caller
+    passes `None` for the free Confirm/Cancel/category/undo claims so their rows stay
+    unmetered and the cap counts exactly the messages that cost an LLM call.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -300,9 +304,12 @@ def count_updates_on_day(
 ) -> int:
     """How many updates this user has had handled on `ist_day` (§16 cost cap).
 
-    The metering read behind the per-user daily message cap: every inbound message
-    is one LLM call (§2), so an unbounded user is an unbounded bill. Counts
-    `processed_updates` rows the user claimed, bucketed on `processed_at`
+    The metering read behind the per-user daily message cap: each text-parse
+    message is one LLM call (§2), so an unbounded user is an unbounded bill. Counts
+    only the `processed_updates` rows stamped with this `user_id` — `claim_update`
+    stamps it on the parse path alone, leaving the free Confirm/Cancel/category/undo
+    claims NULL, so the `WHERE user_id = %s` counts exactly the LLM calls, not the
+    free taps. Bucketed on `processed_at`
     **`AT TIME ZONE 'Asia/Kolkata'`** so the day rolls over at IST midnight, not
     UTC (§10) — a message at 23:50 IST counts against that IST day, not the next
     one it falls into in UTC. `ist_day` is the current IST date the caller

@@ -297,22 +297,23 @@ async def webhook(request: Request) -> dict[str, bool]:
                       source="webhook", duration_ms=ms_since(start))
             return {"ok": True}
         user_id = get_or_create_user(conn, action.from_id)
-        # §16 cost control: every message is one LLM call (§2), so a runaway user
-        # is an unbounded bill on the owner's OpenRouter credits. Meter it here,
-        # before the parse — and only on the parse path: /undo and the Confirm/
-        # Cancel/category taps cost nothing and are never capped, so a user at the
-        # cap can still finish or undo a pending card. Counted off the yet-unclaimed
-        # count, so the (cap+1)th message is the one refused.
-        if (
-            isinstance(action, TextMessage)
-            and not _is_undo(action.text)
-            and not within_daily_cap(conn, user_id)
-        ):
+        # §16 cost control: only the text-parse path is an LLM call (§2), so a
+        # runaway user is an unbounded bill on the owner's OpenRouter credits.
+        # /undo and the Confirm/Cancel/category taps cost nothing — they are never
+        # capped (a user at the cap can still finish or undo a pending card) and,
+        # crucially, never *metered*: the claim below stamps `user_id` only on the
+        # parse path, leaving callback/undo rows NULL so `count_updates_on_day`
+        # counts exactly the messages that spend credits (§16), not the free taps.
+        is_parse = isinstance(action, TextMessage) and not _is_undo(action.text)
+        if is_parse and not within_daily_cap(conn, user_id):
             send_message(action.chat_id, CAP_REACHED)
             log_event("update.capped", status="noop", update_id=update_id,
                       source="webhook", user_id=user_id, duration_ms=ms_since(start))
             return {"ok": True}
-        if isinstance(update_id, int) and not claim_update(conn, update_id, user_id):
+        # Meter only the parse path (see above). Counted off the yet-unclaimed
+        # count, so the (cap+1)th message is the one refused.
+        metered_user = user_id if is_parse else None
+        if isinstance(update_id, int) and not claim_update(conn, update_id, metered_user):
             return {"ok": True}  # a prior delivery of this update was handled
         try:
             if isinstance(action, TextMessage):

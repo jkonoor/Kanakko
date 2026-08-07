@@ -133,6 +133,45 @@ def test_message_past_the_cap_is_refused_and_costs_nothing(conn, monkeypatch):
     conn.rollback()
 
 
+def _confirm_update(update_id, from_id=USER):
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": "cbq",
+            "from": {"id": from_id},
+            "message": {"message_id": 1, "chat": {"id": from_id}},
+            "data": "confirm",
+        },
+    }
+
+
+def test_callback_tap_does_not_consume_the_cap(conn, monkeypatch):
+    """A free Confirm tap is handled but never metered — §16 counts only LLM calls.
+
+    The cap exists to bound OpenRouter cost, and a Confirm/Cancel/category tap makes
+    no LLM call (§2). If a tap were counted, a text→Confirm user would burn two units
+    per entry and hit the wall at half the configured budget. This claims a Confirm
+    through the real webhook, then asserts the metering count is still zero. Reverting
+    the `metered_user = user_id if is_parse else None` guard in the webhook (stamping
+    every claim with `user_id`) reddens this: the Confirm row would count.
+    """
+    migrate(conn)
+    uid = get_or_create_user(conn, USER)
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setenv("SIGNUP_MODE", "invite")
+    monkeypatch.setattr(app_module, "connect", _reuse_conn(conn))
+    monkeypatch.setattr(app_module, "handle_confirm", lambda conn, act: None)
+
+    response = client.post("/webhook", json=_confirm_update(30), headers=AUTH)
+
+    assert response.status_code == 200
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM processed_updates WHERE update_id = %s", (30,))
+        assert cur.fetchone() == (1,)  # the tap was claimed (idempotency still holds)
+    assert count_updates_on_day(conn, uid, date.today()) == 0  # but not metered
+    conn.rollback()
+
+
 def test_message_under_the_cap_is_served(conn, monkeypatch):
     """One below the cap, the message reaches the parse path — not "refuse everyone".
 

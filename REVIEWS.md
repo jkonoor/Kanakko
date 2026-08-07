@@ -14,9 +14,18 @@ returned, not what they were assumed to return.
 
 ## 2026-08-07 — `1f6c28d` — per-user daily message cap (Phase 9, task 4)
 
-**Status: ⚠️ CHANGES REQUESTED** — one spec-fit finding: the cap counts free
-(non-LLM) callback taps against the LLM-cost budget, so an active user is
+**Status: ✅ RESOLVED** (finding 1 fixed in the next commit) — the cap counted
+free (non-LLM) callback taps against the LLM-cost budget, so an active user was
 refused well before the configured cap.
+
+**Resolution:** the webhook now stamps `processed_updates.user_id` only on the
+metered text-parse claim (`metered_user = user_id if is_parse else None`);
+Confirm/Cancel/category/undo claims leave `user_id` NULL, so
+`count_updates_on_day`'s `WHERE user_id = %s` counts exactly the LLM calls, not
+the free taps. New `tests/test_cap.py::test_callback_tap_does_not_consume_the_cap`
+claims a Confirm through the real webhook and asserts the metering count stays 0
+(the tap is still claimed for idempotency); reverting the `is_parse` guard
+reddens it. `226 passed`.
 
 Scope: the §16 per-user daily message cap. `migrations/005` adds a nullable
 `user_id` FK to `processed_updates`; `claim_update` stamps it; new

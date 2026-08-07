@@ -366,6 +366,50 @@ def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
     conn.rollback()
 
 
+def test_handle_text_logs_the_parse_success_but_not_the_failure(conn, monkeypatch):
+    """§17: a successful parse emits `parse.completed` with the model and a
+    duration; a failed parse does not — Phase 6's WARNING owns the failure side, so
+    a second `parse.completed` on the 402 path would double-log it and also lie that
+    the parse succeeded. Assert both directions.
+    """
+    migrate(conn)
+    monkeypatch.setattr(handlers, "send_message", lambda *a, **k: {"result": {"message_id": 909}})
+    monkeypatch.setenv("OPENROUTER_MODEL", "acme/fast-1")
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "lunch",
+        }
+    )
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+        app_module.handle_text(
+            conn, TextMessage(chat_id=12345, message_id=1, text="spent 500", update_id=9)
+        )
+        monkeypatch.setattr(
+            handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
+        )
+        app_module.handle_text(
+            conn, TextMessage(chat_id=12345, message_id=2, text="spent 500", update_id=10)
+        )
+    finally:
+        eventlog.unbind_sink()
+
+    completed = [e for e in events if e["event"] == "parse.completed"]
+    assert len(completed) == 1  # only the success side; the 402 does not log here
+    assert completed[0]["status"] == "ok"
+    assert completed[0]["model"] == "acme/fast-1"  # the resolved model, greppable
+    assert completed[0]["update_id"] == 9 and completed[0]["source"] == "webhook"
+    assert isinstance(completed[0]["duration_ms"], int)
+    conn.rollback()
+
+
 def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypatch):
     """A null category shows the category picker, not a confirm card (§3).
 

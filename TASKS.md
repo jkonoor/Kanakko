@@ -301,7 +301,7 @@ row, because there is no `txn_id` to hang one on.
       pair. **`log_event` here is a synchronous write inside an `async def`
       route** — fine at this scale, so it carries a `ponytail:` comment naming the
       ceiling and the upgrade path rather than a queue nobody needs yet.
-- [ ] Log the parse path: the OpenRouter call's duration, model, and outcome. The
+- [x] Log the parse path: the OpenRouter call's duration, model, and outcome. The
       Phase 6 `WARNING` already covers the failure; this adds the success side, so
       a slow model is visible before it becomes a complaint about the bot feeling
       sluggish.

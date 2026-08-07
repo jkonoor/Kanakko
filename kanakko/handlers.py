@@ -29,7 +29,7 @@ from kanakko.db import (
 )
 from kanakko.eventlog import log_event, ms_since
 from kanakko.money import format_amount
-from kanakko.parse import Transaction, parse_message
+from kanakko.parse import Transaction, parse_message, resolve_model
 from kanakko.tg import (
     answer_callback_query,
     delete_message,
@@ -154,6 +154,7 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.chat_id)
+    parse_start = time.perf_counter()
     try:
         txn = parse_message(msg.text)
     except ValidationError:
@@ -171,6 +172,12 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
             raise  # 5xx is transient — let it 500 so Telegram redelivers
         send_message(msg.chat_id, PARSER_DOWN_PROMPT)
         return None
+    # §17: the success side of the parse — Phase 6's WARNING covers the failure.
+    # `duration_ms` is the call alone (retry included) so a slow model is visible
+    # before it reads as the bot feeling sluggish.
+    log_event("parse.completed", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id,
+              duration_ms=ms_since(parse_start), model=resolve_model())
     render = category_prompt if txn.category is None else confirm_card
     text, keyboard = render(txn)
     sent = send_message(msg.chat_id, text, reply_markup=keyboard)

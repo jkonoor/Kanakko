@@ -91,6 +91,16 @@ def today() -> str:
     return datetime.now(KOLKATA).strftime("%Y-%m-%d")
 
 
+def resolve_model(model: str | None = None) -> str:
+    """The model id an outbound parse request will use (§2).
+
+    One definition: `build_request` sends it and §17's `parse.completed` log line
+    reports it, so a slow model is greppable. `or` (not get's default) because
+    compose sets `OPENROUTER_MODEL=""` when unset.
+    """
+    return model or os.environ.get("OPENROUTER_MODEL") or MODEL_DEFAULT
+
+
 def build_request(
     message: str, model: str | None = None, today_str: str | None = None
 ) -> dict:
@@ -106,7 +116,7 @@ def build_request(
         "(\"yesterday\", \"last Friday\") against it."
     )
     return {
-        "model": model or os.environ.get("OPENROUTER_MODEL") or MODEL_DEFAULT,
+        "model": resolve_model(model),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": message},

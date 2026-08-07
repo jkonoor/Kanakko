@@ -238,9 +238,22 @@ def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkey
     conn.rollback()
 
 
+API_KEY = "sk-or-v1-secret-key-value"
+
+
 def _http_error(status_code, body=""):
-    """An `httpx.HTTPStatusError` carrying `status_code`, as `parse_message` raises."""
-    request = httpx.Request("POST", "https://openrouter.ai")
+    """An `httpx.HTTPStatusError` carrying `status_code`, as `parse_message` raises.
+
+    The request carries a real `Authorization: Bearer <key>` header, exactly as
+    `parse.call()` builds it. That is load-bearing for the no-leak guard below:
+    with a bare request the assertion "the key is not in the log line" passes even
+    if the log dumped `exc.request.headers`, because there would be no key there
+    to leak. With the header present the guard can actually fail for the reason it
+    exists (QA raised this on `991c883`).
+    """
+    request = httpx.Request(
+        "POST", "https://openrouter.ai", headers={"Authorization": f"Bearer {API_KEY}"}
+    )
     response = httpx.Response(status_code, request=request, text=body)
     return httpx.HTTPStatusError("boom", request=request, response=response)
 
@@ -322,7 +335,7 @@ def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
     monkeypatch.setattr(
         app_module, "send_message", lambda *a, **k: {"result": {"message_id": 1}}
     )
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret-key-value")
+    monkeypatch.setenv("OPENROUTER_API_KEY", API_KEY)
 
     with caplog.at_level("WARNING", logger="kanakko.app"):
         app_module.handle_text(
@@ -333,7 +346,11 @@ def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
     line = record.getMessage()
     assert "402" in line
     assert body in line
-    assert "sk-secret-key-value" not in line
+    # The exception really does carry the key (in its request headers), so this
+    # assertion can fail — it is not passing merely because there is nothing to
+    # leak. Logging `exc.request.headers` would redden it.
+    assert API_KEY in str(dict(_http_error(402).request.headers))
+    assert API_KEY not in line
     conn.rollback()
 
 

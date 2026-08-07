@@ -123,7 +123,7 @@ the plan's order and it matters.
       task above if they haven't landed yet; category itself is a closed set from
       `categories.py`, so the escaping risk here is the note, not the category
 - [x] Make the dashboard render correctly in both light and dark themes
-- [ ] `[human]` Register the Mini App menu button with BotFather
+- [x] `[human]` Register the Mini App menu button with BotFather — done 2026-08-07; the Mini App opens and its `initData` HMAC verifies against real Telegram payloads, which is what settled the URL-decoding assumption no unit test could reach
 
 ## Phase 5 — Backups and hardening
 

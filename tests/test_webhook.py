@@ -8,6 +8,8 @@ malformed body or an ignored update must not turn into a retry storm.
 
 from decimal import Decimal
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
@@ -233,6 +235,72 @@ def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkey
         )
         (pending_count,) = cur.fetchone()
     assert pending_count == 0  # §3: an unparseable message stores nothing
+    conn.rollback()
+
+
+def _http_error(status_code):
+    """An `httpx.HTTPStatusError` carrying `status_code`, as `parse_message` raises."""
+    request = httpx.Request("POST", "https://openrouter.ai")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("boom", request=request, response=response)
+
+
+def test_handle_text_tells_the_user_when_a_4xx_parse_fails_permanently(conn, monkeypatch):
+    """A 4xx from OpenRouter is permanent → warn the user, store nothing, no 500 (§6).
+
+    402 (exhausted credits) is the outage that motivated this: Telegram redelivers
+    a 500 forever, so a permanent upstream failure must be answered and swallowed,
+    not looped. `handle_text` sends the parser-down message and returns None (webhook
+    then answers 200).
+    """
+    migrate(conn)
+    monkeypatch.setattr(
+        app_module, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
+    )
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(app_module, "send_message", fake_send)
+
+    result = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on lunch")
+    )
+    assert result is None
+    assert sent["text"] == app_module.PARSER_DOWN_PROMPT
+    assert sent["reply_markup"] is None
+
+    user_id = get_or_create_user(conn, 12345)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pending_transactions WHERE user_id = %s", (user_id,)
+        )
+        (pending_count,) = cur.fetchone()
+    assert pending_count == 0  # §6: a permanent parse failure stores nothing
+    conn.rollback()
+
+
+def test_handle_text_lets_a_5xx_parse_failure_propagate(conn, monkeypatch):
+    """A 5xx is transient → propagate so the webhook 500s and Telegram redelivers.
+
+    The dangerous regression is swallowing *every* upstream error: that would pass a
+    test covering only the 4xx branch while hiding a recoverable outage. So assert
+    the other direction too — a 503 raises out of `handle_text` and sends nothing.
+    """
+    migrate(conn)
+    monkeypatch.setattr(
+        app_module, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(503))
+    )
+    sent = []
+    monkeypatch.setattr(app_module, "send_message", lambda *a, **k: sent.append(a))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        app_module.handle_text(
+            conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on lunch")
+        )
+    assert sent == []  # 5xx redelivers; no user-facing message on the transient path
     conn.rollback()
 
 

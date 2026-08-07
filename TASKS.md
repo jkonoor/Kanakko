@@ -143,7 +143,7 @@ redelivered forever, and the user saw *nothing at all* — no card, no error, no
 hint. Two separate upstream failures hid behind that silence (a 402 for exhausted
 OpenRouter credits, then a 400 for the type-array schema, fixed in `f1320a1`).
 
-- [ ] Tell the user when a parse fails for a non-transient reason, instead of
+- [x] Tell the user when a parse fails for a non-transient reason, instead of
       failing mute. `handle_text` already converts a `ValidationError` into the
       rephrase prompt (§3); this extends that to upstream failures. An
       `httpx.HTTPStatusError` whose status is **4xx** is permanent — a bad key

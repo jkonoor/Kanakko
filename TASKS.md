@@ -399,7 +399,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       NOT NULL is deferred to the write-wiring task below — `confirm_pending` and
       ~12 test insert sites still omit `household_id`, so enforcing it now would
       break every insert.
-- [ ] Wire the write path to the household: `confirm_pending` sets
+- [x] Wire the write path to the household: `confirm_pending` sets
       `household_id` from the entering user's `household_members` row, then a
       migration makes `transactions.household_id` NOT NULL (the axis is only
       moved once new money carries it, not just backfilled rows). Check: a

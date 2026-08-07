@@ -13,6 +13,29 @@ import psycopg
 import pytest
 
 
+def household_of(conn, user_id: int) -> int:
+    """The user's household id, creating a household-of-one on first call (test-only).
+
+    Production households are created by onboarding (§16); a test that seeds a user
+    straight into the DB skips that path, so this stands in. `transactions.household_id`
+    is NOT NULL (migration 008), so any test inserting a transaction for a seeded
+    user needs one of these. Idempotent — the UNIQUE on `household_members.user_id`
+    makes a repeat call a plain lookup, so insert helpers may call it per row.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT household_id FROM household_members WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (user_id,))
+        (hid,) = cur.fetchone()
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (hid, user_id),
+        )
+        return hid
+
+
 def pg_bin(name: str) -> str | None:
     """Debian keeps the server binaries off PATH, under /usr/lib/postgresql."""
     found = glob(f"/usr/lib/postgresql/*/bin/{name}") + glob("/usr/local/pgsql/bin/" + name)

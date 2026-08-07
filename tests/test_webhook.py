@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from conftest import household_of
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
@@ -529,6 +530,7 @@ def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypa
 
 def _seed_pending(conn, chat_id, card_message_id, amount="100.00"):
     user_id = get_or_create_user(conn, chat_id)
+    household_of(conn, user_id)  # confirm_pending homes the row in the user's household (§16)
     txn = Transaction.model_validate(
         {
             "type": "expense",

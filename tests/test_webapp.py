@@ -13,6 +13,7 @@ from decimal import Decimal
 from urllib.parse import urlencode
 
 import pytest
+from conftest import household_of
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
@@ -339,14 +340,17 @@ def test_current_week_ist_buckets_in_kolkata():
     assert start != utc_date - timedelta(days=utc_date.weekday())
 
 
-def _insert_txn(conn, user_id, amount, type_, category, occurred_on):
+def _insert_txn(conn, user_id, amount, type_, category, occurred_on, note=""):
+    """Insert a transaction homed in the user's household (§16), returning its id."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s)",
-            (user_id, Decimal(amount), type_, category, "", occurred_on),
+            " (user_id, household_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (user_id, household_of(conn, user_id), Decimal(amount), type_, category, note, occurred_on),
         )
+        (txn_id,) = cur.fetchone()
+    return txn_id
 
 
 class _Reuse:
@@ -540,13 +544,7 @@ def test_delete_route_soft_deletes_the_users_row(conn, monkeypatch):
 
     uid = get_or_create_user(conn, 42)
     _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("300.00"), "expense", "Transport", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "300.00", "expense", "Transport", date(2026, 8, 6))
 
     resp = client.post(
         "/app/delete",
@@ -570,13 +568,7 @@ def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/delete",
@@ -604,19 +596,8 @@ def test_delete_route_logs_the_money_mutation(conn, monkeypatch):
 
     uid = get_or_create_user(conn, 42)
     other = get_or_create_user(conn, 99)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("300.00"), "expense", "Transport", "", date(2026, 8, 6)),
-        )
-        (mine,) = cur.fetchone()
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (theirs,) = cur.fetchone()
+    mine = _insert_txn(conn, uid, "300.00", "expense", "Transport", date(2026, 8, 6))
+    theirs = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
     events = []
     eventlog.bind_sink(events.append)
@@ -669,13 +650,7 @@ def test_category_route_changes_the_users_row(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     uid = get_or_create_user(conn, 42)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/category",
@@ -701,19 +676,8 @@ def test_category_route_logs_the_money_mutation(conn, monkeypatch):
 
     uid = get_or_create_user(conn, 42)
     other = get_or_create_user(conn, 99)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (mine,) = cur.fetchone()
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (other, Decimal("70.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (theirs,) = cur.fetchone()
+    mine = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
+    theirs = _insert_txn(conn, other, "70.00", "expense", "Food", date(2026, 8, 6))
 
     events = []
     eventlog.bind_sink(events.append)
@@ -746,13 +710,7 @@ def test_category_route_rejects_an_unknown_category(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     uid = get_or_create_user(conn, 42)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/category",
@@ -776,13 +734,7 @@ def test_category_route_cannot_change_another_users_row(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/category",
@@ -806,13 +758,7 @@ def test_category_route_rejects_a_stale_init_data(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     uid = get_or_create_user(conn, 42)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
 
     stale = _sign({"auth_date": "1700000000", "user": '{"id":42}'})  # 2023
     resp = client.post(

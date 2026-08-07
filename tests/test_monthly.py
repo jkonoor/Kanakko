@@ -11,6 +11,8 @@ fixture); the month-boundary and message helpers are pure.
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+from conftest import household_of
+
 from kanakko.db import get_or_create_user, month_summary
 from kanakko.jobs import monthly
 from kanakko.jobs.evening import IST
@@ -23,9 +25,9 @@ def _insert(conn, user_id, amount, type_, occurred_on, category=None, deleted=Fa
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on, deleted_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (user_id, amount, type_, category, None, occurred_on, deleted_at),
+            " (user_id, household_id, amount, type, category, note, occurred_on, deleted_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (user_id, household_of(conn, user_id), amount, type_, category, None, occurred_on, deleted_at),
         )
 
 

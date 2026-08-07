@@ -146,6 +146,11 @@ def confirm_pending(
     write another user's pending transaction. `save_pending` stores `user_id`;
     this reverses it with the same scoping.
 
+    The row is homed in the entering user's household (§16): `household_id` is the
+    `household_members` row for `user_id`, the tenancy axis §16 moves off the user.
+    A user with no membership yields NULL and the NOT NULL constraint (migration
+    008) refuses the insert rather than orphaning money from every household total.
+
     The read → insert → delete → audit run in one transaction so a crash can never
     store a transaction while leaving its pending row live (a later double
     confirm), nor clear the pending row with nothing stored, nor write the ledger
@@ -171,9 +176,10 @@ def confirm_pending(
         txn = Transaction.model_validate(parsed)
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (user_id, txn.amount, txn.type, txn.category, txn.note, txn.date),
+            " (user_id, household_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, (SELECT household_id FROM household_members WHERE user_id = %s),"
+            " %s, %s, %s, %s, %s) RETURNING txn_id",
+            (user_id, user_id, txn.amount, txn.type, txn.category, txn.note, txn.date),
         )
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))

@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from conftest import household_of
+
 from kanakko.db import get_or_create_user, logged_since
 from kanakko.jobs import noon
 from kanakko.jobs.noon import previous_evening_ist, run
@@ -25,9 +27,9 @@ def _insert(conn, user_id, created_at, deleted=False):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on, created_at, deleted_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (user_id, Decimal("10.00"), "expense", None, None, date(2026, 8, 6), created_at, deleted_at),
+            " (user_id, household_id, amount, type, category, note, occurred_on, created_at, deleted_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (user_id, household_of(conn, user_id), Decimal("10.00"), "expense", None, None, date(2026, 8, 6), created_at, deleted_at),
         )
 
 

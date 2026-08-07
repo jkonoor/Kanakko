@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+from conftest import household_of
 
 from kanakko.db import day_summary, get_or_create_user
 from kanakko.jobs import DeliveryFailures, evening
@@ -23,9 +24,9 @@ def _insert(conn, user_id, amount, type_, occurred_on, deleted=False):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on, deleted_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (user_id, amount, type_, None, None, occurred_on, deleted_at),
+            " (user_id, household_id, amount, type, category, note, occurred_on, deleted_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (user_id, household_of(conn, user_id), amount, type_, None, None, occurred_on, deleted_at),
         )
 
 

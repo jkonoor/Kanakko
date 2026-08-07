@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import psycopg
 import pytest
+from conftest import household_of
 
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.migrate import MIGRATIONS, migrate
@@ -59,10 +60,11 @@ def test_schema_stores_money_exactly(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO users (telegram_user_id) VALUES (1) RETURNING user_id")
         (user_id,) = cur.fetchone()
+        hid = household_of(conn, user_id)  # household_id is NOT NULL (migration 008)
         cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, occurred_on)"
-            " VALUES (%s, %s, 'expense', '2026-08-05') RETURNING txn_id",
-            (user_id, Decimal("1234.56")),
+            "INSERT INTO transactions (user_id, household_id, amount, type, occurred_on)"
+            " VALUES (%s, %s, %s, 'expense', '2026-08-05') RETURNING txn_id",
+            (user_id, hid, Decimal("1234.56")),
         )
         (txn_id,) = cur.fetchone()
 
@@ -185,6 +187,12 @@ def test_transactions_household_backfill_preserves_totals(conn):
     home_txns = "UPDATE transactions t" + txn007.split("UPDATE transactions t", 1)[1].split(";", 1)[0]
 
     with conn.cursor() as cur:
+        # Simulate the pre-007 world: transactions that predate the household axis
+        # carry no household_id. Migration 008 (applied by migrate() above) forbids
+        # that, so drop the NOT NULL for the length of this transaction — 007's
+        # backfill (home_txns below) fills it, and the rollback at the end restores
+        # the committed schema, keeping the module-scoped connection clean.
+        cur.execute("ALTER TABLE transactions ALTER COLUMN household_id DROP NOT NULL")
         # Amounts chosen so a float sum would drift (10.10+20.20, 0.05+1.00).
         seeded = {}  # user_id -> Decimal active total
         for tg, amounts in [(9210, ["10.10", "20.20"]), (9220, ["0.05", "1.00"]), (9230, ["999.99"])]:
@@ -244,6 +252,28 @@ def test_transactions_household_backfill_preserves_totals(conn):
     conn.rollback()
 
 
+def test_transactions_household_id_is_not_null(conn):
+    """Money must belong to a household — a NULL household_id insert is refused (§16).
+
+    007 added the column nullable so the backfill could run; 008 makes it NOT NULL
+    once the write path stamps every new row (confirm_pending). Without 008 an
+    insert omitting the household silently orphans money from every household total
+    rather than erroring — the exact silent-money bug §16 forbids. This exercises
+    the applied schema: dropping `SET NOT NULL` from migration 008 reddens it.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (123) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        with pytest.raises(psycopg.errors.NotNullViolation):
+            cur.execute(
+                "INSERT INTO transactions (user_id, amount, type, occurred_on)"
+                " VALUES (%s, %s, 'expense', '2026-08-05')",
+                (uid, Decimal("1.00")),
+            )
+    conn.rollback()
+
+
 def test_parse_store_sum_by_category_stays_exact(conn):
     """The whole money path — parse → store → SUM(amount) GROUP BY category.
 
@@ -268,17 +298,18 @@ def test_parse_store_sum_by_category_stays_exact(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO users (telegram_user_id) VALUES (2) RETURNING user_id")
         (user_id,) = cur.fetchone()
+        hid = household_of(conn, user_id)  # household_id is NOT NULL (migration 008)
         for category, raw in entries:
             cur.execute(
-                "INSERT INTO transactions (user_id, amount, type, category, occurred_on)"
-                " VALUES (%s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
-                (user_id, parse_amount(raw), category),
+                "INSERT INTO transactions (user_id, household_id, amount, type, category, occurred_on)"
+                " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
+                (user_id, hid, parse_amount(raw), category),
             )
         # A soft-deleted Food row must not reach the Food total.
         cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, occurred_on)"
-            " VALUES (%s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
-            (user_id, parse_amount("999.99"), food),
+            "INSERT INTO transactions (user_id, household_id, amount, type, category, occurred_on)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
+            (user_id, hid, parse_amount("999.99"), food),
         )
         (deleted_txn,) = cur.fetchone()
         cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (deleted_txn,))

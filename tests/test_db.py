@@ -8,6 +8,10 @@ one step. The `conn` fixture is module-scoped and shared, so each test ends with
 from datetime import date
 from decimal import Decimal
 
+import psycopg
+import pytest
+from conftest import household_of
+
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.db import (
     confirm_pending,
@@ -23,12 +27,14 @@ from kanakko.parse import Transaction
 
 
 def _seed_user(conn, telegram_user_id: int) -> int:
+    """A user in a household of one — confirm_pending homes the row there (§16)."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id",
             (telegram_user_id,),
         )
         (user_id,) = cur.fetchone()
+    household_of(conn, user_id)
     return user_id
 
 
@@ -99,6 +105,49 @@ def test_confirm_writes_the_transaction_and_clears_pending(conn):
         )
         cur.execute("SELECT count(*) FROM pending_transactions WHERE telegram_message_id = 555")
         assert cur.fetchone() == (0,)
+    conn.rollback()
+
+
+def test_confirm_homes_the_transaction_in_the_confirmers_household(conn):
+    """A confirmed row lands in the entering user's household, never another's (§16).
+
+    The write path moves the tenancy axis: `confirm_pending` stamps `household_id`
+    from the confirmer's `household_members` row. Two users in separate households
+    must not cross-home each other's money. Homing it to the wrong household would
+    redden the id assertion; dropping the subquery would redden the NOT NULL insert.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 73)
+    b = _seed_user(conn, 74)
+    ha = household_of(conn, a)
+    hb = household_of(conn, b)
+    assert ha != hb  # distinct households of one
+
+    save_pending(conn, a, 730, _txn("100.00"))
+    row = confirm_pending(conn, a, 730, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT household_id FROM transactions WHERE txn_id = %s", (row["txn_id"],))
+        assert cur.fetchone() == (ha,)  # A's household, not B's
+    conn.rollback()
+
+
+def test_confirm_without_a_household_is_refused(conn):
+    """A user with no household cannot confirm — money must have a home (§16).
+
+    The household subquery yields NULL and migration 008's NOT NULL rejects the
+    insert, rather than silently writing money that belongs to no household total.
+    Reverting 008's `SET NOT NULL` reddens this — the confirm would succeed with a
+    NULL household. A raw user seed is used (not `_seed_user`, which mints one).
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (75) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    save_pending(conn, uid, 750, _txn("50.00"))
+
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        confirm_pending(conn, uid, 750, source="webhook", update_id=None)
     conn.rollback()
 
 

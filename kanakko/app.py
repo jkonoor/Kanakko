@@ -31,15 +31,15 @@ from kanakko.handlers import (
     handle_undo,
 )
 from kanakko.webapp import (
+    SHELL_HTML,
     InitDataError,
     Period,
     current_month_ist,
     current_week_ist,
     dashboard_html,
     previous_month_first,
-    validate_init_data,
     user_id_from_init_data,
-    SHELL_HTML,
+    validate_init_data,
 )
 
 configure_logging()

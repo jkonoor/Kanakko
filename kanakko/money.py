@@ -8,7 +8,7 @@ enters the system goes through `parse_amount`; every amount shown to a user
 goes through `format_amount`.
 """
 
-from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 # NUMERIC(12,2): ten digits before the point, two after → up to 9,999,999,999.99.
 MAX_AMOUNT = Decimal("9999999999.99")

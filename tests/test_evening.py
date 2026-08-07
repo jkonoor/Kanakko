@@ -121,7 +121,7 @@ def test_one_blocked_recipient_does_not_silence_the_others(conn, monkeypatch):
     migrate(conn)
     conn.commit()  # baseline the test's own rows survive the fan-out's commit
     a = get_or_create_user(conn, 700900)
-    bad = get_or_create_user(conn, 700901)
+    get_or_create_user(conn, 700901)  # the recipient whose send fails
     c = get_or_create_user(conn, 700902)
     delivered = []
 

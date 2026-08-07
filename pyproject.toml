@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pyyaml>=6.0.3",
+    "ruff>=0.16.1",
 ]
 
 [build-system]
@@ -24,3 +25,28 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kanakko"]
+
+[tool.ruff]
+# Ruff exists here to catch one class of mistake the test suite finds slowly or
+# not at all: a name that no longer resolves. During the 2026-08-07 refactor an
+# import was trimmed from `app.py` while the webhook route still used it — a
+# NameError in production code that surfaced only because a test happened to
+# exercise that route. Ruff finds it in milliseconds without running anything.
+line-length = 100
+
+[tool.ruff.lint]
+# Ruff's own default (pyflakes + the pycodestyle errors that are real errors),
+# plus import sorting so diffs stay tidy. Deliberately NOT the style and
+# modernisation families — they produced 70 of 89 findings here and caught zero
+# bugs, and churn in a money path is a cost, not a tidy-up.
+#
+# FURB157 is excluded on purpose rather than by omission: it rewrites
+# `Decimal("0")` to `Decimal(0)`. This repo's discipline is that money is always
+# constructed from a string (§9, CLAUDE.md), and a linter nudging the other way
+# erodes the habit that keeps floats out of the ledger. A tool that fights a
+# safety rule is worse than no tool.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# The webapp package re-exports its public names; that is the point of the facade.
+"kanakko/webapp/__init__.py" = ["F401"]

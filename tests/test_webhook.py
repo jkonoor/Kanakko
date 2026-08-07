@@ -13,13 +13,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
-from kanakko import db
-from kanakko import handlers
+from kanakko import db, handlers
 from kanakko.app import WEBHOOK_SECRET_HEADER, app
-from kanakko.handlers import ButtonPress, TextMessage, dispatch
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import get_or_create_user, save_pending
+from kanakko.handlers import ButtonPress, TextMessage, dispatch
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 

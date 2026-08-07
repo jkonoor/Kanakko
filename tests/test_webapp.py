@@ -18,11 +18,10 @@ from fastapi.testclient import TestClient
 from kanakko import app as app_module
 from kanakko.app import app
 from kanakko.migrate import migrate
-from kanakko.jobs.evening import IST
 from kanakko.webapp import (
     SHELL_HTML,
-    Period,
     InitDataError,
+    Period,
     category_bars,
     current_month_ist,
     current_week_ist,

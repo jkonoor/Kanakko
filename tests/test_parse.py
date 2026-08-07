@@ -8,7 +8,6 @@ default swallowed by compose's empty-string env var.
 """
 
 import json
-import os
 import pathlib
 import re
 from datetime import date, datetime, timezone

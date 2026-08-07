@@ -16,6 +16,8 @@ is [`docs/PLAN.md`](docs/PLAN.md); the queue is [`TASKS.md`](TASKS.md).
 uv sync                                    # install dependencies
 uv run uvicorn kanakko.app:app --reload    # run locally
 uv run pytest                              # run the checks
+uv run ruff check . --fix                  # lint (and fix what is safely fixable)
+git config core.hooksPath .githooks        # once per clone: enable the pre-commit hook
 docker compose up --build                  # full stack (web + db + cron)
 uv run python -m kanakko.migrate           # apply pending migrations (needs DATABASE_URL)
 ```

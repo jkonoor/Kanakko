@@ -16,8 +16,8 @@ import json
 import os
 import re
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 API = "https://<dokploy-host>/api"
@@ -129,5 +129,5 @@ else:
         print(f"redeployed {name}")
 
     print("\nDone. Verify with:\n"
-          f"  curl -s https://api.telegram.org/bot$(grep '^TELEGRAM_BOT_TOKEN=' .env "
+          "  curl -s https://api.telegram.org/bot$(grep '^TELEGRAM_BOT_TOKEN=' .env "
           "| cut -d= -f2-)/getWebhookInfo | python3 -m json.tool")

@@ -101,7 +101,7 @@ def test_run_nudges_only_idle_users(conn, monkeypatch):
 
     active = get_or_create_user(conn, 900900)
     idle_stale = get_or_create_user(conn, 900901)  # logged, but before the boundary
-    idle_never = get_or_create_user(conn, 900902)  # never logged anything
+    get_or_create_user(conn, 900902)  # idle: never logged anything
 
     _insert(conn, active, boundary + timedelta(minutes=1))
     _insert(conn, idle_stale, boundary - timedelta(hours=1))

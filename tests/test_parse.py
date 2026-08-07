@@ -42,10 +42,31 @@ def test_category_enum_comes_from_categories_module():
     # The model must not be able to invent a category (§11); null is added by the
     # schema for §3 nullability, not by categories.py.
     cat = parse_schema()["properties"]["category"]
-    assert cat["enum"] == [*schema_enum(), None]
-    assert cat["type"] == ["string", "null"]  # §3: category is nullable
+    assert {"type": "string", "enum": schema_enum()} in cat["anyOf"]
+    assert {"type": "null"} in cat["anyOf"]  # §3: category is nullable
     # amount is NOT nullable — no amount means no transaction (§3).
     assert parse_schema()["properties"]["amount"]["type"] == "string"
+
+
+def test_no_property_declares_a_type_array():
+    """A JSON-Schema type *array* is rejected by Anthropic's structured-output
+    validator, and it fails as a 400 from the provider — never locally (§2).
+
+    This is the bug the previous version of the test above locked in. It asserted
+    `cat["type"] == ["string", "null"]` and `cat["enum"] == [*schema_enum(), None]`
+    — the exact shape the API rejects — so it stayed green through every run while
+    *every* real parse returned 400 and the webhook 500'd. The ledger was empty for
+    that reason, not because nothing had been logged.
+
+    Neither form is reachable from a unit test, so this guards the construct rather
+    than the response: no property may declare `type` as a list, and no enum may
+    carry a `None` member. Both were verified against the live API on 2026-08-07 —
+    `anyOf` returns 200, both rejected forms return 400.
+    """
+    for name, prop in parse_schema()["properties"].items():
+        for branch in prop.get("anyOf", [prop]):
+            assert not isinstance(branch.get("type"), list), f"{name} declares a type array"
+            assert None not in branch.get("enum", []), f"{name} has None inside an enum"
 
 
 def test_amount_is_a_string_not_a_number():

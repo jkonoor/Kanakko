@@ -60,8 +60,19 @@ def parse_schema() -> dict:
             # §3: category is nullable — the model returns null when it genuinely
             # cannot tell, and dispatch shows the buttons. amount is NOT nullable
             # (no amount → no transaction). Strict mode keeps every key in
-            # `required`; optionality is expressed by the null in the type/enum.
-            "category": {"type": ["string", "null"], "enum": [*schema_enum(), None]},
+            # `required`; optionality is expressed by the `anyOf` below.
+            #
+            # `anyOf`, not `{"type": ["string", "null"], "enum": [...]}`: Anthropic's
+            # structured-output validator rejects a type *array* alongside an enum
+            # with `Invalid schema: Enum value 'Food' does not match declared type
+            # '['string', 'null']'` — a 400 from every provider OpenRouter tried
+            # (Azure, Bedrock), so it is the schema, not one provider. Putting the
+            # null in the enum instead (`{"type": "string", "enum": [..., None]}`)
+            # fails the mirror-image way: `Enum value None does not match`. Verified
+            # against the live API, 2026-08-07.
+            "category": {
+                "anyOf": [{"type": "string", "enum": schema_enum()}, {"type": "null"}]
+            },
             "date": {"type": "string", "description": "YYYY-MM-DD"},
             "note": {"type": "string", "description": "The original wording."},
         },

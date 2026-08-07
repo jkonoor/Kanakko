@@ -78,14 +78,15 @@ def test_confirm_writes_the_transaction_and_clears_pending(conn):
     pending_id = save_pending(conn, user_id, 555, _txn())
     assert isinstance(pending_id, int)
 
-    txn_id = confirm_pending(conn, user_id, 555)
-    assert isinstance(txn_id, int)
+    row = confirm_pending(conn, user_id, 555)
+    assert isinstance(row["txn_id"], int)
+    assert row["amount"] == Decimal("1234.56")  # the row carries the amount (§17)
 
     with conn.cursor() as cur:
         cur.execute(
             "SELECT amount, type, category, note, occurred_on"
             " FROM active_transactions WHERE txn_id = %s",
-            (txn_id,),
+            (row["txn_id"],),
         )
         assert cur.fetchone() == (
             Decimal("1234.56"),
@@ -112,7 +113,7 @@ def test_confirm_is_idempotent_on_redelivery(conn):
 
     first = confirm_pending(conn, user_id, 777)
     second = confirm_pending(conn, user_id, 777)
-    assert isinstance(first, int)
+    assert isinstance(first["txn_id"], int)
     assert second is None
 
     with conn.cursor() as cur:
@@ -191,7 +192,7 @@ def test_set_pending_category_is_scoped_to_the_user(conn):
 
 def _confirm(conn, user_id: int, message_id: int, amount: str) -> int:
     save_pending(conn, user_id, message_id, _txn(amount))
-    return confirm_pending(conn, user_id, message_id)
+    return confirm_pending(conn, user_id, message_id)["txn_id"]
 
 
 def test_undo_soft_deletes_the_most_recent_and_returns_it(conn):
@@ -294,12 +295,13 @@ def test_confirm_is_scoped_to_the_user(conn):
     save_pending(conn, a, 555, _txn("100.00"))
     save_pending(conn, b, 555, _txn("999.99"))
 
-    txn_id = confirm_pending(conn, a, 555)
-    assert isinstance(txn_id, int)
+    row = confirm_pending(conn, a, 555)
+    assert isinstance(row["txn_id"], int)
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT amount, user_id FROM active_transactions WHERE txn_id = %s", (txn_id,)
+            "SELECT amount, user_id FROM active_transactions WHERE txn_id = %s",
+            (row["txn_id"],),
         )
         assert cur.fetchone() == (Decimal("100.00"), a)  # A's own amount, under A
         cur.execute("SELECT user_id FROM pending_transactions WHERE telegram_message_id = 555")

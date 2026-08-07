@@ -277,7 +277,7 @@ row, because there is no `txn_id` to hang one on.
       base64 blob — and assert each is absent from the output *and* that the
       surrounding fields survived. A scrubber that redacts everything passes a
       naive test.
-- [ ] Log the bot-side money mutations: `transaction.confirmed`
+- [x] Log the bot-side money mutations: `transaction.confirmed`
       (`handlers.py:192`) and `transaction.undone` (`handlers.py:171`), plus the
       pending-only paths that share the file — `pending.cancelled`
       (`handlers.py:210`), `pending.recategorised` (`handlers.py:235`) and

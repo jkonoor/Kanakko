@@ -75,7 +75,7 @@ def save_pending(
 
 def confirm_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int
-) -> int | None:
+) -> dict | None:
     """Write user's pending row for `telegram_message_id` to `transactions`, clear it.
 
     Scoped by `user_id` because Telegram message ids repeat per chat, not
@@ -85,9 +85,11 @@ def confirm_pending(
 
     The read → insert → delete run in one transaction so a crash can never store
     a transaction while leaving its pending row live (a later double confirm), nor
-    clear the pending row with nothing stored. Returns the new `txn_id`, or `None`
-    when there is no pending row — Telegram redelivers taps it already got a 200
-    for, so confirming twice must not write the transaction twice.
+    clear the pending row with nothing stored. Returns the stored row — `txn_id`
+    plus its fields, so the caller can log the amount (§17) — or `None` when there
+    is no pending row (Telegram redelivers taps it already got a 200 for, so
+    confirming twice must not write the transaction twice). Does not commit — the
+    caller owns the transaction.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -109,7 +111,14 @@ def confirm_pending(
         )
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))
-    return txn_id
+    return {
+        "txn_id": txn_id,
+        "amount": txn.amount,
+        "type": txn.type,
+        "category": txn.category,
+        "note": txn.note,
+        "occurred_on": txn.date,
+    }
 
 
 def set_pending_category(
@@ -154,7 +163,8 @@ def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
     rows — so a *second* `/undo` walks back to the previous entry instead of
     re-deleting the one just removed (reading `transactions` directly would keep
     latching onto the already-deleted newest row). Scoped by `user_id` (§1).
-    Returns the removed row's fields for the confirmation reply, or `None` when
+    Returns the removed row's fields — including its `txn_id` (§17) — for the
+    confirmation reply and the event log, or `None` when
     there is no live transaction to undo. Does not commit — the caller owns the
     transaction.
     """
@@ -165,14 +175,15 @@ def undo_last(conn: psycopg.Connection, user_id: int) -> dict | None:
             "   SELECT txn_id FROM active_transactions"
             "   WHERE user_id = %s ORDER BY created_at DESC, txn_id DESC LIMIT 1"
             " )"
-            " RETURNING amount, type, category, note, occurred_on",
+            " RETURNING txn_id, amount, type, category, note, occurred_on",
             (user_id,),
         )
         row = cur.fetchone()
     if row is None:
         return None
-    amount, type_, category, note, occurred_on = row
+    txn_id, amount, type_, category, note, occurred_on = row
     return {
+        "txn_id": txn_id,
         "amount": amount,
         "type": type_,
         "category": category,

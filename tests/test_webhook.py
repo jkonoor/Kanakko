@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
-from kanakko import db, handlers
+from kanakko import db, eventlog, handlers
 from kanakko.app import WEBHOOK_SECRET_HEADER, app
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM
@@ -486,6 +486,71 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     conn.rollback()
 
 
+def test_handle_confirm_logs_ok_then_noop_on_a_redelivery(conn, monkeypatch):
+    """The §17 event line follows the outcome: a real confirm is `ok` and carries
+    the amount; the redelivered tap (pending row already gone) is `noop`, not a
+    second `ok` that would inflate the count of confirms that actually happened.
+    """
+    migrate(conn)
+    _seed_pending(conn, chat_id=12345, card_message_id=909)
+    monkeypatch.setattr(handlers, "answer_callback_query", lambda *a, **k: None)
+    press = ButtonPress(
+        chat_id=12345, message_id=909, callback_query_id="c", data=CONFIRM, update_id=7
+    )
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        app_module.handle_confirm(conn, press)
+        app_module.handle_confirm(conn, press)  # redelivery
+    finally:
+        eventlog.unbind_sink()
+
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("transaction.confirmed", "ok"),
+        ("transaction.confirmed", "noop"),
+    ]
+    assert events[0]["amount"] == Decimal("100.00")  # ledger path carries the amount
+    assert events[0]["update_id"] == 7 and events[0]["source"] == "webhook"
+    assert "amount" not in events[1]  # a noop touched no row
+    conn.rollback()
+
+
+def test_webhook_logs_exactly_one_error_line_when_a_handler_raises(monkeypatch):
+    """The error side of §17 is logged once, in the webhook, not per handler (gap 5).
+
+    A raising handler must produce exactly one `update.handled` with
+    `status="error"` and then re-raise so the webhook still 500s and Telegram
+    redelivers (§14). Folding the error log into every handler would multiply the
+    line; keeping it in the one `try/except` around the dispatch is what makes
+    "exactly one" true.
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+
+    def boom(conn, msg):
+        raise RuntimeError("handler down")
+
+    monkeypatch.setattr(app_module, "handle_text", boom)
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        with pytest.raises(RuntimeError):
+            client.post(
+                "/webhook",
+                json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+                headers=AUTH,
+            )
+    finally:
+        eventlog.unbind_sink()
+
+    errors = [e for e in events if e["status"] == "error"]
+    assert len(errors) == 1  # not seven — logged in the webhook, not the handler
+    assert errors[0]["event"] == "update.handled"
+    assert errors[0]["source"] == "webhook"
+
+
 def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     """CONFIRM routes to handle_confirm, CANCEL to handle_cancel — never crossed.
 
@@ -566,8 +631,8 @@ def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909, amount="250.00")
-    txn_id = db.confirm_pending(conn, user_id, 909)
-    assert isinstance(txn_id, int)
+    row = db.confirm_pending(conn, user_id, 909)
+    assert isinstance(row["txn_id"], int)
     sent = {}
     monkeypatch.setattr(
         handlers, "send_message", lambda chat_id, text, reply_markup=None: sent.update(chat_id=chat_id, text=text)

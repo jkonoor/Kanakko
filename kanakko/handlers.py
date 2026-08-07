@@ -10,6 +10,7 @@ anything on a path that failed.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -26,6 +27,7 @@ from kanakko.db import (
     set_pending_category,
     undo_last,
 )
+from kanakko.eventlog import log_event, ms_since
 from kanakko.money import format_amount
 from kanakko.parse import Transaction, parse_message
 from kanakko.tg import (
@@ -150,6 +152,7 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     `telegram_user_id`. Does not commit — the caller owns the transaction.
     Returns the new `pending_id`, or `None` when the message couldn't be parsed.
     """
+    start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.chat_id)
     try:
         txn = parse_message(msg.text)
@@ -172,7 +175,10 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     text, keyboard = render(txn)
     sent = send_message(msg.chat_id, text, reply_markup=keyboard)
     card_message_id = sent["result"]["message_id"]
-    return save_pending(conn, user_id, card_message_id, txn)
+    pending_id = save_pending(conn, user_id, card_message_id, txn)
+    log_event("pending.created", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return pending_id
 
 
 UNDO_COMMAND = "/undo"
@@ -193,15 +199,21 @@ def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     or a `/undo` past the last row — gets a plain "Nothing to undo." Does not
     commit — the caller owns the transaction. Returns the removed row, or `None`.
     """
+    start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.chat_id)
     removed = undo_last(conn, user_id)
     if removed is None:
         send_message(msg.chat_id, "Nothing to undo.")
+        log_event("transaction.undone", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
     line = f"Removed: {removed['type'].capitalize()} — {format_amount(removed['amount'])}"
     if removed["category"]:
         line += f" ({removed['category']})"
     send_message(msg.chat_id, line)
+    log_event("transaction.undone", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+              txn_id=removed["txn_id"], amount=removed["amount"])
     return removed
 
 
@@ -215,12 +227,20 @@ def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     clears the spinner. Does not commit — the caller owns the transaction.
     Returns the new `txn_id`, or `None` when there was nothing to confirm.
     """
+    start = time.perf_counter()
     user_id = get_or_create_user(conn, press.chat_id)
-    txn_id = confirm_pending(conn, user_id, press.message_id)
+    row = confirm_pending(conn, user_id, press.message_id)
     answer_callback_query(
-        press.callback_query_id, "Saved ✅" if txn_id else "Already saved"
+        press.callback_query_id, "Saved ✅" if row else "Already saved"
     )
-    return txn_id
+    if row is None:
+        log_event("transaction.confirmed", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    log_event("transaction.confirmed", status="ok", update_id=press.update_id,
+              source=press.source, user_id=user_id, duration_ms=ms_since(start),
+              txn_id=row["txn_id"], amount=row["amount"])
+    return row["txn_id"]
 
 
 def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
@@ -234,6 +254,7 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     caller owns the transaction. Returns the discarded `pending_id`, or `None`
     when there was nothing to cancel.
     """
+    start = time.perf_counter()
     user_id = get_or_create_user(conn, press.chat_id)
     pending_id = cancel_pending(conn, user_id, press.message_id)
     # Take the cancelled card out of the chat rather than leaving a dead card
@@ -245,6 +266,9 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     answer_callback_query(
         press.callback_query_id, "Discarded ❌" if pending_id else "Already gone"
     )
+    log_event("pending.cancelled", status="ok" if pending_id else "noop",
+              update_id=press.update_id, source=press.source, user_id=user_id,
+              duration_ms=ms_since(start))
     return pending_id
 
 
@@ -263,16 +287,25 @@ def handle_category(conn: psycopg.Connection, press: ButtonPress) -> Transaction
     nothing. Does not commit — the caller owns the transaction. Returns the
     updated `Transaction`, or `None` when there was nothing to update.
     """
+    start = time.perf_counter()
     category = press.data.removeprefix(CATEGORY_PREFIX)
     if category not in ALL_CATEGORIES:
         answer_callback_query(press.callback_query_id, "Unknown category")
+        # A forged tap the keyboard never emits; user left unresolved on purpose,
+        # so no `user_id` on this line.
+        log_event("pending.recategorised", status="noop", update_id=press.update_id,
+                  source=press.source, duration_ms=ms_since(start))
         return None
     user_id = get_or_create_user(conn, press.chat_id)
     txn = set_pending_category(conn, user_id, press.message_id, category)
     if txn is None:
         answer_callback_query(press.callback_query_id, "That card's gone")
+        log_event("pending.recategorised", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
         return None
     text, keyboard = confirm_card(txn)
     edit_message_text(press.chat_id, press.message_id, text, reply_markup=keyboard)
     answer_callback_query(press.callback_query_id, f"Category: {category}")
+    log_event("pending.recategorised", status="ok", update_id=press.update_id,
+              source=press.source, user_id=user_id, duration_ms=ms_since(start))
     return txn

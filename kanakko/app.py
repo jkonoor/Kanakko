@@ -1,8 +1,8 @@
 """FastAPI app: webhook and Mini App routes."""
 
 import hmac
-import logging
 import os
+import time
 from datetime import date, timedelta
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -20,6 +20,7 @@ from kanakko.db import (
     set_transaction_category,
     soft_delete_transaction,
 )
+from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     TextMessage,
     _is_undo,
@@ -43,7 +44,6 @@ from kanakko.webapp import (
 )
 
 configure_logging()
-log = logging.getLogger(__name__)
 
 app = FastAPI(title="Kanakko", version=__version__)
 
@@ -234,6 +234,12 @@ async def webhook(request: Request) -> dict[str, bool]:
     at most once per update. That is what keeps `/undo` from soft-deleting a
     *second* real transaction on a redelivery — it has no per-message anchor the
     way Confirm/Cancel do — and hardens every other handler for free.
+
+    The dispatch is wrapped once so the error side of §17 is logged in one place,
+    not in seven handlers: a handler that raises produces exactly one
+    `update.handled` line with `status="error"` and then re-raises, keeping the
+    §14 500-and-redeliver contract. The per-handler events only ever report `ok`
+    or `noop`.
     """
     if not _origin_is_verified(request):
         raise HTTPException(status_code=403)
@@ -253,20 +259,27 @@ async def webhook(request: Request) -> dict[str, bool]:
     # the handler's writes share that transaction, so a redelivery that arrives
     # before the first commit blocks on the id and then finds it taken; a handler
     # that 500s rolls the claim back and the redelivery legitimately re-runs.
+    start = time.perf_counter()
+    update_id = update.get("update_id")
     with connect() as conn:
-        update_id = update.get("update_id")
         if isinstance(update_id, int) and not claim_update(conn, update_id):
             return {"ok": True}  # a prior delivery of this update was handled
-        if isinstance(action, TextMessage):
-            if _is_undo(action.text):
-                handle_undo(conn, action)
-            else:
-                handle_text(conn, action)
-        elif action.data == CONFIRM:
-            handle_confirm(conn, action)
-        elif action.data == CANCEL:
-            handle_cancel(conn, action)
-        elif action.data.startswith(CATEGORY_PREFIX):
-            handle_category(conn, action)
-    log.info("handled update %s: %s", update.get("update_id"), type(action).__name__)
+        try:
+            if isinstance(action, TextMessage):
+                if _is_undo(action.text):
+                    handle_undo(conn, action)
+                else:
+                    handle_text(conn, action)
+            elif action.data == CONFIRM:
+                handle_confirm(conn, action)
+            elif action.data == CANCEL:
+                handle_cancel(conn, action)
+            elif action.data.startswith(CATEGORY_PREFIX):
+                handle_category(conn, action)
+        except Exception:
+            log_event("update.handled", status="error", update_id=update_id,
+                      source="webhook", duration_ms=ms_since(start))
+            raise
+    log_event("update.handled", status="ok", update_id=update_id,
+              source="webhook", duration_ms=ms_since(start))
     return {"ok": True}

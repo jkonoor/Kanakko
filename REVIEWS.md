@@ -12,6 +12,69 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `46005b7` — gate every inbound update on authorization (Phase 9, task 3)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: the §16 authorization gate. `auth.is_authorized(conn, telegram_user_id)`
+(open mode admits everyone; invite mode admits only users who already have a
+row), a new pure-lookup `db.user_exists`, an `ACCESS_REFUSED` message in
+`handlers.py`, and a check in `app.webhook` that runs *before* `claim_update`
+and any handler. `tests/test_gate.py` new; four routing tests in
+`test_webhook.py` gain an `is_authorized=True` stub.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): 7 files, +189/-1. Touches no money path, no
+  timezone bucketing, no soft-delete, no category source. No secrets introduced.
+  No new dependency.
+- **Spec fit against §16** (`docs/DECISIONS.md:476-480`): "In `invite` mode an
+  unrecognised user gets a polite refusal and **nothing is stored**, not even a
+  user row." The gate reads with `user_exists` (a `SELECT 1`, creates nothing),
+  never `get_or_create_user`, and sits before `claim_update` — so a refused
+  update mints no user row, no `processed_updates` claim, no pending row. Matches
+  the spec exactly.
+- **Gate placement / identity**: gated on `action.from_id` — the sender's
+  identity, the same field every handler resolves the user from (§16,
+  `handlers.py:48`), not `chat_id`. Both `TextMessage` and `ButtonPress` carry
+  `from_id` with a `chat_id` fallback, so callback taps are gated too, not just
+  text.
+- **`uv run pytest`**: `222 passed`. `tests/test_gate.py tests/test_webhook.py`:
+  `34 passed`.
+- **Guard actually guards (revert test)**: replaced the gate condition with
+  `if not True:` and ran `tests/test_gate.py` → **all 3 failed**
+  (`test_unknown_user_..._stores_nothing`, `test_known_user_..._is_served`,
+  `test_open_mode_admits_an_unknown_user`), then restored via
+  `git checkout kanakko/app.py`. The core test asserts *both* directions the
+  gate exists for — `parse_calls == []` (no OpenRouter call, the cost) and
+  `users/claimed/pending == 0` (no rows, the storage) — and the two
+  counter-direction tests stop it degrading to "refuse everyone" (known user in
+  invite mode, and any user in open mode, both reach the handler).
+- **No circular import**: `auth.py` now imports `db.user_exists`; `db.py`
+  imports neither `auth` nor `app`. `uv run python -c "import kanakko.auth,
+  kanakko.app"` → `imports OK`.
+- **Monkeypatch surface**: `app.py` does `from kanakko.auth import
+  is_authorized` and calls the bare name, so the four routing tests'
+  `monkeypatch.setattr(app_module, "is_authorized", ...)` correctly intercept it
+  — confirmed by the suite passing.
+
+### Notes (non-blocking, not findings)
+
+- A refused user gets one outbound `send_message` per message they send (no LLM
+  call, no storage). That is the spec's "polite refusal" and is intended.
+- If Telegram's `sendMessage` persistently fails for a refused chat (e.g. the
+  user blocked the bot), the refusal path raises → 500 → redelivery → re-refusal
+  loop, since the update was never claimed. This is the *same* deliberate
+  500-and-redeliver contract every handler follows (`app.py:249-265`), carries
+  no cost or storage, and is not a regression introduced here.
+- The per-user daily message cap (§16 "Cost control") is a separate, still
+  unticked task — out of scope for this commit.
+
+No blocking issues. The gate does what task 3 asked, matches §16, and its check
+fails for the reason it exists.
+
+---
+
 ## 2026-08-07 — `7fbbd40` — add `invites` table and `SIGNUP_MODE` (Phase 9, task 2)
 
 **Status: ✅ DONE** — no blocking issues.

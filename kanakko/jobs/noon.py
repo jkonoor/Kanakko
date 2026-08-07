@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from kanakko import configure_logging
 from kanakko.db import all_users, connect, last_reminder_at, log_reminder, logged_since
+from kanakko.jobs import fan_out
 from kanakko.jobs.evening import IST
 from kanakko.tg import send_message
 
@@ -54,15 +55,16 @@ def run(conn) -> int:
     count toward the return — it's the number actually sent.
     """
     fallback = previous_evening_ist()
-    sent = 0
-    for user_id, telegram_user_id in all_users(conn):
+
+    def deliver(user_id: int, telegram_user_id: int) -> bool:
         since = last_reminder_at(conn, user_id, "evening") or fallback
         if logged_since(conn, user_id, since):
-            continue
+            return False  # suppressed, not failed — §12
         send_message(telegram_user_id, NUDGE_TEXT)
         log_reminder(conn, user_id, "noon")
-        sent += 1
-    return sent
+        return True
+
+    return fan_out(conn, all_users(conn), deliver)
 
 
 def main() -> None:

@@ -10,8 +10,10 @@ Each gets a guard that reddens if it regresses. `day_summary` reads real Postgre
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from kanakko.db import day_summary, get_or_create_user
-from kanakko.jobs import evening
+from kanakko.jobs import DeliveryFailures, evening
 from kanakko.jobs.evening import summary_text, today_ist
 from kanakko.migrate import migrate
 
@@ -100,3 +102,49 @@ def test_summary_text():
     assert summary_text(3, Decimal("150.50"), Decimal("20000")) == (
         "🌙 Today: 3 entries, spent ₹150.50, received ₹20,000.00."
     )
+
+
+def test_one_blocked_recipient_does_not_silence_the_others(conn, monkeypatch):
+    """A failed send for one user must not stop the fan-out, or lose the rest's rows.
+
+    Previously `run` looped without a try, so a single `send_message` raise —
+    a user who blocked the bot, one bad chat id — aborted the whole loop, and the
+    caller's `with connect()` then rolled back every `reminder_log` row already
+    written. Everyone after the bad user got no summary, and everyone before it
+    lost the row the noon nudge reads to place its suppression window.
+
+    Three users, the middle one failing. The other two must still be delivered to
+    and must still have their rows *after* the failure — which only holds because
+    `fan_out` commits before raising. The job still fails loudly (DeliveryFailures)
+    so a broken recipient is never silent.
+    """
+    migrate(conn)
+    conn.commit()  # baseline the test's own rows survive the fan-out's commit
+    a = get_or_create_user(conn, 700900)
+    bad = get_or_create_user(conn, 700901)
+    c = get_or_create_user(conn, 700902)
+    delivered = []
+
+    def flaky_send(telegram_user_id, text):
+        if telegram_user_id == 700901:
+            raise RuntimeError("Forbidden: bot was blocked by the user")
+        delivered.append(telegram_user_id)
+
+    monkeypatch.setattr(evening, "send_message", flaky_send)
+
+    with pytest.raises(DeliveryFailures) as caught:
+        evening.run(conn)
+
+    assert delivered == [700900, 700902]  # the blocked user did not stop the rest
+    assert caught.value.sent == 2
+    assert [tg for tg, _ in caught.value.failures] == [700901]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM reminder_log ORDER BY user_id")
+        rows = [r[0] for r in cur.fetchall()]
+    assert rows == [a, c]  # kept, not rolled back; the failed user wrote nothing
+
+    with conn.cursor() as cur:  # this test committed, so clean up after itself
+        cur.execute("DELETE FROM reminder_log")
+        cur.execute("DELETE FROM users WHERE telegram_user_id IN (700900,700901,700902)")
+    conn.commit()

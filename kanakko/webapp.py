@@ -21,6 +21,7 @@ import hmac
 import html
 import json
 import os
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import parse_qsl
@@ -138,11 +139,62 @@ def current_week_ist(now: datetime | None = None) -> tuple[date, date]:
     return monday, monday + timedelta(days=7)
 
 
-def _stat(label: str, amount: Decimal) -> str:
-    """One label/value pair. `amount` goes through `format_amount`, never float (§9)."""
+@dataclass(frozen=True)
+class Period:
+    """One selectable time range and its figures — a tab's worth of dashboard.
+
+    Replaces the three stacked Balance/Income/Expenses blocks, which rendered
+    nine near-identical rows for three concepts. `key` is the tab id, `short` is
+    the tab's own label ("Week" — a segmented control has room for one word),
+    `label` names the range inside the panel ("This week", "August 2026", "All
+    time"), and `top` is that range's expense categories biggest-first.
+    """
+
+    key: str
+    short: str
+    label: str
+    income: Decimal
+    expenses: Decimal
+    top: list[tuple[str, Decimal]]
+
+
+def _stat(label: str, amount: Decimal, positive: bool = False) -> str:
+    """One label/value pair. `amount` goes through `format_amount`, never float (§9).
+
+    `positive` tints the value with the single accent this design allows (income).
+    The accent is never the only signal — the label still says "Income" — per
+    WCAG 1.4.1, which requires colour not be the sole carrier of meaning.
+    """
+    cls = "value in" if positive else "value"
     return (
         f'<div class="stat"><span class="label">{label}</span>'
-        f'<span class="value">{format_amount(amount)}</span></div>'
+        f'<span class="{cls}">{format_amount(amount)}</span></div>'
+    )
+
+
+def _period_panel(period: Period, selected: bool) -> str:
+    """One period's panel: a hero spend figure, two supporting stats, its bars.
+
+    The hero is *expenses*, not balance — "what have I spent?" is the question
+    this screen gets opened for, and giving one figure dominant scale is what
+    gives the screen an entry point (NN/g: importance is shown by size). Balance
+    and income stay as small supporting stats rather than competing at equal
+    weight, which is what the previous layout did.
+
+    All panels are rendered server-side and switched client-side, so changing
+    period costs no request and no reload.
+    """
+    hidden = "" if selected else " hidden"
+    return (
+        f'<section class="panel" data-period="{period.key}"{hidden}>'
+        f'<p class="hero-label">Spent · {html.escape(period.label)}</p>'
+        f'<p class="hero">{format_amount(period.expenses)}</p>'
+        '<div class="substats">'
+        + _stat("Balance", period.income - period.expenses)
+        + _stat("Income", period.income, positive=True)
+        + "</div>"
+        + category_bars(period.top, period.expenses)
+        + "</section>"
     )
 
 
@@ -163,18 +215,18 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
     rows = []
     for name, amount in categories:
         pct = amount / total * 100  # Decimal / Decimal — never float
+        # The share is the point of a breakdown — "Food ₹200" doesn't say Food is
+        # two thirds of the spend, and the bar length alone is only comparable
+        # against its neighbours. The number makes it readable on its own.
         rows.append(
             '<div class="cat">'
             f'<div class="cat-head"><span>{html.escape(name)}</span>'
-            f'<span>{format_amount(amount)}</span></div>'
+            f'<span class="cat-amt">{format_amount(amount)}'
+            f'<span class="pct">{pct:.0f}%</span></span></div>'
             f'<div class="bar"><div class="fill" style="width:{pct:.1f}%"></div></div>'
             "</div>"
         )
-    return (
-        '<section class="breakdown"><h2>Spending by category</h2>'
-        + "".join(rows)
-        + "</section>"
-    )
+    return '<h2>Spending by category</h2>' + "".join(rows)
 
 
 def _category_select(txn_id: int, type_: str, current: str | None) -> str:
@@ -196,7 +248,7 @@ def _category_select(txn_id: int, type_: str, current: str | None) -> str:
         sel = " selected" if c == current else ""
         opts.append(f"<option{sel}>{html.escape(c)}</option>")
     return (
-        f'<select class="cat-select" data-id="{txn_id}">'
+        f'<select class="cat-select" data-id="{txn_id}" aria-label="Category">'
         + "".join(opts)
         + "</select>"
     )
@@ -220,6 +272,9 @@ def recent_list(rows: list[tuple]) -> str:
     items = []
     for txn_id, amount, type_, category, note, occurred_on in rows:
         sign = "−" if type_ == "expense" else "+"
+        # The one accent: income reads as positive at a glance. The sign carries
+        # the same meaning, so colour is never the sole signal (WCAG 1.4.1).
+        amt_cls = "amt" if type_ == "expense" else "amt in"
         note_html = (
             f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
         )
@@ -227,55 +282,51 @@ def recent_list(rows: list[tuple]) -> str:
             '<div class="txn">'
             f'<div class="txn-main"><span>{occurred_on:%d %b} · '
             + _category_select(txn_id, type_, category)
-            + f'</span><span>{sign}{format_amount(amount)}</span></div>'
+            + f'</span><span class="{amt_cls}">{sign}{format_amount(amount)}</span></div>'
             + note_html
-            + f'<button class="del" data-id="{txn_id}">✕</button>'
+            # aria-label because the glyph alone announces as "✕" to a screen
+            # reader — Telegram's design guidelines require that inputs and
+            # images carry labels, and this button deletes a real transaction.
+            + f'<button type="button" class="del" data-id="{txn_id}" '
+            f'aria-label="Delete {sign}{format_amount(amount)} on '
+            f'{occurred_on:%d %b}">✕</button>'
             "</div>"
         )
     return '<section class="recent"><h2>Recent</h2>' + "".join(items) + "</section>"
 
 
 def dashboard_html(
-    income: Decimal,
-    expenses: Decimal,
-    week_income: Decimal,
-    week_expenses: Decimal,
-    month_label: str,
-    month_income: Decimal,
-    month_expenses: Decimal,
-    top: list[tuple[str, Decimal]],
-    recent: list[tuple],
+    periods: list[Period], recent: list[tuple], selected: str = "month"
 ) -> str:
-    """The dashboard fragment: totals + balance, this week/month, bars, recent list (§13).
+    """The dashboard fragment: a period switcher, one panel per period, the list (§13).
 
     Balance is `income - expenses` — exact `Decimal` subtraction, can be negative.
-    Server-rendered so every section (week/month figures, category bars, recent
-    list) stays Python + CSS with no charting library (§13). The week and month
-    summaries carry each period's income, expenses, and balance; `top` is the
-    month's expense categories biggest-first, rendered as
-    percentage-of-month-expenses bars; `recent` is the recent-transactions list
-    with per-row delete. Formatted amounts, a strftime month label, and escaped
-    category names / notes are interpolated — the note is the only user-typed
-    string and `recent_list` escapes it, so nothing reaches the markup unescaped.
+    Server-rendered so every section stays Python + CSS with no charting library
+    (§13), and `recent` is the recent-transactions list with per-row delete.
+    Formatted amounts and escaped labels / category names / notes are the only
+    things interpolated — the note is the only user-typed string and `recent_list`
+    escapes it, so nothing reaches the markup unescaped.
+
+    Why a switcher rather than three stacked sections: the old layout rendered
+    Balance/Income/Expenses three times over, nine near-identical rows for three
+    concepts, and on a young ledger all three showed *the same numbers*. One
+    panel at a time with the others one tap away is progressive disclosure —
+    nothing is lost and the screen gets an entry point. There is no `<h1>` either;
+    Telegram already shows the app's name in its own header directly above.
+
+    Every panel ships in the fragment and switching is client-side, so the tabs
+    cost no request. `selected` names the panel shown first.
     """
+    tabs = "".join(
+        f'<button type="button" class="seg" role="tab" data-period="{p.key}" '
+        f'aria-selected="{"true" if p.key == selected else "false"}">'
+        f'{html.escape(p.short)}</button>'
+        for p in periods
+    )
+    panels = "".join(_period_panel(p, p.key == selected) for p in periods)
     return (
-        "<h1>Kanakko</h1>"
-        '<section class="totals"><h2>All time</h2>'
-        + _stat("Balance", income - expenses)
-        + _stat("Income", income)
-        + _stat("Expenses", expenses)
-        + "</section>"
-        '<section class="week"><h2>This week</h2>'
-        + _stat("Balance", week_income - week_expenses)
-        + _stat("Income", week_income)
-        + _stat("Expenses", week_expenses)
-        + "</section>"
-        f'<section class="month"><h2>{month_label}</h2>'
-        + _stat("Balance", month_income - month_expenses)
-        + _stat("Income", month_income)
-        + _stat("Expenses", month_expenses)
-        + "</section>"
-        + category_bars(top, month_expenses)
+        f'<div class="switch" role="tablist" aria-label="Time period">{tabs}</div>'
+        + panels
         + recent_list(recent)
     )
 
@@ -298,25 +349,84 @@ SHELL_HTML = """<!doctype html>
    and shows as a glaring white panel inside Telegram's dark chrome. Fallbacks
    are the light-theme values for a plain-browser open. */
 body {
-  font-family: system-ui, sans-serif; margin: 0; padding: 16px;
+  font-family: system-ui, sans-serif; margin: 0; padding: 16px 16px 32px;
   background: var(--tg-theme-bg-color, #fff);
   color: var(--tg-theme-text-color, #000);
+  /* Amounts are columns of digits — tabular figures keep them aligned on the
+     decimal instead of jittering by glyph width. */
+  font-variant-numeric: tabular-nums;
 }
-.label, .txn-note { color: var(--tg-theme-hint-color, #707579); }
-.stat, .cat-head { display: flex; justify-content: space-between; }
-.cat { margin: 8px 0; }
-.bar { background: rgba(128,128,128,.2); border-radius: 4px; height: 8px; overflow: hidden; }
-.fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; }
+/* The only colour this design adds. Everything else is Telegram's theme, per
+   its guideline to follow the dynamic theme-based colours. Income gets the one
+   accent because direction is the fastest thing an eye can pick up; expenses
+   stay in normal ink, which also avoids the red/green pairing that red-green
+   colour deficiency makes unreadable. Two steps because one green cannot clear
+   4.5:1 on both a white and a near-black surface — the scheme is stamped on
+   <html> from Telegram's own colorScheme, so this is exact, not a guess. */
+:root { --income: #1a7f37; }
+:root[data-scheme="dark"] { --income: #4ac26b; }
+.in { color: var(--income); }
+h2 {
+  font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--tg-theme-hint-color, #707579); margin: 28px 0 10px;
+}
+.label, .txn-note, .pct { color: var(--tg-theme-hint-color, #707579); }
+.stat, .cat-head { display: flex; justify-content: space-between; gap: 12px; }
+/* Hero: one figure with dominant scale gives the screen an entry point. Tight
+   leading because it is a single line, not a paragraph. */
+.hero-label { font-size: 13px; color: var(--tg-theme-hint-color, #707579); margin: 20px 0 2px; }
+.hero { font-size: 40px; font-weight: 600; line-height: 1.1; margin: 0; }
+.substats { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.stat { font-size: 15px; }
+/* Segmented control: 44px tall so the tap target clears WCAG 2.5.8's 24px
+   minimum with Apple's 44pt recommendation to spare. */
+.switch {
+  display: flex; gap: 2px; padding: 3px; border-radius: 11px;
+  background: rgba(128,128,128,.14);
+}
+.seg {
+  flex: 1; min-height: 44px; border: 0; border-radius: 9px; cursor: pointer;
+  background: none; font: inherit; font-size: 14px;
+  color: var(--tg-theme-hint-color, #707579);
+}
+.seg[aria-selected="true"] {
+  background: var(--tg-theme-bg-color, #fff);
+  color: var(--tg-theme-text-color, #000); font-weight: 600;
+}
+.cat { margin: 12px 0; }
+.cat-amt { display: flex; gap: 8px; flex-shrink: 0; }
+.pct { font-size: 13px; min-width: 34px; text-align: right; }
+.bar { background: rgba(128,128,128,.2); border-radius: 4px; height: 6px; overflow: hidden; margin-top: 6px; }
+/* One hue, varying length. Length is what people judge accurately, so the bar
+   already carries the magnitude; per-category hues would encode identity nobody
+   needs and would owe a colour-blind check in two themes. */
+.fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; border-radius: 4px; }
 /* Grid, not wrapping flex: the note needs its own row while the delete button
    stays on the first one. As sibling flex items with `.txn-note` at
    flex-basis:100%, `.del` was pushed onto a third line and the rows collided —
    visible only in a browser, which is why the test can guard just the structure
    that makes this work (see test_txn_row_places_note_and_delete). */
-.txn { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: center; margin: 8px 0; }
-.txn-main { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
-.txn-note { grid-column: 1; font-size: .9em; }
-.del { grid-row: 1; grid-column: 2; border: none; background: none; cursor: pointer; color: inherit; }
-.cat-select { background: none; border: none; color: inherit; font: inherit; cursor: pointer; }
+.txn { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: center; padding: 4px 0; }
+/* align-items:center, not the default stretch: the 44px select makes the row
+   tall, and a stretched amount span sits on a different baseline from the date
+   beside it. `.amt` gets a fixed slot so every amount shares one right-hand
+   lane however long the category name is. */
+.txn-main { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-width: 0; font-size: 15px; }
+.amt { flex-shrink: 0; text-align: right; }
+.txn-note { grid-column: 1; font-size: 13px; padding-bottom: 6px; }
+/* 44px square: `.del` is destructive and sits next to the category control, so
+   it gets Apple's recommended target rather than WCAG 2.5.8's 24px floor. The
+   fixed width also gives every row's ✕ one vertical lane, however long the
+   amount beside it. */
+.del {
+  grid-row: 1; grid-column: 2; border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
+.cat-select {
+  background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
+  min-height: 44px; max-width: 45vw;
+}
 </style>
 </head>
 <body>
@@ -325,13 +435,37 @@ body {
 const tg = window.Telegram.WebApp;
 tg.ready();
 const app = document.getElementById('app');
+// Stamp Telegram's own light/dark scheme on <html> so the income accent can pick
+// the step that clears contrast on this surface. `prefers-color-scheme` is not a
+// substitute — it reports the OS theme, which need not match the theme the user
+// set inside Telegram.
+function stampScheme() {
+  document.documentElement.dataset.scheme = tg.colorScheme || 'light';
+}
+stampScheme();
+if (tg.onEvent) { tg.onEvent('themeChanged', stampScheme); }
+
+// Which period tab is open. Kept outside load() so a refresh — reopening the
+// Mini App, or coming back from a delete — restores the tab the user chose
+// instead of snapping back to Month under their hands.
+let period = 'month';
+function applyPeriod() {
+  app.querySelectorAll('.seg').forEach(
+    b => b.setAttribute('aria-selected', String(b.dataset.period === period)));
+  app.querySelectorAll('.panel').forEach(
+    p => { p.hidden = p.dataset.period !== period; });
+}
 function load() {
   fetch('/app/data', {headers: {Authorization: 'tma ' + tg.initData}})
     .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
-    .then(html => { app.innerHTML = html; })
+    .then(html => { app.innerHTML = html; applyPeriod(); })
     .catch(() => { app.textContent = 'Could not load dashboard.'; });
 }
 app.addEventListener('click', e => {
+  // Switching period is a local view change — every panel is already in the
+  // fragment, so no request and no reload.
+  const seg = e.target.closest('.seg');
+  if (seg) { period = seg.dataset.period; applyPeriod(); return; }
   const btn = e.target.closest('.del');
   if (!btn) return;
   fetch('/app/delete', {

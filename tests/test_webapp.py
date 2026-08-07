@@ -21,6 +21,7 @@ from kanakko.migrate import migrate
 from kanakko.jobs.evening import IST
 from kanakko.webapp import (
     SHELL_HTML,
+    Period,
     InitDataError,
     category_bars,
     current_month_ist,
@@ -160,33 +161,58 @@ def test_user_id_from_init_data_rejects_a_missing_or_malformed_user(fields):
         user_id_from_init_data(fields)
 
 
+def _periods(week=(Decimal("0"), Decimal("0")), month=(Decimal("0"), Decimal("0")),
+             all_=(Decimal("0"), Decimal("0")), week_top=(), month_top=(), all_top=()):
+    """Three periods in tab order, so tests name only the figures they care about."""
+    return [
+        Period("week", "Week", "this week", week[0], week[1], list(week_top)),
+        Period("month", "Month", "August 2026", month[0], month[1], list(month_top)),
+        Period("all", "All", "all time", all_[0], all_[1], list(all_top)),
+    ]
+
+
 def test_dashboard_html_shows_rupee_amounts_and_exact_balance():
     """Balance is exact `Decimal` subtraction — the money invariant (§9)."""
-    html = dashboard_html(
-        Decimal("20000.00"), Decimal("500.50"),
-        Decimal("0.70"), Decimal("0.50"),
-        "August 2026",
-        Decimal("0.30"), Decimal("0.10"), [], [],
-    )
+    html = dashboard_html(_periods(
+        week=(Decimal("0.70"), Decimal("0.50")),
+        all_=(Decimal("20000.00"), Decimal("500.50")),
+    ), [])
     assert "₹20,000.00" in html  # all-time income
     assert "₹500.50" in html  # all-time expenses
     assert "₹19,499.50" in html  # all-time balance, to the paise
     assert "₹0.20" in html  # this week's balance: 0.70 - 0.50, no float drift
-    assert "This week" in html
+    assert "this week" in html
     assert "August 2026" in html
 
 
-def test_dashboard_html_week_and_month_balances_are_distinct():
-    """The week and month summaries render their own balances, not a shared one (§13)."""
-    html = dashboard_html(
-        Decimal("100"), Decimal("40"),
-        Decimal("30"), Decimal("10"),  # week: balance 20
-        "August 2026",
-        Decimal("80"), Decimal("25"), [], [],  # month: balance 55
-    )
-    assert "This week" in html
+def test_dashboard_html_period_balances_are_distinct():
+    """Each period panel renders its own balance, not a shared one (§13)."""
+    html = dashboard_html(_periods(
+        week=(Decimal("30"), Decimal("10")),   # balance 20
+        month=(Decimal("80"), Decimal("25")),  # balance 55
+        all_=(Decimal("100"), Decimal("40")),  # balance 60
+    ), [])
     assert "₹20.00" in html  # week balance: 30 - 10
     assert "₹55.00" in html  # month balance: 80 - 25
+    assert "₹60.00" in html  # all-time balance: 100 - 40
+
+
+def test_dashboard_html_shows_one_panel_and_hides_the_others():
+    """Only the selected period is visible; the rest ship hidden, one tap away (§13).
+
+    This is what replaced three stacked Balance/Income/Expenses blocks. If the
+    `hidden` attribute were dropped the page would render all three at once —
+    the redundancy the switcher exists to remove — and every test asserting a
+    figure "is in the html" would still pass, so the visibility is asserted here
+    rather than left implied.
+    """
+    html = dashboard_html(_periods(), [], selected="week")
+    assert '<section class="panel" data-period="week">' in html  # shown
+    assert '<section class="panel" data-period="month" hidden>' in html
+    assert '<section class="panel" data-period="all" hidden>' in html
+    # and exactly one tab is marked selected, for assistive tech as well as CSS
+    assert html.count('aria-selected="true"') == 1
+    assert 'data-period="week" aria-selected="true"' in html
 
 
 def test_category_bars_are_sorted_shares_of_month_expenses():
@@ -210,15 +236,36 @@ def test_category_bars_empty_when_no_expenses():
 
 def test_dashboard_html_renders_the_category_breakdown():
     """The breakdown section reaches the fragment `dashboard_html` builds (§13)."""
-    html = dashboard_html(
-        Decimal("1000"), Decimal("400"),
-        Decimal("500"), Decimal("200"),
-        "August 2026",
-        Decimal("1000"), Decimal("400"),
-        [("Food", Decimal("400.00"))], [],
-    )
+    html = dashboard_html(_periods(
+        month=(Decimal("1000"), Decimal("400")),
+        month_top=[("Food", Decimal("400.00"))],
+    ), [])
     assert "Spending by category" in html
     assert "width:100.0%" in html  # the sole category is all the spending
+
+
+def test_each_period_gets_its_own_breakdown():
+    """A period's bars are that period's, not the month's shown under every tab.
+
+    The route computes a separate `top` per period for this reason: switching to
+    Week while the bars still showed the month's categories would put figures and
+    breakdown in silent disagreement — the sort of wrongness that looks fine.
+    """
+    html = dashboard_html(_periods(
+        week=(Decimal("0"), Decimal("100")), week_top=[("Transport", Decimal("100.00"))],
+        month=(Decimal("0"), Decimal("400")), month_top=[("Food", Decimal("400.00"))],
+    ), [])
+    # Anchor on the panel element, not the bare attribute: the tab buttons carry
+    # the same `data-period`, and slicing from those runs across the wrong
+    # section entirely. (Third time today a string-matching guard found the
+    # earlier, wrong occurrence.)
+    def panel(key: str) -> str:
+        return html.split(f'<section class="panel" data-period="{key}"', 1)[1].split(
+            "</section>", 1)[0]
+
+    week_panel, month_panel = panel("week"), panel("month")
+    assert "Transport" in week_panel and "Food" not in week_panel
+    assert "Food" in month_panel and "Transport" not in month_panel
 
 
 def test_current_month_ist_buckets_in_kolkata():
@@ -303,9 +350,20 @@ def test_dashboard_route_renders_totals_and_current_month(conn, monkeypatch):
     assert "₹800.00" in body  # all-time expenses
     assert "₹19,500.00" in body  # this month's balance: 20000 - 500
     assert "₹500.00" in body  # this month's expenses (the 300 is last month)
-    assert "This week" in body  # the weekly summary section (task 99)
+    assert "this week" in body  # the week panel (task 99)
     assert "Spending by category" in body  # the category breakdown (task 98)
     assert "width:100.0%" in body  # Food is this month's only expense category
+
+    # The all-time panel carries its own breakdown, which the route builds with a
+    # third `month_summary` over a range wide enough to hold any ledger. Last
+    # month's Transport is in it and *not* in the month panel — proof the periods
+    # are queried separately rather than sharing the month's categories.
+    all_panel = body.split('<section class="panel" data-period="all"', 1)[1].split(
+        "</section>", 1)[0]
+    month_panel = body.split('<section class="panel" data-period="month"', 1)[1].split(
+        "</section>", 1)[0]
+    assert "Transport" in all_panel and "Food" in all_panel
+    assert "Transport" not in month_panel
 
 
 def test_dashboard_route_rejects_a_forged_payload(conn, monkeypatch):

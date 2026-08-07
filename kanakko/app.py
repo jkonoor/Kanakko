@@ -4,7 +4,7 @@ import hmac
 import logging
 import os
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -26,7 +26,6 @@ from kanakko.db import (
     set_pending_category,
     set_transaction_category,
     soft_delete_transaction,
-    totals,
     undo_last,
 )
 from kanakko.money import format_amount
@@ -39,6 +38,7 @@ from kanakko.tg import (
 )
 from kanakko.webapp import (
     InitDataError,
+    Period,
     current_month_ist,
     current_week_ist,
     dashboard_html,
@@ -108,17 +108,26 @@ def mini_app_data(request: Request) -> str:
 
     with connect() as conn:
         user_id = get_or_create_user(conn, telegram_user_id)
-        income, expenses = totals(conn, user_id)
         first, next_first = current_month_ist()
-        m_income, m_expenses, top = month_summary(conn, user_id, first, next_first)
         w_first, w_next = current_week_ist()
-        # month_summary is a generic date-range summary; its top categories are
-        # the month's, so the week's are discarded — the week section is figures only.
-        w_income, w_expenses, _ = month_summary(conn, user_id, w_first, w_next)
+        # month_summary is a generic date-range summary, so the same function
+        # serves all three periods — the week, the month, and (over a range wide
+        # enough to hold any ledger) all time. Each panel needs its *own* category
+        # breakdown, or switching to Week would show the month's bars underneath
+        # the week's figures.
+        w_income, w_expenses, w_top = month_summary(conn, user_id, w_first, w_next)
+        m_income, m_expenses, m_top = month_summary(conn, user_id, first, next_first)
+        a_income, a_expenses, a_top = month_summary(
+            conn, user_id, date.min, date.max
+        )
         recent = recent_transactions(conn, user_id)
     return dashboard_html(
-        income, expenses, w_income, w_expenses,
-        first.strftime("%B %Y"), m_income, m_expenses, top, recent,
+        [
+            Period("week", "Week", "this week", w_income, w_expenses, w_top),
+            Period("month", "Month", first.strftime("%B %Y"), m_income, m_expenses, m_top),
+            Period("all", "All", "all time", a_income, a_expenses, a_top),
+        ],
+        recent,
     )
 
 

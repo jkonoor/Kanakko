@@ -12,6 +12,67 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `a418688` — prove per-member mutation scope within a shared household (Phase 9)
+
+**Status: ✅ DONE**
+
+Scope: test-only commit. Two new checks in `tests/test_db.py` proving the §16
+per-member rule holds *within one household* (A and B sharing household H), plus
+ticking "Enforce the per-member rules" in `TASKS.md`. No production code changed.
+
+### What I checked
+
+- **Diff is test + TASKS only.** `git show HEAD --stat`: `TASKS.md` (+1/-1) and
+  `tests/test_db.py` (+74). No change to `kanakko/db.py` or any runtime module —
+  the commit's premise is that the `user_id` scope was already enforced; this
+  adds the missing proof.
+
+- **Full suite green.** `uv run pytest -q` → **235 passed, 1 warning**. Matches
+  the claimed count. `tests/test_db.py` alone → 21 passed.
+
+- **The new tests are non-tautological — verified each redden claim myself by
+  temporarily neutralising the predicate in a working copy of `db.py`, then
+  restoring:**
+  - Removed the `user_id` scope from `undo_last`'s subquery (`WHERE user_id = %s`
+    → `user_id = user_id`, param dropped) →
+    `test_undo_removes_your_own_entry_not_a_housemates` **FAILED** (undo latched
+    onto B's newest row, 999.99, instead of A's 100.00). Restored → passes.
+  - Removed the `user_id` scope from `soft_delete_transaction` →
+    `test_dashboard_delete_and_recategorise_refuse_a_housemates_row` **FAILED**
+    (A's delete acted on B's row). Restored → passes.
+  - Removed the `user_id` scope from `set_transaction_category`'s gate SELECT
+    (delete scope left intact) → the same test **FAILED** on the recategorise
+    assertion. Restored → passes.
+  - Confirmed working tree clean after restore (`git diff --stat` empty) and
+    re-ran full suite → 235 passed.
+
+- **The tests exercise the real property, not a fixture artefact.** Because
+  `_member` joins B into A's existing household (shared `household_id`), the
+  `household_id` predicate passes for both members' rows, so *only* the `user_id`
+  predicate does the isolation work — this is exactly the gap the commit message
+  says the older same-rule tests (separate households) left uncovered.
+
+- **The tested scope is the one production uses.** Call sites resolve the acting
+  `user_id` from the request, not from a household or a payload field:
+  `handlers.py:255` (`get_or_create_user(conn, msg.from_id)` for `/undo`),
+  `app.py:186-188` and `app.py:231-232` (`get_or_create_user(conn,
+  telegram_user_id)` where `telegram_user_id = authenticated_user(request)` — the
+  *signed* Mini App user). So the `user_id` the tests scope on is who-entered-the-row,
+  as §16 requires.
+
+- **Newest-row ordering holds under identical `created_at`.** A and B's rows are
+  inserted in one uncommitted transaction, so `now()` (transaction-start time) is
+  equal for both; `undo_last`'s `ORDER BY created_at DESC, txn_id DESC` tiebreaks
+  on `txn_id`, keeping B's later-inserted row "newest" — the premise the undo test
+  relies on to prove A doesn't grab it.
+
+### Findings
+
+None. The tests are meaningful guards (each fails for the reason it exists), the
+task tick is earned, and no money/timezone/soft-delete path is touched. ✅ DONE.
+
+---
+
 ## 2026-08-07 — `4010039` — re-scope ledger reads to the household (Phase 9)
 
 **Scope:** move every `active_transactions` read from a `user_id` scope onto the

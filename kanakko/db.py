@@ -242,7 +242,10 @@ def undo_last(
     chosen from `active_transactions` — the view that already hides soft-deleted
     rows — so a *second* `/undo` walks back to the previous entry instead of
     re-deleting the one just removed (reading `transactions` directly would keep
-    latching onto the already-deleted newest row). Scoped by `user_id` (§1).
+    latching onto the already-deleted newest row). Scoped by `user_id` — undo
+    removes *your own* last entry, never a housemate's (§16) — and additionally by
+    the household the user belongs to, so no read of the view ever spans households
+    (§1, §16).
     The soft-delete and its audit row (§17) share one `conn.transaction()`, so a
     crash between them is impossible; `source`/`update_id` are the correlation id
     of the update doing the undo. Returns the removed row's fields — including its
@@ -255,10 +258,12 @@ def undo_last(
             "UPDATE transactions SET deleted_at = now()"
             " WHERE txn_id = ("
             "   SELECT txn_id FROM active_transactions"
-            "   WHERE user_id = %s ORDER BY created_at DESC, txn_id DESC LIMIT 1"
+            "   WHERE user_id = %s"
+            "   AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            "   ORDER BY created_at DESC, txn_id DESC LIMIT 1"
             " )"
             " RETURNING txn_id, amount, type, category, note, occurred_on",
-            (user_id,),
+            (user_id, user_id),
         )
         row = cur.fetchone()
         if row is None:
@@ -348,20 +353,27 @@ def all_users(conn: psycopg.Connection) -> list[tuple[int, int]]:
 def day_summary(
     conn: psycopg.Connection, user_id: int, day: date
 ) -> tuple[int, Decimal, Decimal]:
-    """`(entry_count, spent, received)` for `user_id`'s live rows on `day` (§6, §9, §12).
+    """`(entry_count, spent, received)` for `user_id`'s household on `day` (§6, §9, §12, §16).
 
-    Buckets on `occurred_on` — when the money moved, not when it was logged — and
-    reads `active_transactions` so a soft-deleted row never re-enters a total. The
-    two sums come back as `NUMERIC` → `Decimal` (never float, §9); an empty day
-    yields `(0, 0.00, 0.00)`. `day` is a plain date the caller computes in
-    `Asia/Kolkata` (§10), keeping the timezone boundary in one testable place.
+    A household figure, not a personal one: the money belongs to the household, so
+    the total is every member's live rows, not just the caller's (§16). `user_id`
+    names who is asking; the query resolves their household from
+    `household_members` and scopes on `household_id` — every read carries a
+    household scope so it can never span households (§16). Buckets on `occurred_on`
+    — when the money moved, not when it was logged — and reads `active_transactions`
+    so a soft-deleted row never re-enters a total. The two sums come back as
+    `NUMERIC` → `Decimal` (never float, §9); an empty day yields `(0, 0.00, 0.00)`.
+    `day` is a plain date the caller computes in `Asia/Kolkata` (§10), keeping the
+    timezone boundary in one testable place.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*),"
             " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0),"
             " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0)"
-            " FROM active_transactions WHERE user_id = %s AND occurred_on = %s",
+            " FROM active_transactions"
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " AND occurred_on = %s",
             (user_id, day),
         )
         count, spent, received = cur.fetchone()
@@ -371,11 +383,13 @@ def day_summary(
 def month_summary(
     conn: psycopg.Connection, user_id: int, first_day: date, next_first_day: date
 ) -> tuple[Decimal, Decimal, list[tuple[str, Decimal]]]:
-    """`(income, expenses, top_categories)` for `user_id`'s live rows in the month (§6, §9, §12).
+    """`(income, expenses, top_categories)` for `user_id`'s household in the month (§6, §9, §12, §16).
 
-    The range is half-open `[first_day, next_first_day)` on `occurred_on` — when
-    the money moved — so a 23:50 IST entry on the month's last day lands in that
-    month (the caller computes both boundaries in `Asia/Kolkata`, §10). Reads
+    A household figure (§16): scoped on the `household_id` resolved from `user_id`'s
+    `household_members` row, so it totals every member's entries, and can never span
+    households. The range is half-open `[first_day, next_first_day)` on `occurred_on`
+    — when the money moved — so a 23:50 IST entry on the month's last day lands in
+    that month (the caller computes both boundaries in `Asia/Kolkata`, §10). Reads
     `active_transactions`, so a soft-deleted row never re-enters the totals (§6).
     The two sums come back as `NUMERIC` → `Decimal` (never float, §9). Top
     categories are the month's expense categories with their totals, biggest
@@ -387,13 +401,15 @@ def month_summary(
             " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0),"
             " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
             " FROM active_transactions"
-            " WHERE user_id = %s AND occurred_on >= %s AND occurred_on < %s",
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " AND occurred_on >= %s AND occurred_on < %s",
             (user_id, first_day, next_first_day),
         )
         income, expenses = cur.fetchone()
         cur.execute(
             "SELECT category, sum(amount) FROM active_transactions"
-            " WHERE user_id = %s AND occurred_on >= %s AND occurred_on < %s"
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " AND occurred_on >= %s AND occurred_on < %s"
             " AND type = 'expense'"
             " GROUP BY category ORDER BY sum(amount) DESC, category",
             (user_id, first_day, next_first_day),
@@ -405,18 +421,22 @@ def month_summary(
 def recent_transactions(
     conn: psycopg.Connection, user_id: int, limit: int = 10
 ) -> list[tuple]:
-    """The user's most recent live transactions, newest first (§6, §13).
+    """The household's most recent live transactions, newest first (§6, §13, §16).
 
-    The dashboard's recent list: each row carries its `txn_id` so the per-row
-    delete button can name it. Reads `active_transactions`, so a soft-deleted row
-    never reappears (§6). `limit` caps the list — the dashboard shows a handful,
-    not the whole ledger. Amounts come back as `NUMERIC` → `Decimal` (§9). Ordered
-    by `created_at` (when logged) so the list matches the order entries were added.
+    The dashboard's recent list: a household figure (§16), scoped on the
+    `household_id` resolved from `user_id`'s `household_members` row, so it lists
+    every member's entries and can never span households. Each row carries its
+    `txn_id` so the per-row delete button can name it. Reads `active_transactions`,
+    so a soft-deleted row never reappears (§6). `limit` caps the list — the
+    dashboard shows a handful, not the whole ledger. Amounts come back as
+    `NUMERIC` → `Decimal` (§9). Ordered by `created_at` (when logged) so the list
+    matches the order entries were added.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT txn_id, amount, type, category, note, occurred_on"
-            " FROM active_transactions WHERE user_id = %s"
+            " FROM active_transactions"
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " ORDER BY created_at DESC, txn_id DESC LIMIT %s",
             (user_id, limit),
         )
@@ -438,8 +458,10 @@ def soft_delete_transaction(
     another's row by guessing an id (§1). The row is chosen from
     `active_transactions`, so deleting an already-deleted (or another user's) row
     is a no-op returning `None`, not a second write — the subquery yields no
-    `txn_id`, and `WHERE txn_id = NULL` matches nothing. Mirrors `undo_last`'s
-    read-through-the-view pattern. The delete and its audit row (§17) share one
+    `txn_id`, and `WHERE txn_id = NULL` matches nothing. The subquery also carries
+    the user's `household_id`, so like every read of the view it can never span
+    households (§16); here it is defensive (the `user_id` scope already confines to
+    one household). Mirrors `undo_last`'s read-through-the-view pattern. The delete and its audit row (§17) share one
     `conn.transaction()`; `source`/`update_id` are the correlation id (a Mini App
     delete carries `source="miniapp"` and no `update_id`, §17 gap 2). Returns the
     deleted row — `txn_id` plus its amount so the caller can log it (§17) — or
@@ -451,9 +473,10 @@ def soft_delete_transaction(
             " WHERE txn_id = ("
             "   SELECT txn_id FROM active_transactions"
             "   WHERE user_id = %s AND txn_id = %s"
+            "   AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " )"
             " RETURNING txn_id, amount, type, category, note, occurred_on",
-            (user_id, txn_id),
+            (user_id, txn_id, user_id),
         )
         row = cur.fetchone()
         if row is None:
@@ -486,9 +509,11 @@ def set_transaction_category(
     wrong field on an already-confirmed entry. Scoped to `user_id` so one user
     cannot relabel another's row by guessing an id (§1); the row is chosen from
     `active_transactions`, so a deleted or foreign id yields no `txn_id` and the
-    UPDATE matches nothing, returning `None` rather than a stray write. The caller
-    validates `category` against the closed set (`categories.py`) before this runs.
-    Mirrors `soft_delete_transaction`.
+    UPDATE matches nothing, returning `None` rather than a stray write. Both reads
+    of the view also carry the user's `household_id` so, like every read, they can
+    never span households (§16 — defensive here, the `user_id` scope already does).
+    The caller validates `category` against the closed set (`categories.py`) before
+    this runs. Mirrors `soft_delete_transaction`.
 
     Category change history is the audit data §17 names as genuinely missing, so
     the old category is read with a `SELECT` before the `UPDATE`, in the same
@@ -500,8 +525,9 @@ def set_transaction_category(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "SELECT category FROM active_transactions"
-            " WHERE user_id = %s AND txn_id = %s",
-            (user_id, txn_id),
+            " WHERE user_id = %s AND txn_id = %s"
+            " AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)",
+            (user_id, txn_id, user_id),
         )
         old = cur.fetchone()
         if old is None:
@@ -512,9 +538,10 @@ def set_transaction_category(
             " WHERE txn_id = ("
             "   SELECT txn_id FROM active_transactions"
             "   WHERE user_id = %s AND txn_id = %s"
+            "   AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " )"
             " RETURNING txn_id, amount",
-            (category, user_id, txn_id),
+            (category, user_id, txn_id, user_id),
         )
         tid, amount = cur.fetchone()
         _record_event(cur, txn_id=tid, user_id=user_id, action="recategorise",
@@ -530,13 +557,18 @@ def logged_since(conn: psycopg.Connection, user_id: int, since: datetime) -> boo
     previous evening summary? `created_at` — when the row was *logged*, not
     `occurred_on` — is the right column, so recording a back-dated expense this
     morning still counts as activity. Reads `active_transactions`, so a row the
-    user logged and then undid doesn't keep the nudge suppressed.
+    user logged and then undid doesn't keep the nudge suppressed. Scoped by
+    `user_id` — the nudge is suppressed *per person*, so a member who logged
+    nothing is still nudged even if a housemate was active (§16) — and additionally
+    by the user's household, so no read of the view ever spans households (§16).
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM active_transactions"
-            " WHERE user_id = %s AND created_at >= %s LIMIT 1",
-            (user_id, since),
+            " WHERE user_id = %s"
+            " AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " AND created_at >= %s LIMIT 1",
+            (user_id, user_id, since),
         )
         return cur.fetchone() is not None
 

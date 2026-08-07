@@ -405,7 +405,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       moved once new money carries it, not just backfilled rows). Check: a
       confirmed transaction lands in the confirmer's household, and a NULL
       household_id insert is refused.
-- [ ] Re-scope every read to the household: `day_summary`, `month_summary`,
+- [x] Re-scope every read to the household: `day_summary`, `month_summary`,
       `logged_since`, `recent_transactions`, `undo_last`. The §6 read-path guard
       already forces `active_transactions`; extend it so a read missing a
       `household_id` predicate is caught the same way. A household read that

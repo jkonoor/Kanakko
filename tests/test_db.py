@@ -15,7 +15,9 @@ from conftest import household_of
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.db import (
     confirm_pending,
+    day_summary,
     get_or_create_user,
+    recent_transactions,
     save_pending,
     set_pending_category,
     set_transaction_category,
@@ -359,6 +361,43 @@ def test_confirm_is_scoped_to_the_user(conn):
         assert cur.fetchone() == (Decimal("100.00"), a)  # A's own amount, under A
         cur.execute("SELECT user_id FROM pending_transactions WHERE telegram_message_id = 555")
         assert cur.fetchone() == (b,)  # B's pending row still live, A's cleared
+    conn.rollback()
+
+
+def test_household_reads_span_members_and_never_leak(conn):
+    """Household reads total every member's rows and no other household's (§16).
+
+    The tenancy axis is the household: `day_summary` and `recent_transactions` are
+    household figures, not personal ones. Two members share household H; a third
+    user lives in household X. A read for a member of H must fold in *both* H
+    members' entries — the pre-§16 code scoped these by `user_id` and would return
+    only the caller's row, silently hiding a housemate's spend — and must exclude
+    X's rows entirely, the leak this phase most fears.
+    """
+    migrate(conn)
+    day = date(2026, 8, 5)  # _txn's occurred_on
+    a = _seed_user(conn, 90001)  # household H, of one for now
+    hh = household_of(conn, a)
+    b = get_or_create_user(conn, 90002)  # joins H, not a household of their own
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (hh, b),
+        )
+    outsider = _seed_user(conn, 90003)  # household X
+
+    _confirm(conn, a, 9001, "100.00")
+    _confirm(conn, b, 9002, "40.00")
+    _confirm(conn, outsider, 9003, "999.00")
+
+    count, spent, _ = day_summary(conn, a, day)
+    assert (count, spent) == (2, Decimal("140.00"))  # both H members, not just A
+    assert day_summary(conn, b, day)[1] == Decimal("140.00")  # same total from B's id
+
+    amounts = sorted(r[1] for r in recent_transactions(conn, a))
+    assert amounts == [Decimal("40.00"), Decimal("100.00")]  # H's two rows, X's absent
+
+    assert day_summary(conn, outsider, day)[1] == Decimal("999.00")  # X never sees H
     conn.rollback()
 
 

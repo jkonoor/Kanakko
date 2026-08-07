@@ -21,6 +21,15 @@ KANAKKO = Path(__file__).parent.parent / "kanakko"
 # boundary before `transactions`, and only the bare base ledger table trips it.
 BYPASS = re.compile(r"\b(from|join)\s+transactions\b", re.I)
 
+# A read of the view that omits a household scope leaks another household's rows
+# into a total — the worst bug §16 can ship, and silent, because a wrong total
+# errors nowhere. Every `FROM`/`JOIN active_transactions` read is scoped to one
+# household (the reporting reads on `household_id` alone, the personal ones on
+# `user_id` *and* `household_id`), so the literal that reads the view must name
+# `household_id`. Implicit-concatenated SQL is one string constant at parse time,
+# so the predicate lands in the same literal as the `FROM` (see `sql_literals`).
+READS_VIEW = re.compile(r"\b(from|join)\s+active_transactions\b", re.I)
+
 
 def sql_literals(source: str):
     """(value, lineno) for every string literal that isn't a docstring.
@@ -58,5 +67,24 @@ def test_no_production_read_bypasses_active_transactions():
                 offenders.append(f"{module.name}:{lineno}")
     assert not offenders, (
         "reads must go through active_transactions, not transactions: "
+        + ", ".join(offenders)
+    )
+
+
+def test_every_view_read_is_household_scoped():
+    """Every `FROM`/`JOIN active_transactions` read names `household_id` (§16).
+
+    The tenancy axis is the household (§16), so a read of the view that forgets it
+    folds another household's rows into a total. This catches the omission
+    statically — the failure it exists for is a new (or edited) read that reaches
+    the view without a household scope.
+    """
+    offenders = []
+    for module in sorted(KANAKKO.rglob("*.py")):
+        for value, lineno in sql_literals(module.read_text()):
+            if READS_VIEW.search(value) and "household_id" not in value:
+                offenders.append(f"{module.name}:{lineno}")
+    assert not offenders, (
+        "reads of active_transactions must be household-scoped (§16): "
         + ", ".join(offenders)
     )

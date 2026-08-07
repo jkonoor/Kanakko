@@ -12,6 +12,96 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `1f6c28d` — per-user daily message cap (Phase 9, task 4)
+
+**Status: ⚠️ CHANGES REQUESTED** — one spec-fit finding: the cap counts free
+(non-LLM) callback taps against the LLM-cost budget, so an active user is
+refused well before the configured cap.
+
+Scope: the §16 per-user daily message cap. `migrations/005` adds a nullable
+`user_id` FK to `processed_updates`; `claim_update` stamps it; new
+`db.count_updates_on_day` (IST-bucketed count), `auth.daily_message_cap`
+(`$DAILY_MESSAGE_CAP`, default 50) and `auth.within_daily_cap`; the webhook
+gates the text-parse path on the cap before `claim_update`; `CAP_REACHED`
+message; `.env.example` + compose wiring; `tests/test_cap.py` plus four
+`test_webhook.py` stub updates.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): 10 files, +287/-8. No `float` on a money
+  path (the cap touches no amounts). No secret introduced — `DAILY_MESSAGE_CAP`
+  is empty in `.env.example`, compose supplies `50`. No new dependency. No new
+  read of `transactions` — `count_updates_on_day` reads the base
+  `processed_updates` table, which is correct (it counts updates, not ledger
+  rows, so `active_transactions` does not apply).
+- **`uv run pytest -q`** → **225 passed, 1 warning**. Ran it myself.
+- **Spec fit against §16** (`docs/DECISIONS.md:487-495`): "a per-user daily
+  message cap, default 50, set by env var — never hardcoded"; counted off
+  `processed_updates` with an added `user_id`, "counting exactly the thing that
+  costs money." Env-driven default-50 and the `processed_updates.user_id`
+  mechanism match. The "exactly the thing that costs money" clause does **not**
+  — see finding 1.
+- **IST bucketing guard is real** (`db.py:307`): reverted
+  `(processed_at AT TIME ZONE 'Asia/Kolkata')::date` to a plain
+  `processed_at::date` and reran `tests/test_cap.py` →
+  `test_count_buckets_on_ist_midnight_not_utc` **FAILED** (the session TZ is
+  forced to UTC in the test, so the bucket collapses to 2 ≠ 3). The guard fails
+  for the reason it exists: a 23:50-IST message counting against the wrong day.
+- **Webhook cap guard is real** (`app.py:306-314`): deleted the cap block and
+  reran → `test_message_past_the_cap_is_refused_and_costs_nothing` **FAILED**
+  (the capped message reaches `handle_text`). Confirmed the refusal answers 200,
+  sends `CAP_REACHED`, never claims the update, and never calls the parser.
+- **Off-by-one**: cap checked before `claim_update`, so with N prior rows a cap
+  of N admits messages while `count < N` (N messages) and refuses the N+1th.
+  Correct.
+- **`daily_message_cap` fallback**: `os.environ.get(...) or ""` then `int()` in
+  a `try/except ValueError` → falls back to 50 on unset/empty/non-integer. The
+  `or` handles compose's `:-` present-but-empty trap. Verified by reading; a
+  non-integer does not crash the webhook.
+- **All `claim_update` callers updated** to the new 3-arg signature
+  (`grep claim_update`): only `app.py:315`. No stale 2-arg call.
+
+### Findings
+
+**1 — MEDIUM (spec fit / cost-cap semantics).** `kanakko/db.py:295-304`
+(`count_updates_on_day`) counts **every** `processed_updates` row for the user,
+but `claim_update` (`app.py:315`) stamps `user_id` on *all* handled updates —
+Confirm, Cancel, category taps, and `/undo` — none of which make an LLM call.
+The cap therefore meters far more than "exactly the thing that costs money"
+(§16, `docs/DECISIONS.md:495`).
+
+*Verified live*: seeded one text-parse claim + one Confirm claim + one category
+claim for a user, then called `count_updates_on_day` — it returned **3** for
+**1** actual LLM call. Because the dominant flow is *text → tap Confirm* (2
+updates per entry), a `DAILY_MESSAGE_CAP=50` gives a confirm-every-entry user
+only ~25 real entries before `CAP_REACHED`. The operator set 50; the user hits
+the wall at ~25, and the message says "today's message limit."
+
+Not dangerous on the bill — it errs strict, never undercounts cost, so no
+runaway is possible. But it diverges from the spec's stated meter and refuses
+legitimate users at roughly half the configured budget. The commit's own
+framing ("gates the parse path only") is about *refusing* only text; it does
+not address that the *count* still includes the free taps.
+
+*Suggested fix* (implementer's call — not applied): count only the updates that
+actually cost an LLM call. Simplest is to narrow `count_updates_on_day` to
+parse-path claims — e.g. stamp a boolean/`kind` on `processed_updates` and count
+`WHERE user_id = %s AND llm` — or only stamp `user_id` for the text-parse claim
+and leave callback claims' `user_id` NULL (they never need to be counted). Then
+add a check that a Confirm/category claim does **not** advance the count, which
+would have caught this.
+
+### Verdict
+
+Mechanism, env wiring, migration, IST bucketing, off-by-one, and both guards
+are all correct and verified. The one open item is that the cap counts non-LLM
+callback updates against an LLM-cost budget, contradicting §16's "counting
+exactly the thing that costs money" and roughly halving the effective budget for
+a normal user. Fix the count (or its scope) and add a test that a callback claim
+does not consume budget before moving on.
+
+---
+
 ## 2026-08-07 — `46005b7` — gate every inbound update on authorization (Phase 9, task 3)
 
 **Status: ✅ DONE** — no blocking issues.

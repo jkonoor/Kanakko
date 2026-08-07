@@ -12,6 +12,62 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `56c93f6` — add households + household_members, backfill users (Phase 9)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope.** `migrations/006_households.sql` adds the two tenancy tables, ALTERs the
+deferred FK onto `invites.household_id`, and backfills every existing user into a
+self-owned household of one; `tests/test_migrate.py` gains a seeded-multi-user
+backfill test and repairs the invite CHECK test the new FK broke.
+
+### What I checked (and what it returned)
+
+- `git show HEAD` / read the full diff, `migrations/006_households.sql`,
+  `migrations/004_invites.sql`, `kanakko/migrate.py`, and `docs/DECISIONS.md`
+  §16.
+- `uv run pytest tests/test_migrate.py -q` → **6 passed**.
+- `uv run pytest -q` → **227 passed** — the commit's claim holds.
+- **Defeated the new guard on purpose.** Tampered the backfill to assign the
+  wrong owner (`SELECT (SELECT min(user_id) FROM users)` instead of `u.user_id`)
+  and re-ran `test_household_backfill_migrates_seeded_users` →
+  **1 failed** on the exactly-one-self-owned assertion. Restored the file;
+  `git status` clean, `git diff` empty. The test fails for the reason it exists.
+- Confirmed the invites FK ALTER is safe on a real DB: `ADD CONSTRAINT ... FOREIGN
+  KEY` validates existing rows, but only `signup` invites exist today (household_id
+  NULL, which the FK permits). Grepped `kanakko/` for any code issuing
+  `household`-kind invites → **no matches**, so no bogus `household_id` can exist
+  to fail validation. (Fail-fast if one ever did — acceptable.)
+
+### Spec fit (§16)
+
+- Household always has an owner: `owner … NOT NULL` ✓
+- Exactly one household per user: `household_members.user_id … UNIQUE` +
+  `WHERE NOT EXISTS` backfill ✓
+- Owner is the creator: backfill sets `owner = u.user_id` and the member is the
+  same user ✓
+- `plan` defaults to `'beta'` ✓
+- Idempotent: single-transaction migrate under the advisory lock, recorded in
+  `schema_migrations` so it runs once; the `WHERE NOT EXISTS` guard makes a
+  partial-retry finish rather than duplicate — tested explicitly (second backfill
+  is a no-op on household and member counts) ✓
+- The data-modifying CTE (`INSERT … RETURNING` feeding the member `INSERT`) is
+  correct and atomic in Postgres; multi-statement file executes fine via
+  `cur.execute(read_text())` (no params).
+
+No money, timezone, `active_transactions`, category, or secret surface is touched
+by this change. The `transactions.household_id` tenancy move is correctly left as
+the next (still-unticked) task.
+
+### Findings
+
+None blocking. One informational note: the extracted-backfill test splits the
+`.sql` on `"WITH new_households"` and takes everything after it — fine today, but
+if a later statement is appended below the backfill it would be swept into the
+test's executed SQL. Not worth changing now.
+
+---
+
 ## 2026-08-07 — `1b21b1d` — meter the daily cap on LLM calls only (Phase 9, QA of 1f6c28d)
 
 **Status: ✅ DONE** — no blocking issues.

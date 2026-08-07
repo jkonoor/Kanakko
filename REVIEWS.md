@@ -12,6 +12,78 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `4010039` — re-scope ledger reads to the household (Phase 9)
+
+**Scope:** move every `active_transactions` read from a `user_id` scope onto the
+household tenancy axis (§16) — reporting reads (`day_summary`, `month_summary`,
+`recent_transactions`) now total the whole household; personal reads
+(`undo_last`, `logged_since`) and the two mutation subqueries
+(`soft_delete_transaction`, `set_transaction_category`) keep `user_id` and gain a
+redundant household predicate. Plus two guards.
+
+**Status: ✅ DONE** — no blocking issues. One non-blocking test/guard-coverage
+finding below.
+
+### What I checked (live, not assumed)
+
+- **Full suite:** `uv run pytest -q` → **233 passed, 1 warning** (matches the
+  commit claim).
+- **Schema soundness:** `household_members.user_id` is `UNIQUE` (migration 006),
+  so the scalar subquery `(SELECT household_id FROM household_members WHERE
+  user_id = %s)` returns exactly one value (or NULL) — no "more than one row"
+  risk. The view carries `household_id` (migration 007 rebuilt `SELECT *`).
+- **Behavioural guard reddens for the right reason:** temporarily reverted
+  `day_summary` to `WHERE user_id = %s` →
+  `test_household_reads_span_members_and_never_leak` **FAILED** (got 1 row /
+  100.00, expected 2 / 140.00) and `test_every_view_read_is_household_scoped`
+  **FAILED** (`db.py:371`). Restored; suite green again. So both guards catch a
+  dropped predicate.
+- **No `float`, still reads the view, timezone untouched:** the diff only swaps
+  the `WHERE` scope; `sum(amount)` still returns `NUMERIC`→`Decimal`, bucketing
+  stays on `occurred_on`, boundaries stay caller-computed. No spec regression.
+- **Personal reads are genuinely no-change:** for a user's own rows
+  `household_id` always equals their membership's household, so the added
+  predicate is redundant-true — the existing `test_noon.py` / undo / delete /
+  recategorise tests still pass, confirming no behaviour drift.
+
+### Findings
+
+**1 · Low (non-blocking) — the static household-scope guard asserts a substring,
+not a predicate; `month_summary`/`logged_since` have no behavioural
+household-span test** — `tests/test_read_paths.py:84` (`test_every_view_read_is_household_scoped`)
+
+`READS_VIEW.search(value) and "household_id" not in value` only checks that the
+string `household_id` appears *somewhere* in the same literal as `FROM
+active_transactions` — not that it constrains the rows. I defeated it live:
+changing `day_summary` back to `WHERE user_id = %s` **but** selecting
+`min(household_id)` in the projection kept the guard **green** (`1 passed`) while
+the read was back to per-user scope. The realistic regression (dropping the
+predicate entirely) *is* caught, so this is defence-in-depth, not a shipped bug.
+
+It matters because `month_summary` (a reporting read whose semantics genuinely
+changed user→household) has **no** behavioural test that a housemate's rows fold
+in — the existing `test_monthly.py` cases are all single-user (household-of-one),
+so they pass under either scope. That leaves the defeatable static guard as
+`month_summary`'s sole protection. `logged_since` is the same, though there the
+household predicate is redundant so the risk is lower.
+
+*Suggested fix:* extend `test_household_reads_span_members_and_never_leak` (or a
+sibling) to assert `month_summary` totals both members' income/expenses and
+excludes the outsider — the same two-members-plus-outsider fixture already in the
+test. Optionally tighten the static regex to require `household_id` after a
+`where`/`and`, but a behavioural test is the stronger guard and the existing one
+is a two-line extension.
+
+**Observation (out of scope, no action) —** `recent_transactions` now returns
+every member's rows but no `user_id`/`household_id`, while `soft_delete_transaction`
+stays `user_id`-scoped, so a future multi-member dashboard's per-row delete
+button on a housemate's row would silently no-op (`None`). Correct per §16
+("edit/delete only the member who entered it") and inert today (every household
+is of one); the dashboard/jobs re-scope is an explicitly separate task. Noted so
+the next reader doesn't rediscover it.
+
+---
+
 ## 2026-08-07 — `b7e5649` — home confirmed transactions in the household, enforce NOT NULL (Phase 9)
 
 **Status: ✅ DONE** — no blocking issues.

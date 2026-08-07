@@ -85,28 +85,44 @@ def mini_app_shell() -> str:
 
 TMA_PREFIX = "tma "
 
+def authenticated_user(request: Request, max_age: timedelta | None = None) -> int:
+    """The Telegram user id proved by this request's `initData`, or a 401 (§13).
+
+    Every Mini App route starts here, so the check exists once rather than once
+    per route — the third copy of an auth preamble is where they start to drift.
+    The bootstrap sends `initData` in `Authorization: tma <initData>` (Telegram's
+    documented scheme); validation *is* the authentication, so a valid HMAC both
+    proves the payload came from Telegram and names the user (§13).
+
+    A missing, malformed, forged or (with `max_age`) stale payload is a 401. An
+    unset `TELEGRAM_BOT_TOKEN` is left to raise, surfacing as a 500 — a loud
+    misconfiguration rather than a quiet bypass.
+
+    `max_age` is the replay window, and **state-mutating routes must pass one**
+    (§13): a captured `initData` must not stay a working delete button forever.
+    Read-only routes leave it `None`, where a stale-but-valid payload only ever
+    reveals the caller's own data.
+    """
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith(TMA_PREFIX):
+        raise HTTPException(status_code=401)
+    try:
+        fields = validate_init_data(header[len(TMA_PREFIX):], max_age=max_age)
+        return user_id_from_init_data(fields)
+    except InitDataError:
+        raise HTTPException(status_code=401)
+
+
 
 @app.get("/app/data", response_class=HTMLResponse)
 def mini_app_data(request: Request) -> str:
     """The dashboard fragment for the authenticated user (§13): totals, balance,
     this-week and current-month figures.
 
-    The bootstrap sends `initData` in the `Authorization: tma <initData>` header
-    (Telegram's documented scheme). Validation *is* the authentication — a valid
-    HMAC proves the payload came from Telegram and names the real user (§13), so
-    there is no login. A missing, malformed, or forged payload is a 401; an unset
-    `TELEGRAM_BOT_TOKEN` fails closed as a 500 (loud misconfig, not a bypass).
-    Read-only, so no `auth_date` freshness check is needed yet — the replay
-    concern arrives with the per-row mutations of tasks 100/101 (see REVIEWS.md).
+    Read-only, so `authenticated_user` is called without a `max_age`: a
+    stale-but-valid payload reveals only the caller's own figures.
     """
-    header = request.headers.get("Authorization") or ""
-    if not header.startswith(TMA_PREFIX):
-        raise HTTPException(status_code=401)
-    try:
-        fields = validate_init_data(header[len(TMA_PREFIX):])
-        telegram_user_id = user_id_from_init_data(fields)
-    except InitDataError:
-        raise HTTPException(status_code=401)
+    telegram_user_id = authenticated_user(request)
 
     with connect() as conn:
         user_id = get_or_create_user(conn, telegram_user_id)
@@ -150,28 +166,18 @@ def mini_app_data(request: Request) -> str:
 async def mini_app_delete(request: Request) -> Response:
     """Soft-delete one of the authenticated user's transactions (§13, task 100).
 
-    The dashboard's per-row delete button POSTs `{"id": <txn_id>}` here with the
-    same `Authorization: tma <initData>` header the read route uses. Unlike
-    `/app/data` this route *mutates state*, so it passes
-    `max_age=timedelta(hours=24)`: a captured `initData` must not stay a working
-    delete button forever (§13, and the official SDK's 24h default). The row is
-    scoped to the user resolved from the *signed* `user` object, so one user
-    cannot delete another's transaction by guessing an id.
+    The dashboard's per-row delete button POSTs `{"id": <txn_id>}`. This route
+    *mutates state*, so it passes a 24h `max_age` — a captured `initData` must
+    not stay a working delete button forever (§13, and the official SDK's
+    default). The row is scoped to the user `authenticated_user` returns, resolved
+    from the *signed* `user` object, so one user cannot delete another's row by
+    guessing an id.
 
-    A missing/forged/stale payload is 401; a body without a usable integer `id`
-    is 400; a delete that matched no live row of this user's is 404 (already gone
-    or never theirs). Success is 204 — the client re-fetches `/app/data`.
+    A body without a usable integer `id` is 400; a delete that matched no live row
+    of this user's is 404 (already gone, or never theirs). Success is 204 — the
+    client re-fetches `/app/data`.
     """
-    header = request.headers.get("Authorization") or ""
-    if not header.startswith(TMA_PREFIX):
-        raise HTTPException(status_code=401)
-    try:
-        fields = validate_init_data(
-            header[len(TMA_PREFIX):], max_age=timedelta(hours=24)
-        )
-        telegram_user_id = user_id_from_init_data(fields)
-    except InitDataError:
-        raise HTTPException(status_code=401)
+    telegram_user_id = authenticated_user(request, max_age=timedelta(hours=24))
 
     try:
         body = await request.json()
@@ -192,28 +198,16 @@ async def mini_app_category(request: Request) -> Response:
     """Change the category of one of the user's transactions (§5, §13, task 101).
 
     The dashboard's per-row category `<select>` POSTs
-    `{"id": <txn_id>, "category": <name>}` here with the same
-    `Authorization: tma <initData>` header the read route uses. Like `/app/delete`
-    this *mutates state*, so it passes `max_age=timedelta(hours=24)` — a captured
-    `initData` must not stay a working edit button forever (§13). `category` must
-    be one of the closed set (`categories.py`, §11); anything else is a 400, so a
-    forged body can't write a junk label. The row is scoped to the user resolved
-    from the *signed* `user` object, so one user cannot relabel another's row.
+    `{"id": <txn_id>, "category": <name>}`. Like `/app/delete` this *mutates
+    state*, so it passes a 24h `max_age` (§13). `category` must be one of the
+    closed set (`categories.py`, §11); anything else is a 400, so a forged body
+    cannot write a junk label. The row is scoped to the authenticated user, so one
+    user cannot relabel another's.
 
-    A missing/forged/stale payload is 401; a body without a usable integer `id` or
-    with an unknown `category` is 400; an id matching no live row of this user's is
-    404. Success is 204 — the client re-fetches `/app/data`.
+    A body without a usable integer `id`, or an unknown `category`, is 400; an id
+    matching no live row of this user's is 404. Success is 204.
     """
-    header = request.headers.get("Authorization") or ""
-    if not header.startswith(TMA_PREFIX):
-        raise HTTPException(status_code=401)
-    try:
-        fields = validate_init_data(
-            header[len(TMA_PREFIX):], max_age=timedelta(hours=24)
-        )
-        telegram_user_id = user_id_from_init_data(fields)
-    except InitDataError:
-        raise HTTPException(status_code=401)
+    telegram_user_id = authenticated_user(request, max_age=timedelta(hours=24))
 
     try:
         body = await request.json()

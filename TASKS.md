@@ -208,6 +208,101 @@ scale of change"* (Smashing Magazine, *UX Strategies for Real-Time Dashboards*,
       position are what people judge accurately; pie charts *"should be avoided
       most of the time"*), so it stays CSS, no charting library (§13).
 
+## Phase 8 — Households, onboarding, and access control
+
+Implements [`docs/DECISIONS.md`](docs/DECISIONS.md) **§16**. Read it first — every
+rule below comes from there, and the ambiguous cases were decided by the user on
+2026-08-07, not left to judgement.
+
+**Order matters more than usual here.** The access gate (tasks 1–3) closes a live
+hole: the bot is already multi-user, so anyone who finds it gets a ledger parsed on
+the operator's OpenRouter credits. That ships before the schema work. The identity
+fix (task 2) must land *before* the household schema, not after.
+
+**Nothing in this phase may be deployed half-done.** A partial household migration
+means transactions with no home. Each task leaves the tree green and deployable.
+
+### Access control — closes a live hole, ship first
+
+- [ ] Separate identity from delivery address. `handle_text` uses `msg.chat_id` as
+      the user's identity and never reads `message.from.id`; in a private chat the
+      two coincide, so it works today and is wrong the moment a household or a
+      group exists. Capture `from.id` in `dispatch` onto `TextMessage`/`ButtonPress`,
+      resolve the *user* from it, and keep `chat_id` purely as the send target. The
+      check: an update whose `from.id` differs from `chat.id` resolves the user by
+      `from.id` — that guard is impossible to write today and is the whole point.
+- [ ] Add the `invites` table and `SIGNUP_MODE` (env, `invite` | `open`, default
+      `invite` — fails closed like §15's secret). Columns: `code` unique, `kind`
+      (`signup` | `household`), `household_id` nullable, `label`, `created_by`,
+      `used_by` nullable, `used_at`, `expires_at`. Single-use: a code with
+      `used_by` set is spent. §16 keeps the two kinds distinct on purpose — a
+      household invite implies signup, a signup invite joins nobody.
+- [ ] Gate every inbound update on authorization, before any LLM call. An
+      unrecognised user in `invite` mode gets a polite refusal and **nothing is
+      stored — not even a user row** (§16). The check that earns its place: an
+      unknown user's message creates no rows *and* makes no OpenRouter call, since
+      the cost is the reason this exists. Assert both.
+- [ ] Add the per-user daily cap — env var, default 50, never hardcoded (§16).
+      `processed_updates` already stores one row per handled update but only
+      `update_id`; add `user_id` and count per IST day. Enforce *before* the LLM
+      call. The check: the 51st message in a day is refused and costs nothing,
+      and the count rolls over at IST midnight, not UTC (§10).
+
+### Households — the schema change
+
+- [ ] Add `households` (owner, `plan` default `'beta'`, created_at) and
+      `household_members`, and migrate every existing user to a household of one.
+      The migration is the risky part: it must be idempotent, and a user must end
+      up in exactly one household (§16). Check it against a seeded multi-user
+      database, not an empty one.
+- [ ] Move the ledger's tenancy axis: `transactions` gains `household_id` (whose
+      money) while `user_id` becomes "who entered it" (§16). Backfill from the
+      household-of-one mapping. **This is the task that can corrupt the ledger** —
+      the check must prove every pre-existing transaction still appears in exactly
+      one household's totals, with the same sum as before the migration.
+- [ ] Re-scope every read to the household: `day_summary`, `month_summary`,
+      `logged_since`, `recent_transactions`, `undo_last`. The §6 read-path guard
+      already forces `active_transactions`; extend it so a read missing a
+      `household_id` predicate is caught the same way. A household read that
+      leaks another household's rows is the worst bug this phase can ship.
+- [ ] Enforce the per-member rules (§16): `/undo` removes **your own** last entry,
+      and the dashboard's delete and recategorise act only on rows you entered.
+      Two checks, both about the *other* member: A cannot undo B's entry, and A's
+      delete of B's row is refused.
+
+### Onboarding
+
+- [ ] Add `/start` with deep-link payload handling. No handler exists today — an
+      unknown user simply types and silently gets a ledger. Bare `/start` in
+      `open` mode creates a household of one and explains the bot; `/start <code>`
+      consumes an invite. Payload limits are **verified**: 64 chars, `A-Z a-z 0-9
+      _ -` (§16). The check: a spent code, an expired code, and a garbage payload
+      are each refused distinctly, and none creates a partial household.
+- [ ] Add `/invite` (owner only) — issues a labelled single-use household code and
+      returns the `t.me/<bot>?start=<code>` link. Label so the operator can tell
+      who is active (§16).
+- [ ] Add `/household` (who is in it, who owns it) and member removal: the owner
+      may remove anyone, **any member may remove themselves** (§16 — owner-only
+      removal traps a member in a ledger they cannot leave). One code path, the
+      self case being actor == target.
+- [ ] Removal asks **retain or delete** that member's entries, and deletion is
+      real (§16). This is *not* §6's soft delete and must not share its name. The
+      warning must say the specific consequence: hard deletion makes past reports
+      stop reconciling — a month that summarised ₹18,920 will not match when
+      re-opened. Checks: retain leaves totals unchanged; delete removes the rows
+      and *changes* the household total, which is the point being warned about.
+- [ ] Require ownership transfer before an owner can leave (§16) — a household
+      always has an owner. The check: an owner's self-removal is refused while
+      they still own it, and succeeds after transfer.
+
+### Reminders under households
+
+- [ ] Re-scope the jobs (§12, §16): evening and monthly carry **household**
+      figures to every member; the noon nudge is suppressed **per person**, so a
+      member who logged nothing is still nudged even if a housemate was active.
+      That per-person rule is the one most easily broken by a household-wide
+      `logged_since`, so it gets the check.
+
 ---
 
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

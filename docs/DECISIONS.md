@@ -384,13 +384,150 @@ auth before launch" is how it ships without.
 
 ---
 
+## 16. Households: multi-tenant, shared ledgers, invite-gated
+
+Decided 2026-08-07. §1 deferred multi-tenancy until "a second user exists" — that
+trigger has now fired, and the intent has widened from a personal tool to
+something distributed to testers and then sold.
+
+**Already true, by accident.** §1's "carry `user_id` from day one" worked so well
+that the bot is *already* multi-user: no id is hardcoded, `get_or_create_user`
+mints a row for whoever messages, every query is scoped, and the jobs fan out over
+`all_users`. Anyone who finds the bot today gets a working private ledger — parsed
+on the owner's OpenRouter credits. **That is the gap this section closes: not
+authentication, but authorization.**
+
+### The household is the tenant
+
+**Decided:** A **household** owns the money; a **user** owns their entries. A solo
+user is a household of one — there is no second, "personal" mode.
+
+**Why:** the alternative is dual-mode, where a user belongs to both a personal and
+a shared ledger, and every inbound message needs a "which ledger?" answer. That
+destroys the one-tap flow §4 and §5 exist to protect. One household per user keeps
+a single code path: a message always has exactly one destination.
+
+Transactions therefore carry two axes, not one: **which household the money
+belongs to**, and **which member entered it**. §1's `user_id` column prepared the
+first axis only; the second is new, and every read gains a household scope.
+
+### Rules
+
+| Rule | Decision |
+|---|---|
+| Households per user | Exactly one |
+| Owner | The creator |
+| `/undo` | Removes **your own** last entry, never the household's |
+| Edit / delete a row | Only the member who entered it |
+| Remove a member | The owner may remove anyone; **any member may remove themselves** |
+| Owner leaving | **Must transfer ownership first** — a household always has an owner |
+| On removal | Ask **retain or delete** that member's entries, with a warning |
+| Noon nudge | Suppressed **per person**, not household-wide |
+| Evening / monthly summary | Household figures, sent to every member |
+| Private expenses | **Not on the roadmap** |
+| Billing | Attaches to the **household**; the owner pays |
+
+**Why `/undo` is personal while the ledger is shared:** undo is "fix what I just
+typed", and the command carries no per-message anchor (§14). Household-wide undo
+would let a reflexive `/undo` silently delete a partner's entry. "You own your
+entries, the household owns the money" is one sentence a user can hold in their
+head, and it settles the edit and delete rules too.
+
+**Why a member may remove themselves** even though removal is otherwise the
+owner's: owner-only removal traps a person in a ledger they cannot leave, with
+their entries still flowing into it. Tolerable in a family, untenable in a product
+someone pays for. Owner-removes-others stays owner-only; the self case is the same
+code path with the actor and the target equal.
+
+**Deletion is not `/undo`.** §6's soft delete stays exactly as it is — recoverable,
+the whole point of the ledger being trustworthy. Member deletion is a *separate,
+irreversible* operation and must never share a name with it. It carries a specific
+warning, accepted knowingly: **hard-deleting a departed member's entries makes
+past reports stop reconciling.** An evening summary that said ₹18,920 at the time
+will not match that month re-opened later. That is the honest price of real
+deletion, and the warning says so rather than only "this cannot be undone".
+
+### Authorization, not authentication
+
+**Decided:** No password, no login, no session — ever. Telegram is the identity
+provider, as §13 established. Two proofs already exist: the webhook's
+`secret_token` (§15) proves an update came from Telegram, and the Mini App's
+`initData` HMAC (§13) proves which user is asking. What was missing is a single
+check — *is this Telegram user permitted?* — before any work is done.
+
+**Three separate grants, deliberately not conflated:**
+
+| | Grants | Creates | Issued by |
+|---|---|---|---|
+| **Signup invite** | Permission to use the bot at all | A household of one | The operator |
+| **Household invite** | Membership of an existing household | Nothing | That household's owner |
+| **Coupon** | A discount on a paid plan | Nothing | Later, with billing |
+
+A household invite implies signup permission; a signup invite does not put anyone
+in a household. Codes are **single-use and labelled** (`ravi`, `priya`) so an
+operator can tell who is actually active during testing — attribution a plan
+column cannot give.
+
+Both arrive by deep link. **Verified** (`core.telegram.org/bots/features`,
+2026-08-07): a `start` payload is **up to 64 characters** from `A-Z a-z 0-9 _ -`,
+base64url recommended, and `https://t.me/<bot>?start=<code>` delivers `/start
+<code>`. A prefix plus a random token fits comfortably.
+
+**`SIGNUP_MODE` is an env var** (`invite` | `open`), alongside `OPENROUTER_MODEL`
+and `TELEGRAM_WEBHOOK_SECRET`. Going from closed beta to public signup is one
+environment change — the policy is config, the mechanism is permanent. In
+`invite` mode an unrecognised user gets a polite refusal and **nothing is
+stored**, not even a user row.
+
+**A known bug this exposes:** `handle_text` uses `msg.chat_id` as identity and
+never reads `message.from.id`. In a private chat the two coincide, so it works
+today; with households it is wrong. Identity and delivery address are different
+things and must be separated **before** the schema change, not after.
+
+### Cost control
+
+**Decided:** a per-user daily message cap, **default 50, set by env var** — never
+hardcoded. Every inbound message is one LLM call (§2), so an unbounded user is an
+unbounded bill paid by the household owner.
+
+`processed_updates` (migration 002) already records one row per handled update but
+carries only `update_id`. Adding `user_id` gives a per-user, per-IST-day count off
+a table that already exists, counting exactly the thing that costs money.
+
+### Plans
+
+**Decided:** `households.plan`, defaulting to **`'beta'`** — a column with no logic
+behind it yet.
+
+**Why `'beta'` and not `'free'`:** these testers arrived on the operator's credits
+during testing. Labelling them `free` makes them indistinguishable later from a
+free-tier user who signed up in year two, and those two deserve different
+treatment. The column costs nothing now and keeps the question answerable.
+
+**Rejected:** a free plan *instead of* invite codes. A plan describes entitlement,
+never admission — with open signup, a stranger still costs the operator money on
+the free tier. The gate and the plan are orthogonal.
+
+### Open questions — research, not opinion
+
+- **Telegram's native Payments API** — does it support recurring subscriptions for
+  an Indian seller? Worth answering before reaching for Razorpay or Stripe: the
+  same native-platform instinct that made `initData` delete login from the roadmap
+  (§13) may apply again. **UNVERIFIED** — nobody has checked.
+- **Data protection.** Holding *other people's* financial data raises obligations
+  a personal tool never had, sharpened by §14's still-unsettled point that this
+  runs on employer infrastructure. What Indian law requires here is a question to
+  answer before real users, not to assume. **UNVERIFIED.**
+
+---
+
 ## Deliberately deferred
 
 Each gets a `ponytail:` comment in the code naming its ceiling and upgrade path.
 
 | Deferred | Add when | Replace with |
 |---|---|---|
-| Multi-tenancy | A second user exists | Users table; stop hardcoding the ID. Schema and Mini App auth are already ready |
+| ~~Multi-tenancy~~ | ~~A second user exists~~ | **Trigger fired 2026-08-07 — see §16.** The schema was ready for per-user isolation; shared ledgers needed a second axis it did not anticipate |
 | Cheaper model | ~1,000 users (~₹25k/mo on Opus 5) | OpenRouter config change |
 | Telegram send throughput | ~50,000 users | Rate-limited send loop or paid broadcasts — **not** a task queue |
 | User-defined categories | Repeatedly forcing entries into `Other` | Category table per user |

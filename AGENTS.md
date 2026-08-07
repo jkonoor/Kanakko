@@ -49,6 +49,10 @@ wrong:
 - `initData` HMAC validation, including that a forged payload is rejected
 - the noon-nudge suppression rule
 
+Automated checks are only half of it. [`docs/TESTING.md`](docs/TESTING.md) is the
+manual plan — what a person verifies in Telegram on a phone, which no headless run
+can see: whether a card renders, a reminder arrives, or a note overlaps its row.
+
 A test that only restates the implementation is not worth writing. Neither is
 one that asserts a string when the risk is a behaviour — see **Guards and
 checks** in [`CLAUDE.md`](CLAUDE.md), which is where this project's rework has

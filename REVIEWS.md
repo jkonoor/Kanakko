@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `4c625d0` — warn the user when a parse fails permanently (Phase 6, task 1)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `handle_text` now catches `httpx.HTTPStatusError`. A **4xx** from
+OpenRouter (bad key/401, exhausted credits/402, rejected schema/400) is treated
+as permanent — send `PARSER_DOWN_PROMPT`, store nothing, return `None` so
+`/webhook` answers 200 and Telegram stops redelivering. A **5xx** (or
+network/timeout, which isn't an `HTTPStatusError` at all) re-raises so the
+webhook 500s and redelivery remains the recovery. Two new tests; TASKS.md box
+ticked.
+
+### What I checked
+
+- **The guard fires for real.** The whole change is worthless if `parse_message`
+  never raises `HTTPStatusError`. Confirmed `kanakko/parse.py:182` calls
+  `response.raise_for_status()` inside `call()`, and `parse_message`'s single
+  retry (`parse.py:196-199`) only catches `ValidationError` /
+  `json.JSONDecodeError`, so an `HTTPStatusError` propagates out unretried and
+  un-swallowed. The `except` in `app.py:320` can actually be reached.
+- **Boundary logic.** `if not 400 <= exc.response.status_code < 500: raise`
+  (`app.py:321`). 400–499 → warn + swallow; ≥500 → re-raise. `raise_for_status`
+  only raises on 4xx/5xx so 3xx never appears. Correct in both directions.
+- **Webhook routing.** `handle_text` returning `None` → the webhook falls
+  through to `return {"ok": True}` (200, `app.py:485`); a propagated exception
+  escapes the `with connect()` block → 500 (rolling back the `claim_update`, so
+  redelivery legitimately re-runs, `app.py:465-472`). Matches the documented
+  Handle-Confirm contract.
+- **Transient network/timeout path.** `httpx.TimeoutException`/`ConnectError`
+  are not subclasses of `HTTPStatusError`, so they aren't caught here → propagate
+  → 500. Consistent with the "5xx and network errors keep 500ing" requirement.
+- **No pre-parse writes.** Nothing is written before `parse_message`, so the 4xx
+  path genuinely stores nothing; the test asserts `pending_count == 0`.
+- **Full suite** — `uv run pytest -q` → **177 passed**. Webhook file alone → 26
+  passed.
+- **Both guards redden.** Temporarily rewrote the `except` to swallow *every*
+  `HTTPStatusError` (dropped the `raise`); `uv run pytest tests/test_webhook.py`
+  → **1 failed** (`test_handle_text_lets_a_5xx_parse_failure_propagate`:
+  "DID NOT RAISE HTTPStatusError"), the rest passed. Restored the file with
+  `git checkout`. This is the dangerous regression the task named — a
+  swallow-all that a 4xx-only test would have missed — and the 5xx test catches
+  it.
+
+### Findings
+
+None blocking.
+
+- **Minor / non-blocking (doc citation).** The commit headline and the new
+  `handle_text` docstring cite "(§6)", but `docs/DECISIONS.md` §6 is *Soft
+  delete* — the intended reference is TASKS.md **Phase 6** (Upstream failure
+  handling). The repo convention uses `§N` for DECISIONS sections, so the
+  citation is misleading to a future reader. No behavioural impact; the code
+  matches the Phase 6 task and the Handle-Confirm contract exactly.
+
+The change does what its task asked, the tests fail for the reasons they exist
+(verified by revert), and nothing on the money, timezone, soft-delete, or
+`initData` paths is touched.
+
+---
+
 ## 2026-08-06 — `1df19ba` — dashboard follows the Telegram light/dark theme (§13, task 102)
 
 **Status: ✅ DONE** — no blocking issues.

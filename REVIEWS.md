@@ -12,6 +12,113 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-07 — `08bd425` — `/start` deep-link onboarding: invites and household-of-one (Phase 9)
+
+**Status: ✅ DONE**
+
+Scope: adds the `/start` entry point — bare `/start` opens a household of one
+(open mode) or turns an unknown user toward an invite (invite mode); `/start
+<code>` consumes a signup/household invite. `consume_invite` +
+`create_household_of_one` in `db.py`, `handle_start` + payload validator in
+`handlers.py`, a pre-gate route in `app.py`, and `tests/test_start.py`. Ticked
+the onboarding task and added a housekeeping task to split `db.py`.
+
+### What I checked
+
+- **Full suite green.** `uv run pytest -q` → **247 passed, 1 warning**.
+  `tests/test_start.py` alone → **12 passed**.
+
+- **The task's own check is met and tested.** §16 requires a spent, an expired,
+  and a garbage payload to each refuse *distinctly* and store *nothing* — no
+  user row, no household, no membership. `test_spent_code_…`,
+  `test_expired_code_…`, `test_garbage_payload_…` each assert the distinct reply
+  string **and** `_footprint(...) == (0, 0, 1)` (only the seeded operator
+  household exists). Verified in the code that validity is checked *before*
+  `get_or_create_user` (`db.py:158-170`), and that a garbage payload is refused
+  by `_START_PAYLOAD_RE` *before* any DB lookup (`handlers.py:203-207`), so a
+  refusal cannot mint a partial household.
+
+- **The pre-gate route is load-bearing, not decorative.** Verified live: patched
+  the branch condition in `app.py:290` to `if False and …`, ran
+  `test_start_with_signup_code_bypasses_the_gate_in_invite_mode` → **FAILED**
+  (the invite-mode gate refuses the unknown sender with `ACCESS_REFUSED` before
+  the invite can admit them); restored with `git checkout`, re-ran → passes.
+  The guard fails for the reason it exists.
+
+- **Payload validator is correctly anchored.** `_START_PAYLOAD_RE =
+  \A[A-Za-z0-9_-]{1,64}\Z` uses `\A`/`\Z` (not `^`/`$`), so a
+  `code\nmalicious` payload cannot slip through on Python's `$`-before-trailing-
+  newline behaviour. Confirmed `_start_payload` (`handlers.py:180-182`) splits on
+  whitespace so an embedded newline lands inside the candidate and is rejected.
+  `test_payload_validator_enforces_the_64_char_charset` covers the 64/65
+  boundary, the full charset, spaces, punctuation, and empty.
+
+- **Redelivery is idempotent without `claim_update`.** The pre-gate branch
+  deliberately skips the claim (`app.py:284-293`). Verified the two idempotency
+  paths hold: `consume_invite` returns `"ok"` (not `"spent"`) when the *same*
+  Telegram user re-consumes a code they already used (`db.py:152-158`), and
+  `create_household_of_one` is a no-op for an existing member via `WHERE NOT
+  EXISTS (… household_members …)` (`db.py:127-132`).
+  `test_redelivered_start_is_idempotent` proves one membership, not two. Schema
+  backstop confirmed: `household_members.user_id` is `UNIQUE`
+  (`006_households.sql:24`).
+
+- **Transaction safety on the pre-gate path.** `connect()` returns a raw
+  `psycopg.Connection` (`db.py:67-72`) used as `with connect() as conn:`, which
+  commits on clean exit and **rolls back on exception** — so a `handle_start`
+  that raised mid-way (household inserted, membership not) would roll back both,
+  and the §14 500-and-redeliver contract still holds. No partial household on the
+  error path.
+
+- **Schema/column agreement.** `create_household_of_one` inserts
+  `households(owner)` and `household_members(household_id, user_id)`;
+  `consume_invite` reads `invites(invite_id, kind, household_id, used_by,
+  expires_at)`. All match `006_households.sql` and `004_invites.sql`. Expiry is
+  compared as an instant (`expires_at < now()`), no day-boundary bucketing, so no
+  `Asia/Kolkata` concern here.
+
+- **No money / view / category surface.** This commit touches none of the
+  `Decimal`/`NUMERIC`, `active_transactions`, or `categories.py` paths — nothing
+  to violate there.
+
+### Findings
+
+**1 — LOW / latent (non-blocking): a household invite consumed by a user who is
+already in a household is silently burned without joining.**
+`kanakko/db.py:171-179` (`consume_invite`, the `kind == "household"` branch). The
+membership insert is `ON CONFLICT (user_id) DO NOTHING`, and the invite is
+stamped `used_by` regardless of whether that insert actually added a row.
+
+Failure scenario, reproduced live (throwaway `consume_invite` call against the
+test DB): a user already homed in household A consumes a *household* invite to
+household B → `outcome='ok'` (user is sent `WELCOME`), `home_household` stays A,
+`invite.used_by` is set to them. The single-use invite is now spent forever, the
+user was told "Welcome", but they never joined B. This is exactly the
+"solo user joins a family" story §16 names as the purpose of a household invite,
+and it fails silently in both directions (false success + burned code).
+
+Why non-blocking: not reachable through any current product surface — `/invite`
+(issuing household invites) is still an unchecked task, so no household invite
+can be minted yet except by direct seeding. And §16 fixes "exactly one household
+per user" with no leave/transfer flow built, so the *correct* behaviour here
+(refuse? require leaving A first?) is genuinely undefined until member management
+lands. The task's stated check ("none creates a partial household", distinct
+refusals, new-user valid paths) is fully met. Flagging so the `/invite` +
+member-management iteration handles the already-a-member case rather than
+trusting `consume_invite` to have covered it — the `ON CONFLICT DO NOTHING`
+correctly avoids a crash but should not report `"ok"` or consume the code when no
+join happened.
+
+### Minor notes (not blocking, no action required)
+
+- `handlers.py` is now **442 lines** and `app.py` **349** — both over CLAUDE.md's
+  300-line guideline, but pre-existing (363 / 336 before this commit) and this
+  task legitimately adds a handler. `db.py` is **722**; the commit correctly adds
+  a housekeeping task to split it into a `db/` package, matching CLAUDE.md's
+  Phase-9 trigger.
+
+---
+
 ## 2026-08-07 — `a418688` — prove per-member mutation scope within a shared household (Phase 9)
 
 **Status: ✅ DONE**

@@ -4,8 +4,14 @@
 transactions` bypasses it and resurrects deleted rows inside totals — silently,
 because a wrong total errors nowhere. This guard scans the production modules
 for such a read so a future query can't reintroduce the bypass. Writes to the
-base table (`INSERT INTO transactions`, `UPDATE transactions SET deleted_at`)
-are correct and don't match — a view can't own the soft-delete write.
+base table (`INSERT INTO transactions`, `UPDATE transactions SET deleted_at`,
+and the `DELETE FROM transactions` of §16 member-entry hard deletion) are
+correct and don't count as reads — a view can't own the soft-delete write, and
+a `DELETE` never feeds a report total, which is the only thing this guard
+protects. `INSERT`/`UPDATE` slip past for free (no `from`); a `DELETE` must be
+excluded explicitly because it *does* say `FROM transactions` — including the
+subquery that enumerates the rows to purge, which deliberately reads the base
+table so soft-deleted rows are purged too.
 """
 
 import ast
@@ -63,7 +69,11 @@ def test_no_production_read_bypasses_active_transactions():
     offenders = []
     for module in sorted(KANAKKO.rglob("*.py")):
         for value, lineno in sql_literals(module.read_text()):
-            if BYPASS.search(value):
+            # A DELETE statement is a write, not a report read — the one thing this
+            # guard protects (a soft-deleted row leaking into a total) can't happen
+            # via DELETE. It says `FROM transactions` where INSERT/UPDATE don't, so
+            # it needs an explicit skip (§16 member-entry hard deletion).
+            if BYPASS.search(value) and not value.lstrip().upper().startswith("DELETE"):
                 offenders.append(f"{module.name}:{lineno}")
     assert not offenders, (
         "reads must go through active_transactions, not transactions: "

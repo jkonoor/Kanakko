@@ -25,6 +25,7 @@ from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
+    REMOVE_PREFIX,
     TextMessage,
     _is_household,
     _is_invite,
@@ -38,6 +39,7 @@ from kanakko.handlers import (
     handle_household,
     handle_invite,
     handle_remove,
+    handle_remove_choice,
     handle_start,
     handle_text,
     handle_undo,
@@ -357,6 +359,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                 handle_cancel(conn, action)
             elif action.data.startswith(CATEGORY_PREFIX):
                 handle_category(conn, action)
+            elif action.data.startswith(REMOVE_PREFIX):
+                handle_remove_choice(conn, action)
         except Exception:
             log_event("update.handled", status="error", update_id=update_id,
                       source="webhook", duration_ms=ms_since(start))

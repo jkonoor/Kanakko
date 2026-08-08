@@ -19,7 +19,7 @@ from kanakko.app import WEBHOOK_SECRET_HEADER, app
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import get_or_create_user, save_pending
-from kanakko.handlers import ButtonPress, TextMessage, dispatch
+from kanakko.handlers import REMOVE_PREFIX, ButtonPress, TextMessage, dispatch
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 
@@ -706,8 +706,15 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     assert len(confirmed) == 1 and len(cancelled) == 1  # not to Confirm/Cancel
     assert len(opened) == 3  # and opened its own connection
 
+    chose = []
+    monkeypatch.setattr(app_module, "handle_remove_choice", lambda conn, press: chose.append(press))
+    client.post("/webhook", json=press(f"{REMOVE_PREFIX}delete:7"), headers=AUTH)
+    assert len(chose) == 1  # an rm: tap routes to the removal-choice handler
+    assert len(categorised) == 1 and len(confirmed) == 1  # not to category/Confirm
+    assert len(opened) == 4
+
     client.post("/webhook", json={"channel_post": {"text": "x"}}, headers=AUTH)
-    assert len(opened) == 3  # an ignored update opens nothing
+    assert len(opened) == 4  # an ignored update opens nothing
     assert texted == []
 
 

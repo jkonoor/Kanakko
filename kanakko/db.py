@@ -257,28 +257,12 @@ def household_roster(
         return [(uid, is_owner, label) for uid, is_owner, label in cur.fetchall()]
 
 
-def remove_member(
+def _authorize_removal(
     conn: psycopg.Connection, actor_user_id: int, target_user_id: int
-) -> str:
-    """Remove `target_user_id` from `actor_user_id`'s household (§16).
-
-    One code path for both cases §16 permits — the owner removing any member, and
-    a member removing themselves (the self case is `actor == target`). All
-    authorization lives here, not at the call site, so neither route can bypass it:
-
-    - a non-owner removing anyone but themselves is refused (`"not_owner"`);
-    - removing the owner is refused (`"owner_must_transfer"`) — a household always
-      has an owner (§16), so an owner must transfer ownership (a later task) before
-      leaving. This also covers a solo user trying to leave their household of one.
-
-    The removed member is re-homed into a fresh household of one, so their bot keeps
-    working rather than 500ing on the next confirm (`transactions.household_id` is
-    NOT NULL, migration 008). Their past entries are *retained* in the household
-    they left — those rows carry that household's id and this touches no
-    `transactions` row. Hard-deleting them is a separate, irreversible operation
-    (§16, next task). Does not commit — the caller owns the transaction. Returns
-    `"removed"`, `"not_owner"`, `"owner_must_transfer"`, or `"not_member"` (the
-    target is not in the actor's household).
+) -> tuple[str, int | None]:
+    """Authorize a removal without acting — the one place the §16 rule lives, shared
+    by `check_removal` and `remove_member`. Returns the verdict slug and, when it is
+    `"ok"`, the household the removal is scoped to.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -290,7 +274,7 @@ def remove_member(
         )
         row = cur.fetchone()
         if row is None:
-            return "not_member"
+            return "not_member", None
         household_id, owner = row
         cur.execute(
             "SELECT 1 FROM household_members"
@@ -298,15 +282,80 @@ def remove_member(
             (household_id, target_user_id),
         )
         if cur.fetchone() is None:
-            return "not_member"
+            return "not_member", None
         if actor_user_id != owner and actor_user_id != target_user_id:
-            return "not_owner"
+            return "not_owner", None
         if target_user_id == owner:
-            return "owner_must_transfer"
+            return "owner_must_transfer", None
+    return "ok", household_id
+
+
+def check_removal(
+    conn: psycopg.Connection, actor_user_id: int, target_user_id: int
+) -> str:
+    """Would removing `target` from `actor`'s household be permitted? (§16)
+
+    The same authorization as `remove_member`, without acting, so `handle_remove`
+    can present the retain/delete warning *only* when the removal will go through —
+    and `remove_member` re-runs it when the button is tapped, since a callback is
+    untrusted. Returns `"ok"`, `"not_owner"`, `"owner_must_transfer"`, or
+    `"not_member"`.
+    """
+    return _authorize_removal(conn, actor_user_id, target_user_id)[0]
+
+
+def remove_member(
+    conn: psycopg.Connection,
+    actor_user_id: int,
+    target_user_id: int,
+    *,
+    delete_entries: bool = False,
+) -> str:
+    """Remove `target_user_id` from `actor_user_id`'s household (§16).
+
+    One code path for both cases §16 permits — the owner removing any member, and
+    a member removing themselves (the self case is `actor == target`). All
+    authorization lives in `_authorize_removal`, not at the call site, so neither
+    route nor a forged retain/delete button can bypass it:
+
+    - a non-owner removing anyone but themselves is refused (`"not_owner"`);
+    - removing the owner is refused (`"owner_must_transfer"`) — a household always
+      has an owner (§16), so an owner must transfer ownership (a later task) before
+      leaving. This also covers a solo user trying to leave their household of one.
+
+    The removed member is re-homed into a fresh household of one, so their bot keeps
+    working rather than 500ing on the next confirm (`transactions.household_id` is
+    NOT NULL, migration 008).
+
+    `delete_entries` decides the fate of the entries they logged into the household
+    they leave — §16 asks retain-or-delete of them, with a warning, at the call
+    site. Retain (the default) touches no `transactions` row: those rows carry that
+    household's id and stay. Delete is real and irreversible — a hard `DELETE`,
+    **not** §6's recoverable soft delete — and takes their audit rows with them (the
+    `transaction_events` FK forbids orphaning them, and a deleted row has nothing
+    left to audit). That is the "past reports stop reconciling" price §16 warns
+    about, accepted knowingly. Does not commit — the caller owns the transaction.
+    Returns `"removed"`, `"not_owner"`, `"owner_must_transfer"`, or `"not_member"`.
+    """
+    verdict, household_id = _authorize_removal(conn, actor_user_id, target_user_id)
+    if verdict != "ok":
+        return verdict
+    with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM household_members WHERE household_id = %s AND user_id = %s",
             (household_id, target_user_id),
         )
+        if delete_entries:
+            cur.execute(
+                "DELETE FROM transaction_events WHERE txn_id IN"
+                " (SELECT txn_id FROM transactions"
+                "  WHERE user_id = %s AND household_id = %s)",
+                (target_user_id, household_id),
+            )
+            cur.execute(
+                "DELETE FROM transactions WHERE user_id = %s AND household_id = %s",
+                (target_user_id, household_id),
+            )
     create_household_of_one(conn, target_user_id)
     return "removed"
 

@@ -477,12 +477,21 @@ means transactions with no home. Each task leaves the tree green and deployable.
       scoped `household_roster`'s label join to `i.household_id = m.household_id`
       (the `bc3b0e4` review's low finding), now reachable since a user can carry a
       used household invite from each household they've been in. `tests/test_member_removal.py`.
-- [ ] Removal asks **retain or delete** that member's entries, and deletion is
+- [x] Removal asks **retain or delete** that member's entries, and deletion is
       real (§16). This is *not* §6's soft delete and must not share its name. The
       warning must say the specific consequence: hard deletion makes past reports
       stop reconciling — a month that summarised ₹18,920 will not match when
       re-opened. Checks: retain leaves totals unchanged; delete removes the rows
       and *changes* the household total, which is the point being warned about.
+      Done: `/remove` now *asks* first — `handle_remove` shows the §16 warning with
+      Keep/Delete buttons (`rm:retain:<id>` / `rm:delete:<id>`) only once
+      `check_removal` says the removal is authorized; `handle_remove_choice` acts on
+      the tap, re-running authorization in `remove_member` (the button is
+      untrusted). `remove_member(..., delete_entries=True)` is a real
+      `DELETE FROM transactions` (not §6's soft delete) that also purges the rows'
+      `transaction_events` audit rows (the FK forbids orphaning them). The
+      read-path guard now excludes `DELETE FROM transactions` — a write, never a
+      report read.
 - [ ] Require ownership transfer before an owner can leave (§16) — a household
       always has an owner. The check: an owner's self-removal is refused while
       they still own it, and succeeds after transfer.

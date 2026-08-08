@@ -9,7 +9,9 @@ pass once and then fail on every later run.
 
 from decimal import Decimal
 
+import psycopg
 import pytest
+from conftest import household_of
 
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.migrate import MIGRATIONS, migrate
@@ -58,10 +60,11 @@ def test_schema_stores_money_exactly(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO users (telegram_user_id) VALUES (1) RETURNING user_id")
         (user_id,) = cur.fetchone()
+        hid = household_of(conn, user_id)  # household_id is NOT NULL (migration 008)
         cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, occurred_on)"
-            " VALUES (%s, %s, 'expense', '2026-08-05') RETURNING txn_id",
-            (user_id, Decimal("1234.56")),
+            "INSERT INTO transactions (user_id, household_id, amount, type, occurred_on)"
+            " VALUES (%s, %s, %s, 'expense', '2026-08-05') RETURNING txn_id",
+            (user_id, hid, Decimal("1234.56")),
         )
         (txn_id,) = cur.fetchone()
 
@@ -71,6 +74,203 @@ def test_schema_stores_money_exactly(conn):
         cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (txn_id,))
         cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
         assert cur.fetchone() == (0,)
+    conn.rollback()
+
+
+def test_invite_kind_and_household_must_agree(conn):
+    """The §16 invariant is structural, not a hope: a household invite carries a
+    household, a signup invite carries none.
+
+    Without the CHECK a mislabelled row grants the wrong thing at the gate — a
+    signup code that quietly drops someone into a household, or a household code
+    that joins nobody. The constraint only holds if the server enforces it, so
+    this exercises the applied schema, both violating rows and both valid ones.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        # A real household to reference — migration 006 added the FK on
+        # invites.household_id, so a made-up id would now trip the FK, not the CHECK.
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (uid,))
+        (hh,) = cur.fetchone()
+
+        # Valid: signup with no household, household with a household.
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by)"
+            " VALUES ('sig-1', 'signup', NULL, 'ravi', %s)",
+            (uid,),
+        )
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by)"
+            " VALUES ('hh-1', 'household', %s, 'priya', %s)",
+            (hh, uid),
+        )
+
+        # Violations: signup with a (real) household, household with none — so the
+        # CHECK is what fires, not the FK.
+        for code, kind, hid in [("sig-2", "signup", hh), ("hh-2", "household", None)]:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cur.execute(
+                    "INSERT INTO invites (code, kind, household_id, label, created_by)"
+                    " VALUES (%s, %s, %s, 'x', %s)",
+                    (code, kind, hid, uid),
+                )
+            conn.rollback()
+    conn.rollback()
+
+
+def test_household_backfill_migrates_seeded_users(conn):
+    """Every pre-existing user ends up in exactly one household, owning it (§16).
+
+    The backfill (migration 006) is exercised against a *seeded* multi-user
+    database, not an empty one: three users are inserted first, then the backfill
+    statement — the real SQL, read from the file, not a paraphrase — runs over
+    them. A backfill that missed a user, double-homed one, or made someone else
+    the owner would redden the exactly-one-self-owned assertion. Re-running it
+    then proves idempotency: the WHERE NOT EXISTS guard plus the UNIQUE on
+    household_members.user_id make the second pass a no-op, so a retried migration
+    completes rather than duplicating households.
+    """
+    migrate(conn)
+    text = (MIGRATIONS / "006_households.sql").read_text()
+    backfill = "WITH new_households" + text.split("WITH new_households", 1)[1]
+    with conn.cursor() as cur:
+        seeded = []
+        for tg in (9010, 9020, 9030):
+            cur.execute("INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id", (tg,))
+            (uid,) = cur.fetchone()
+            seeded.append(uid)
+
+        cur.execute(backfill)
+
+        for uid in seeded:
+            cur.execute(
+                "SELECT h.owner FROM households h"
+                " JOIN household_members m USING (household_id)"
+                " WHERE m.user_id = %s",
+                (uid,),
+            )
+            assert cur.fetchall() == [(uid,)], f"user {uid} not in exactly one self-owned household"
+        cur.execute("SELECT count(*) FROM households WHERE owner = ANY(%s)", (seeded,))
+        assert cur.fetchone() == (len(seeded),)
+
+        # Idempotent: a second backfill creates nothing for the already-homed users.
+        cur.execute(backfill)
+        cur.execute("SELECT count(*) FROM households WHERE owner = ANY(%s)", (seeded,))
+        assert cur.fetchone() == (len(seeded),)
+        cur.execute("SELECT count(*) FROM household_members WHERE user_id = ANY(%s)", (seeded,))
+        assert cur.fetchone() == (len(seeded),)
+    conn.rollback()
+
+
+def test_transactions_household_backfill_preserves_totals(conn):
+    """Moving the tenancy axis must not move a single rupee (§16).
+
+    The dangerous migration: transactions gains household_id, backfilled from the
+    household-of-one mapping. Exercised against a *seeded* multi-user ledger in
+    the real deploy state — users and their transactions exist, migration 006's
+    real backfill homes each user in a household of one, then 007's real backfill
+    (read from the file, not paraphrased) stamps every transaction with its
+    entering user's household. The proof the task demands: every pre-existing
+    transaction lands in exactly one household's total, and each household's
+    active total equals what its sole member spent before the column existed. A
+    backfill that orphaned a row (NULL household), cross-homed one, or dropped or
+    duplicated an amount reddens an assertion below — verified by breaking the
+    UPDATE, not by reading it. A soft-deleted row is included: it must still gain
+    a household (the column is on every row) yet stay out of the active total.
+    """
+    migrate(conn)
+    hh006 = (MIGRATIONS / "006_households.sql").read_text()
+    home_users = "WITH new_households" + hh006.split("WITH new_households", 1)[1]
+    txn007 = (MIGRATIONS / "007_transactions_household.sql").read_text()
+    home_txns = "UPDATE transactions t" + txn007.split("UPDATE transactions t", 1)[1].split(";", 1)[0]
+
+    with conn.cursor() as cur:
+        # Simulate the pre-007 world: transactions that predate the household axis
+        # carry no household_id. Migration 008 (applied by migrate() above) forbids
+        # that, so drop the NOT NULL for the length of this transaction — 007's
+        # backfill (home_txns below) fills it, and the rollback at the end restores
+        # the committed schema, keeping the module-scoped connection clean.
+        cur.execute("ALTER TABLE transactions ALTER COLUMN household_id DROP NOT NULL")
+        # Amounts chosen so a float sum would drift (10.10+20.20, 0.05+1.00).
+        seeded = {}  # user_id -> Decimal active total
+        for tg, amounts in [(9210, ["10.10", "20.20"]), (9220, ["0.05", "1.00"]), (9230, ["999.99"])]:
+            cur.execute("INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id", (tg,))
+            (uid,) = cur.fetchone()
+            for a in amounts:
+                cur.execute(
+                    "INSERT INTO transactions (user_id, amount, type, occurred_on)"
+                    " VALUES (%s, %s, 'expense', '2026-08-05')",
+                    (uid, parse_amount(a)),
+                )
+            seeded[uid] = sum((parse_amount(a) for a in amounts), Decimal("0"))
+
+        # A soft-deleted row on the first user: must be homed, yet stay out of totals.
+        first = next(iter(seeded))
+        cur.execute(
+            "INSERT INTO transactions (user_id, amount, type, occurred_on, deleted_at)"
+            " VALUES (%s, %s, 'expense', '2026-08-05', now()) RETURNING txn_id",
+            (first, parse_amount("500.00")),
+        )
+        (deleted_txn,) = cur.fetchone()
+
+        cur.execute(home_users)  # migration 006: home the seeded users
+        cur.execute(home_txns)   # migration 007: home their transactions
+        seeded_ids = list(seeded)
+
+        # No orphans: every transaction, deleted or not, now carries a household.
+        cur.execute(
+            "SELECT count(*) FROM transactions WHERE user_id = ANY(%s) AND household_id IS NULL",
+            (seeded_ids,),
+        )
+        assert cur.fetchone() == (0,)
+
+        # Each transaction is homed to its entering user's one household, never another's.
+        cur.execute(
+            "SELECT count(*) FROM transactions t JOIN household_members m ON m.user_id = t.user_id"
+            " WHERE t.user_id = ANY(%s) AND t.household_id <> m.household_id",
+            (seeded_ids,),
+        )
+        assert cur.fetchone() == (0,), "a transaction was homed to the wrong household"
+
+        # The deleted row is homed but absent from the active view.
+        cur.execute("SELECT household_id FROM transactions WHERE txn_id = %s", (deleted_txn,))
+        assert cur.fetchone()[0] is not None
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (deleted_txn,))
+        assert cur.fetchone() == (0,)
+
+        # Every household's active total equals its sole member's pre-migration spend,
+        # summed through active_transactions — which must now expose household_id.
+        cur.execute(
+            "SELECT m.user_id, SUM(a.amount) FROM active_transactions a"
+            " JOIN household_members m ON m.household_id = a.household_id"
+            " WHERE m.user_id = ANY(%s) GROUP BY m.user_id",
+            (seeded_ids,),
+        )
+        assert dict(cur.fetchall()) == seeded
+    conn.rollback()
+
+
+def test_transactions_household_id_is_not_null(conn):
+    """Money must belong to a household — a NULL household_id insert is refused (§16).
+
+    007 added the column nullable so the backfill could run; 008 makes it NOT NULL
+    once the write path stamps every new row (confirm_pending). Without 008 an
+    insert omitting the household silently orphans money from every household total
+    rather than erroring — the exact silent-money bug §16 forbids. This exercises
+    the applied schema: dropping `SET NOT NULL` from migration 008 reddens it.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (123) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        with pytest.raises(psycopg.errors.NotNullViolation):
+            cur.execute(
+                "INSERT INTO transactions (user_id, amount, type, occurred_on)"
+                " VALUES (%s, %s, 'expense', '2026-08-05')",
+                (uid, Decimal("1.00")),
+            )
     conn.rollback()
 
 
@@ -98,17 +298,18 @@ def test_parse_store_sum_by_category_stays_exact(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO users (telegram_user_id) VALUES (2) RETURNING user_id")
         (user_id,) = cur.fetchone()
+        hid = household_of(conn, user_id)  # household_id is NOT NULL (migration 008)
         for category, raw in entries:
             cur.execute(
-                "INSERT INTO transactions (user_id, amount, type, category, occurred_on)"
-                " VALUES (%s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
-                (user_id, parse_amount(raw), category),
+                "INSERT INTO transactions (user_id, household_id, amount, type, category, occurred_on)"
+                " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
+                (user_id, hid, parse_amount(raw), category),
             )
         # A soft-deleted Food row must not reach the Food total.
         cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, occurred_on)"
-            " VALUES (%s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
-            (user_id, parse_amount("999.99"), food),
+            "INSERT INTO transactions (user_id, household_id, amount, type, category, occurred_on)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05') RETURNING txn_id",
+            (user_id, hid, parse_amount("999.99"), food),
         )
         (deleted_txn,) = cur.fetchone()
         cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (deleted_txn,))

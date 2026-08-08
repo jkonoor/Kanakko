@@ -23,6 +23,20 @@ x-app-env: &app-env
   OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?see .env.example}"
   # Optional: §2 defaults to claude-opus-5 when unset, so `:-` not `:?`.
   OPENROUTER_MODEL: "${OPENROUTER_MODEL:-}"
+  # Signup policy (§16): `invite` (closed) or `open`. Default here is `invite`,
+  # but the code fails closed regardless, so a typo like `Open` also stays shut.
+  SIGNUP_MODE: "${SIGNUP_MODE:-invite}"
+  # Per-user daily message cap (§16, cost control). Default here is 50; code
+  # falls back to 50 too for an unset or non-integer value, so `:-` empty is safe.
+  DAILY_MESSAGE_CAP: "${DAILY_MESSAGE_CAP:-50}"
+  # Logging, audit trail, trace mode (§17). LOG_DIR unset disables both sinks
+  # (that keeps pytest from writing into the repo), so the default is set *here*,
+  # not in code — otherwise a prod deploy that forgot it logs nothing. It is the
+  # mount point of the shared volume the [human] task adds to web and cron. The
+  # code reads all three with `or`, so `:-` leaving them present-but-empty is safe.
+  LOG_DIR: "${LOG_DIR:-/app/logs}"
+  TRACE_MODE: "${TRACE_MODE:-on}"
+  TRACE_KEEP: "${TRACE_KEEP:-}"
 
 services:
   db:

@@ -13,6 +13,44 @@ import psycopg
 import pytest
 
 
+def household_of(conn, user_id: int) -> int:
+    """The user's household id, creating a household-of-one on first call (test-only).
+
+    Production households are created by onboarding (§16); a test that seeds a user
+    straight into the DB skips that path, so this stands in. `transactions.household_id`
+    is NOT NULL (migration 008), so any test inserting a transaction for a seeded
+    user needs one of these. Idempotent — the UNIQUE on `household_members.user_id`
+    makes a repeat call a plain lookup, so insert helpers may call it per row.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT household_id FROM household_members WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (user_id,))
+        (hid,) = cur.fetchone()
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (hid, user_id),
+        )
+        return hid
+
+
+def join_household(conn, household_id: int, user_id: int) -> None:
+    """Add an existing user to an existing household (test-only, §16).
+
+    `household_of` makes a household of one; this puts a second member in the same
+    one, which the jobs' household-scoping checks need but onboarding would build
+    via an invite. The UNIQUE on `household_members.user_id` makes a double-add a
+    hard error, which is the intended one-household-per-user rule.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (household_id, user_id),
+        )
+
+
 def pg_bin(name: str) -> str | None:
     """Debian keeps the server binaries off PATH, under /usr/lib/postgresql."""
     found = glob(f"/usr/lib/postgresql/*/bin/{name}") + glob("/usr/local/pgsql/bin/" + name)

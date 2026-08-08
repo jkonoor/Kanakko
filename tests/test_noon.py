@@ -12,6 +12,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from conftest import household_of, join_household
+
+from kanakko import eventlog
 from kanakko.db import get_or_create_user, logged_since
 from kanakko.jobs import noon
 from kanakko.jobs.noon import previous_evening_ist, run
@@ -25,9 +28,9 @@ def _insert(conn, user_id, created_at, deleted=False):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on, created_at, deleted_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (user_id, Decimal("10.00"), "expense", None, None, date(2026, 8, 6), created_at, deleted_at),
+            " (user_id, household_id, amount, type, category, note, occurred_on, created_at, deleted_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (user_id, household_of(conn, user_id), Decimal("10.00"), "expense", None, None, date(2026, 8, 6), created_at, deleted_at),
         )
 
 
@@ -109,10 +112,22 @@ def test_run_nudges_only_idle_users(conn, monkeypatch):
     sent_to = []
     monkeypatch.setattr(noon, "send_message", lambda tg_id, text: sent_to.append(tg_id))
 
-    sent = run(conn)
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        sent = run(conn)
+    finally:
+        eventlog.unbind_sink()
 
     assert sent == 2
     assert set(sent_to) == {900901, 900902}  # the two idle users, not the active one
+
+    # §17: the suppressed (active) user is a deliberate skip, not a failure — it
+    # counts as `skipped`, never `failed`. One `ok` event carries the run's shape.
+    assert len(events) == 1
+    assert events[0]["event"] == "job.noon"
+    assert events[0]["status"] == "ok"
+    assert (events[0]["considered"], events[0]["delivered"], events[0]["skipped"], events[0]["failed"]) == (3, 2, 1, 0)
     conn.rollback()
 
 
@@ -140,6 +155,33 @@ def test_run_reads_last_evening_from_reminder_log(conn, monkeypatch):
 
     assert sent == 0
     assert sent_to == []  # suppressed: active since the real last summary
+    conn.rollback()
+
+
+def test_noon_suppression_is_per_person_not_household_wide(conn, monkeypatch):
+    """A housemate's activity must not suppress an idle member's nudge (§12, §16).
+
+    Two members share one household. `active` logs a transaction after the
+    boundary; `idle` logs nothing. §16 makes suppression *per person*, so `idle`
+    must still be nudged even though a housemate was active. This is the one rule a
+    household-wide `logged_since` (scoping only on `household_id`, dropping the
+    `user_id` predicate) silently breaks: it would see the household's activity and
+    suppress `idle` too. The check reddens if that regression lands.
+    """
+    migrate(conn)
+    boundary = previous_evening_ist()
+
+    active = get_or_create_user(conn, 930930)
+    idle = get_or_create_user(conn, 930931)
+    join_household(conn, household_of(conn, active), idle)  # same household
+    _insert(conn, active, boundary + timedelta(minutes=1))  # housemate is active
+
+    sent_to = []
+    monkeypatch.setattr(noon, "send_message", lambda tg_id, text: sent_to.append(tg_id))
+    sent = run(conn)
+
+    assert sent == 1
+    assert sent_to == [930931]  # idle member nudged; active housemate suppressed
     conn.rollback()
 
 

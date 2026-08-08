@@ -13,9 +13,11 @@ from decimal import Decimal
 from urllib.parse import urlencode
 
 import pytest
+from conftest import household_of
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
+from kanakko import eventlog
 from kanakko.app import app
 from kanakko.migrate import migrate
 from kanakko.webapp import (
@@ -338,14 +340,17 @@ def test_current_week_ist_buckets_in_kolkata():
     assert start != utc_date - timedelta(days=utc_date.weekday())
 
 
-def _insert_txn(conn, user_id, amount, type_, category, occurred_on):
+def _insert_txn(conn, user_id, amount, type_, category, occurred_on, note=""):
+    """Insert a transaction homed in the user's household (§16), returning its id."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s)",
-            (user_id, Decimal(amount), type_, category, "", occurred_on),
+            " (user_id, household_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (user_id, household_of(conn, user_id), Decimal(amount), type_, category, note, occurred_on),
         )
+        (txn_id,) = cur.fetchone()
+    return txn_id
 
 
 class _Reuse:
@@ -539,13 +544,7 @@ def test_delete_route_soft_deletes_the_users_row(conn, monkeypatch):
 
     uid = get_or_create_user(conn, 42)
     _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("300.00"), "expense", "Transport", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "300.00", "expense", "Transport", date(2026, 8, 6))
 
     resp = client.post(
         "/app/delete",
@@ -568,14 +567,9 @@ def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
+    get_or_create_user(conn, 42)  # the caller must be admitted; the fix 403s an unknown one
     other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/delete",
@@ -586,6 +580,44 @@ def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
         assert cur.fetchone()[0] == 1  # still live — the other user's row untouched
+    conn.rollback()
+
+
+def test_delete_route_logs_the_money_mutation(conn, monkeypatch):
+    """The dashboard delete emits one §17 `transaction.deleted` line carrying the
+    amount, `source="miniapp"` and no `update_id` (an HTTP route is not a Telegram
+    update, gap 2); a 404 (another user's row) is `status="noop"` with no amount —
+    the reason `noop` exists. Both directions asserted: a scrubber-passes-everything
+    line and an over-eager `ok` would each be caught."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    other = get_or_create_user(conn, 99)
+    mine = _insert_txn(conn, uid, "300.00", "expense", "Transport", date(2026, 8, 6))
+    theirs = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        ok = client.post("/app/delete", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": mine})
+        miss = client.post("/app/delete", headers={"Authorization": "tma " + _fresh_init_data()},
+                           json={"id": theirs})
+    finally:
+        eventlog.unbind_sink()
+
+    assert (ok.status_code, miss.status_code) == (204, 404)
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("transaction.deleted", "ok"),
+        ("transaction.deleted", "noop"),
+    ]
+    assert events[0]["source"] == "miniapp" and "update_id" not in events[0]
+    assert events[0]["txn_id"] == mine and events[0]["amount"] == Decimal("300.00")
+    assert "amount" not in events[1]  # a noop touched no row
     conn.rollback()
 
 
@@ -619,13 +651,7 @@ def test_category_route_changes_the_users_row(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     uid = get_or_create_user(conn, 42)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/category",
@@ -639,6 +665,42 @@ def test_category_route_changes_the_users_row(conn, monkeypatch):
     conn.rollback()
 
 
+def test_category_route_logs_the_money_mutation(conn, monkeypatch):
+    """The dashboard recategorise emits one §17 `transaction.recategorised` line —
+    `source="miniapp"`, no `update_id`, and the amount on the `ok` path; a 404
+    (another user's row) is `noop` with no amount."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    other = get_or_create_user(conn, 99)
+    mine = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
+    theirs = _insert_txn(conn, other, "70.00", "expense", "Food", date(2026, 8, 6))
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        ok = client.post("/app/category", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": mine, "category": "Transport"})
+        miss = client.post("/app/category", headers={"Authorization": "tma " + _fresh_init_data()},
+                           json={"id": theirs, "category": "Transport"})
+    finally:
+        eventlog.unbind_sink()
+
+    assert (ok.status_code, miss.status_code) == (204, 404)
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("transaction.recategorised", "ok"),
+        ("transaction.recategorised", "noop"),
+    ]
+    assert events[0]["source"] == "miniapp" and "update_id" not in events[0]
+    assert events[0]["txn_id"] == mine and events[0]["amount"] == Decimal("500.00")
+    assert "amount" not in events[1]
+    conn.rollback()
+
+
 def test_category_route_rejects_an_unknown_category(conn, monkeypatch):
     """A category outside the closed set (`categories.py`, §11) is a 400 and writes
     nothing — a forged body can't put a junk label on the ledger."""
@@ -649,13 +711,7 @@ def test_category_route_rejects_an_unknown_category(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     uid = get_or_create_user(conn, 42)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/category",
@@ -678,14 +734,9 @@ def test_category_route_cannot_change_another_users_row(conn, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
+    get_or_create_user(conn, 42)  # the caller must be admitted; the fix 403s an unknown one
     other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (other, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
     resp = client.post(
         "/app/category",
@@ -709,13 +760,7 @@ def test_category_route_rejects_a_stale_init_data(conn, monkeypatch):
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
     uid = get_or_create_user(conn, 42)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO transactions (user_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (uid, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6)),
-        )
-        (txn_id,) = cur.fetchone()
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
 
     stale = _sign({"auth_date": "1700000000", "user": '{"id":42}'})  # 2023
     resp = client.post(
@@ -801,3 +846,68 @@ def test_shell_reloads_when_the_mini_app_is_reopened():
     # and the handler must actually reload, not merely be registered
     listener = SHELL_HTML.split(call, 1)[1].split("\n", 1)[0]
     assert "load()" in listener
+
+
+def test_mini_app_refuses_a_user_who_was_never_admitted(conn, monkeypatch):
+    """A valid `initData` from an unadmitted user gets 403 and mints no row (§16).
+
+    `authenticated_user` proves *which* Telegram user is asking, never that they
+    are permitted. The routes used to call `get_or_create_user`, so anyone who
+    found the bot and tapped the menu button minted a `users` row — and that row
+    then satisfied the bot's own gate, which asks `user_exists`. The Mini App was
+    a way around the invite gate.
+
+    Both halves are asserted because either alone passes on a broken fix: a 403
+    that still created the row would leave the bypass in place, and no-row with a
+    200 would leak an empty dashboard. The `users` count is taken before and after
+    so the assertion is about *this* request, not the table being empty.
+    """
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("SIGNUP_MODE", "invite")
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
+        (before,) = cur.fetchone()
+    assert before == 0, "FIELDS' user 42 must be unknown for this to prove anything"
+
+    init_data = _sign(FIELDS)  # FIELDS carries user id 42 — never admitted
+    resp = client.get("/app/data", headers={"Authorization": "tma " + init_data})
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
+        (after,) = cur.fetchone()
+    conn.rollback()
+
+    assert resp.status_code == 403
+    assert after == 0, "the Mini App must not mint a user row for an unadmitted caller"
+
+
+def test_mini_app_mutations_refuse_an_unadmitted_user(conn, monkeypatch):
+    """The two mutating routes reject an unadmitted caller too (§16).
+
+    The read route is the one that minted the row, but a fix applied only there
+    would leave `/app/delete` and `/app/category` creating users. They pass a
+    24h `max_age`, so the payload is signed fresh.
+    """
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    fresh = dict(FIELDS, auth_date=str(int(datetime.now(timezone.utc).timestamp())))
+    init_data = _sign(fresh)
+    headers = {"Authorization": "tma " + init_data}
+
+    delete = client.post("/app/delete", json={"id": 1}, headers=headers)
+    category = client.post("/app/category", json={"id": 1, "category": "Food"},
+                           headers=headers)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
+        (after,) = cur.fetchone()
+    conn.rollback()
+
+    assert delete.status_code == 403
+    assert category.status_code == 403
+    assert after == 0

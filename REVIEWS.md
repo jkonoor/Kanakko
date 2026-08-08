@@ -12,6 +12,1913 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `27fc55f` — /help + exact-greeting short-circuit, answer a lost user without an LLM call (Phase 9)
+
+**Scope:** A non-transaction message ("How do I use this?") used to be answered
+with *"I couldn't find an amount in that"* after two OpenRouter calls and two
+daily-cap slots. The commit (a) widens `REPHRASE_PROMPT` into an orienting help
+text (shared by the failed-parse path and `/help`), (b) adds `handle_help`
+routed from `/help` and from exact-match greetings, (c) excludes both from the
+§16 parse metering/cap so they cost nothing.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD --stat` — diff touches `handlers.py` (`_is_help`, `_is_greeting`,
+  `handle_help`, widened `REPHRASE_PROMPT`), `app.py` (routing + metering
+  exclusion), `tests/test_help.py` (new), `tests/test_webhook.py` (two "hi"
+  samples retargeted to "spent 500 on food"), `docs/TESTING.md`, `TASKS.md`.
+  Nothing else.
+- `uv run pytest` — **291 passed**, 1 warning (pre-existing Starlette/httpx
+  deprecation). `tests/test_help.py tests/test_webhook.py` — 37 passed.
+- **Guard has teeth — routing (part 1).** Deleted the `elif _is_help(...) or
+  _is_greeting(...): handle_help(...)` routing branch, reran `test_help.py`:
+  **1 failed** (`sent` no longer equals the help text). Restored; clean tree.
+- **Guard has teeth — metering (part 2).** Removed `_is_help`/`_is_greeting`
+  from the `is_parse` exclusion so greetings would be metered, reran: **1
+  failed** (`count_updates_on_day == 0` breaks). Restored; `git status` clean.
+  So both the "answers with help" and the "costs no cap slot" claims are checked,
+  not asserted.
+- **Exact-match, no false positives.** Probed `_is_greeting`/`_is_help` directly:
+  `hi`, `Hi!`, `HELLO`, `How do I use this?`, `thanks.`, `  hey  ` → greeting
+  True; `spent five hundred on lunch`, `500 lunch`, `spent 500 on hi`,
+  `hi there`, `helping`, `""` → greeting False. `/help`, `/help@mybot`,
+  `/help me` → help True; `help`, `/helper` → help False (bare "help" is caught
+  by the greeting set instead). The safety argument — a real digitless expense
+  ("spent five hundred on lunch") still reaches the parser — holds.
+- **Auth precedes help.** The gate (`app.py:320`) runs before the help routing
+  (`app.py:356`), so an unauthorized user typing "hi" gets `ACCESS_REFUSED`, not
+  the help text — invite-only stays invite-only.
+- **One definition per thing.** The widened `REPHRASE_PROMPT` is the single
+  string used by both the failed-parse reply (`handlers.py:292`) and `handle_help`
+  (`handlers.py:397`); no second copy.
+- **Idempotency / transaction ownership.** `handle_help` does not commit (caller
+  owns the `with connect()` block, consistent with `handle_undo`); a greeting is
+  still `claim_update`-d (with `metered_user=None`), so a Telegram redelivery is
+  short-circuited rather than double-answered.
+
+### Findings
+
+None blocking.
+
+- **Minor (non-blocking): dangling spec citation.** `handlers.py:384,392,395`
+  and the new test/commit cite "§ chat polish", but no such section exists in
+  `docs/DECISIONS.md` (`grep "chat polish" docs/` → no match). The task is
+  legitimately tracked in `TASKS.md` (user-raised 2026-08-08) and the cost logic
+  is anchored in the real §16, so this is a loose reference, not a correctness
+  issue. Either add the section or cite §16. Not a reason to hold the commit.
+
+### Verdict
+
+The task box in `TASKS.md` is honestly ticked: the behaviour is implemented, both
+halves of the claim are covered by a check that actually reddens when reverted,
+and the exact-match design provably cannot swallow a digitless real entry. ✅ DONE.
+
+---
+
+## 2026-08-08 — `36b808e` — settle the confirm card on Confirm; stop a stale Cancel wiping a receipt (Phase 9)
+
+**Scope:** `handle_confirm` now edits the confirm card into a text-only "✅ Saved"
+receipt via new `confirm.settled_card(row)`; `handle_cancel` only calls
+`delete_message` when `cancel_pending` returned a row.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches `confirm.py` (+`settled_card`), `handlers.py`
+  (`handle_confirm` edit + `handle_cancel` guard), one new test, `docs/TESTING.md`,
+  `TASKS.md`. Nothing else.
+- **Row shape fit.** `settled_card` reads `row['type'|'amount'|'category'|
+  'occurred_on'|'note']`. `confirm_pending` (`db/pending.py:92-101`) returns exactly
+  `{txn_id, amount(Decimal), type, category, note, occurred_on(date)}` — every key
+  present, `occurred_on` is a `date` so `.isoformat()` is valid.
+- **No float on the money path.** `settled_card` routes `amount` through
+  `format_amount`; rendered a real `Decimal("250.00")` row and got
+  `'✅ Saved — Expense ₹250.00\nCategory: Food\nDate: 2026-08-08\nNote: lunch'` — a
+  Decimal, never a float (§9).
+- **Signatures/imports.** `edit_message_text(chat_id, message_id, text)` positional
+  args line up (`tg.py:73`, `reply_markup` defaults `None` → no keyboard);
+  `edit_message_text`/`delete_message` both imported in `handlers.py`.
+- `uv run pytest` — **290 passed**. `tests/test_webhook.py` — 36 passed.
+- **The new guard fails for its reason (both halves).** Reverted half (a) — removed
+  the `edit_message_text(...settled_card(row))` line: the new test failed
+  (`assert len(edits) == 1`). Reverted half (b) — restored the unconditional
+  `delete_message`: the new test failed with `assert [(12345, 909)] == []` — i.e.
+  the stale Cancel deleted the receipt. Both confirm the test would catch a
+  regression of either half. Restored the tree (clean, `git status` empty).
+- **Spec fit.** §4/§5 asymmetry honoured: confirm keeps the card as a permanent
+  receipt with no keyboard; cancel means "this never happened" so its live card
+  still goes, but only when a pending row actually existed. `TASKS.md` tick matches
+  the work; `docs/TESTING.md` 1.2 and new row 2.2a describe the real behaviour.
+
+### Findings
+
+None blocking.
+
+- **Minor / non-blocking (pre-existing pattern):** in `handle_confirm`
+  (`handlers.py:721`) the `edit_message_text` runs before `answer_callback_query`
+  and before the caller commits. If that edit raised a genuine (non-"not modified")
+  HTTP error, the callback would go unanswered and the webhook would 500 into a
+  Telegram redelivery loop. This mirrors `handle_category` (`handlers.py:800`, edit
+  before answer) and the realistic trigger — the card being gone when the user just
+  tapped a live button on it — is nearly impossible; `_is_not_modified` already
+  swallows the common 400. Noted, not required.
+
+---
+
+## 2026-08-08 — `8f32caa` — split `db.py` into a `db/` package by responsibility (Phase 9)
+
+**Status: ✅ DONE**
+
+**Scope.** Pure refactor. Moves the 924-line `kanakko/db.py` into a `kanakko/db/`
+package (connection, users, households, invites, pending, reports, reminders,
+audit) with an `__init__.py` re-exporting the 26 public functions. Claims no
+behaviour change and no test edits.
+
+**What I checked (and what it returned).**
+
+- **No function was dropped, added, or altered.** AST-compared every
+  `def`/`async def` in `HEAD~1:kanakko/db.py` against the union of the new
+  modules: 28 functions old, 28 new, `missing=∅`, `extra=∅`, and **every body
+  byte-identical after strip** (`body-differing funcs: []`). This is the load-
+  bearing check for a "pure move" — it means no money path, timezone bucket, or
+  `active_transactions` read changed under cover of the reshuffle.
+- **The only module-level constant** (`_json_dumps = partial(json.dumps,
+  default=str)`) moved intact to `audit.py:17`, alongside its two `Jsonb(...)`
+  call sites — the audit-JSON serialisation is unchanged.
+- **Cross-module private references resolve correctly.** The money mutations
+  now import the shared helper explicitly: `from kanakko.db.audit import
+  _record_event` in both `reports.py:15` and `pending.py:17`; `_authorize_removal`
+  stays module-internal to `households.py` (defined :76, called :120, :156). No
+  private helper leaked into `__init__`'s surface.
+- **Import surface is unchanged.** Enumerated every `from kanakko.db import …`
+  across `handlers.py`, `app.py`, `auth.py`, and the three `jobs/*.py`; under
+  `uv run` all imported names `hasattr(kanakko.db, …)` — no `MISSING` printed.
+  `__all__` lists exactly the 26 public functions.
+- **No test or doc referenced an internal db path** that the split would break:
+  grep for `patch("kanakko.db…")`/`monkeypatch` targeting db internals in
+  `tests/`, and for `kanakko.db.*` in `docs/`/`AGENTS.md`, both empty.
+- **`uv run pytest -q` → `289 passed, 1 warning in 12.17s`.** The pre-existing
+  `httpx`/starlette deprecation warning is unrelated to this change.
+- **File sizes** all under the 300-line cap (largest: `households.py` 220,
+  `reports.py` 215, `pending.py` 209).
+- **TASKS.md** box flipped `[ ] → [x]` for "Split `db.py`" — accurate; the work
+  is real, not a stub.
+
+**Findings.** None blocking.
+
+- *(nit, non-blocking)* The `TASKS.md` line still reads "`db.py` is now 722
+  lines"; the file was actually **924** at the split (the commit message itself
+  says 924). Stale figure in the task prose, no code impact.
+
+Verdict: a genuine behaviour-preserving move. The AST body-equality plus the
+green suite plus the resolved import surface together establish that nothing on
+the money or timezone paths shifted. ✅ DONE.
+
+---
+
+## 2026-08-08 — `5f0cd45` — household-scoping tests for the three jobs (Phase 9, §16)
+
+**Status: ✅ DONE**
+
+**Scope.** Test-only commit. Adds three tests pinning that the scheduled jobs are
+household-scoped where the spec says so and per-person where it says so:
+evening/monthly carry the household figure to every member, the noon nudge is
+suppressed per person. Also adds a `join_household` conftest helper and ticks the
+"Re-scope the jobs (§12, §16)" box in `TASKS.md`. The commit claims **no
+production code changed** — confirmed by `git show HEAD`: only `TASKS.md`,
+`tests/conftest.py`, and the three `tests/test_*.py` files are touched.
+
+**What I checked (and what it returned).**
+
+- `git show HEAD --stat` / `git show HEAD` — 5 files, +101/−4, all tests + docs.
+  No `.py` under `kanakko/` in the diff.
+- Read the production the tests claim to pin — `kanakko/db.py` `day_summary`
+  (645), `month_summary` (675), `logged_since` (845); `kanakko/jobs/{noon,
+  evening,monthly}.py`. `day_summary`/`month_summary` scope on
+  `household_id = (SELECT household_id FROM household_members WHERE user_id = %s)`;
+  `logged_since` scopes on **both** `user_id = %s` and the household subquery.
+  This is exactly the "household figure / per-person suppression" split §16
+  requires — matches `docs/DECISIONS.md` §16 table (lines 424–425): *"Noon nudge
+  — suppressed per person, not household-wide"* and *"Evening/monthly summary —
+  household figures, sent to every member."*
+- `uv run pytest tests/test_noon.py tests/test_evening.py tests/test_monthly.py -q`
+  → **21 passed**. Full suite `uv run pytest -q` → **289 passed** (matches the
+  claimed 286→289).
+- **Verified each new test reddens for the reason it names**, by temporarily
+  reverting the guarded behaviour and restoring it (`git diff --stat` clean
+  afterward):
+  - Dropped the `user_id` predicate from `logged_since` (household-wide
+    suppression) → `test_noon_suppression_is_per_person_not_household_wide`
+    **FAILED**. Restored → passes.
+  - Re-scoped `day_summary` and `month_summary` to `WHERE user_id = %s`
+    (personal figures) → both
+    `test_evening_carries_the_household_figure_to_every_member` and
+    `test_monthly_carries_the_household_figure_to_every_member` **FAILED**.
+    Restored → pass.
+
+  Each guard fails for the exact regression its docstring describes — these are
+  real checks, not surface-form assertions.
+
+**Findings.** None.
+
+Notes, non-blocking:
+
+- Amounts flow as `Decimal` throughout the new tests (`Decimal("120.50")` etc.)
+  and assert on the rendered strings via the real `summary_text`/`report_text`
+  and `format_amount`; no float creeps in. Timezone boundaries reuse the existing
+  `today_ist`/`previous_month_ist`/`previous_evening_ist` helpers, unchanged.
+- `join_household` (conftest.py:39) is test-only, inserts straight into
+  `household_members`, and relies on the table's `UNIQUE(user_id)` as the
+  one-household-per-user guard — appropriate for a fixture; it deliberately does
+  not reproduce onboarding's invite flow.
+- The `TASKS.md` tick is legitimate: the task's named deliverable was the
+  household-level checks (the DB re-scope landed earlier), and all three exist,
+  pass, and fail-when-broken.
+
+
+---
+
+## 2026-08-08 — `84801f6` — feat: ownership transfer before an owner can leave (Phase 9, §16)
+
+**Status: ✅ DONE**
+
+`db.transfer_ownership(actor, target)` moves `households.owner` to another member
+of the same household, owner-only; `handle_transfer` resolves `/transfer <label>`
+against the sender's roster exactly as `/remove` does, routed after the §16 gate
+and excluded from metering. This closes the half that was missing since member
+removal shipped: an owner's bare `/remove` was refused (`owner_must_transfer`)
+with no way to move ownership. No money arithmetic, timezone bucket, LLM prompt,
+or `active_transactions` read is touched; the only DB writes are one `UPDATE
+households SET owner` and its guarding SELECTs. Authorization lives entirely in
+`transfer_ownership`, mirroring `_authorize_removal`.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+import, gate
+  exclusion, route), `kanakko/db.py` (`transfer_ownership`), `kanakko/handlers.py`
+  (`_is_transfer`, `handle_transfer`, updated `REMOVE_OWNER_MUST_TRANSFER`),
+  `tests/test_transfer.py` (new), `tests/test_webhook.py` (routing+metering).
+  No migration, no schema change.
+- **Full suite**: `uv run pytest` → **286 passed** (1 pre-existing Starlette
+  deprecation warning, unrelated). Targeted `tests/test_transfer.py
+  tests/test_webhook.py` → **44 passed**.
+- **The guard earns its place.** Reverting the UPDATE target
+  (`kanakko/db.py:401`, `(target_user_id, …)` → `(owner, …)`, making transfer a
+  silent no-op) and re-running `tests/test_transfer.py` →
+  **8 failed, 1 passed** — `test_owner_transfers_then_can_leave` and the seven
+  DB/handler checks that assert `_owner_of(...)` moved all go red. Restored with
+  `git checkout`. The check fails for the reason it exists.
+- **Authorization holds, not just the label absence.** Read
+  `_authorize_removal` (`db.py:260`) and `household_roster` (`db.py:227`). Traced
+  a member typing `/transfer <someone>` → `transfer_ownership` returns `not_owner`
+  before any UPDATE (`test_handle_transfer_member_cannot` covers it). Traced a
+  cross-household target → `not_member` (target-membership SELECT scoped to the
+  actor's `household_id`); `test_transfer_to_someone_outside_the_household_is_refused`
+  covers it. The owner is protected by the `actor != owner` check, independent of
+  whether the label path can name them.
+- **Metering exclusion is real, not asserted by spelling.** `_is_transfer` is
+  added to the `is_parse` negation in `app.py:335` and the route in `app.py:357`;
+  `test_webhook_routes_transfer_to_handle_transfer_and_never_meters_it` asserts
+  the update reaches `handle_transfer` (not `handle_text`) and `claim_update` is
+  called with `metered=None`. Verified it passes.
+
+### Findings
+
+**Low — `already_owner` docstring claim is false after a transfer, yielding a
+misleading message (not silent wrongness).** `kanakko/db.py:370-373` and
+`kanakko/handlers.py` (`TRANSFER_DONE` block, `already_owner` → `TRANSFER_NOT_MEMBER`)
+both rest on "the owner carries no label, so `/transfer <label>` can never name
+them." That is true for a *creator*-owner, but a member who joined by household
+invite keeps their `used_by` label, and after ownership transfers *to* them they
+are an owner *with* a label. I confirmed live (temporary test): after
+`transfer_ownership(creator, ravi)`, `handle_transfer(ravi, "/transfer ravi")`
+returns `None` and replies **"That person isn't in your household."** — the
+`already_owner` verdict mapped to `TRANSFER_NOT_MEMBER`. Nothing moves (correct),
+but the message tells the new owner they aren't in their own household. Rare
+(owner self-transferring by their own label) and harmless to data. Suggested fix:
+give `already_owner` its own copy (e.g. "You already own this household."), and
+soften the two docstrings' "can never" to "the creator-owner has no label". Not
+blocking.
+
+### Verdict
+
+Correct, spec-aligned (§16 owner-leaving rule), and the money/timezone/read-path
+invariants are untouched. The one finding is a cosmetic message on a rare path,
+not a data or authorization defect. **✅ DONE.**
+
+---
+
+## 2026-08-08 — `2338104` — feat: removal asks retain-or-delete, and deletion is real (Phase 9, §16)
+
+**Status: ✅ DONE**
+
+`/remove` now presents the §16 retain/delete choice with a specific-consequence
+warning before acting, and deletion is a real `DELETE FROM transactions` (not
+§6's soft delete) plus its `transaction_events` audit rows. Authorization is
+checked twice — `check_removal` before the warning is shown, `remove_member`
+again on the button tap — so a forged `rm:delete:<id>` is refused exactly as the
+typed command is. No money arithmetic, timezone bucket, or LLM prompt is
+touched; the only base-table read is the DELETE's own purge subquery, which is
+correct.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+4, `rm:`
+  route), `kanakko/db.py` (`_authorize_removal` split + `check_removal` +
+  `delete_entries`), `kanakko/handlers.py` (ask flow + `handle_remove_choice`),
+  `tests/test_member_removal.py`, `tests/test_read_paths.py`,
+  `tests/test_webhook.py`. No migration, no schema change.
+- **Full suite**: `uv run pytest` → **276 passed** (1 pre-existing Starlette
+  deprecation warning, unrelated). Targeted run of the three touched test files →
+  **53 passed**.
+- **FK completeness of the hard delete.** `grep "REFERENCES transactions"` across
+  `migrations/` shows exactly one dependent table, `transaction_events`
+  (003, no `ON DELETE CASCADE`). The commit purges those audit rows before the
+  `DELETE FROM transactions`, so the FK cannot orphan or block. The delete test
+  seeds a real `transaction_events` row to exercise that path — it would fail
+  with a FK violation if the purge were dropped.
+- **Delete scope.** `DELETE FROM transactions WHERE user_id = %s AND
+  household_id = %s` uses the `household_id` captured by `_authorize_removal`
+  *before* the member row is deleted, and is keyed to the target's own rows in
+  the household they leave. Entries by other members, and the target's entries in
+  households they previously left (retained), are untouched. Confirmed
+  `Decimal`/`NUMERIC` money path is not touched — no arithmetic, no `float`.
+- **Re-authorization defeats a forged button** (the security claim). Traced
+  `handle_remove_choice`: `actor = get_or_create_user(press.from_id)`, then
+  `remove_member(actor, target_from_button)` re-runs `_authorize_removal`. A
+  member forging `rm:delete:<another-member>` gets `not_owner`; the covering test
+  (`test_handle_remove_choice_reauthorizes_a_forged_button`) passes and asserts
+  the target stays in the roster. A redelivered/double tap is safe: after the
+  first removal the target is no longer in the actor's household, so the second
+  returns `not_member` — no double-delete, and a stale Keep-then-Delete (or vice
+  versa) cannot undo the first choice.
+- **The read-path guard exclusion — tried to defeat it.** The guard now skips a
+  literal that `startswith("DELETE")`. Ran the predicate against five inputs
+  (`kanakko/db.py`'s two DELETE literals, a real `SELECT … FROM transactions`, a
+  `FROM active_transactions … JOIN transactions` leak, and a lowercased
+  leading-whitespace DELETE): the two real reads still flag, all DELETEs skip.
+  The exclusion is behaviourally sound — a `DELETE` never produces a report
+  total, which is the only thing the guard protects — and it is scoped to
+  `startswith`, so it cannot silence a report `SELECT` (no report query begins
+  with the word DELETE). Guard still guards.
+- **Callback prefix collisions.** Prefixes are `cat:`, `confirm`, `cancel`,
+  `rm:` — disjoint; `rm:delete:7` routes only to `handle_remove_choice`. The
+  webhook-routing test asserts this and that an `rm:` tap opens its own
+  connection.
+
+### Findings
+
+**None blocking.** One low, non-blocking observation:
+
+- **Low / informational — settled card keyboard removal is unverified against
+  the Bot API.** `handlers.py:612` settles the warning card with
+  `edit_message_text(press.chat_id, press.message_id, settled)` and no
+  `reply_markup`, intending to drop the Keep/Delete buttons (the same mechanism
+  the queued confirm-card settling task `c45a4ad` relies on). Whether omitting
+  `reply_markup` on `editMessageText` actually clears the inline keyboard is a
+  Telegram Bot API detail I could **not verify** here (WebFetch was not
+  permitted). If it does not, the settled card keeps live buttons — but a re-tap
+  is harmless (the target is already gone → `not_member`, and no choice can be
+  reversed). Worst case is cosmetic, and it is consistent with the settling
+  approach the repo already committed to. If the team wants certainty, pass an
+  explicit empty `InlineKeyboardMarkup([])` and assert its removal in a test;
+  none of the current tests check the keyboard is gone. Not a data or
+  authorization risk either way.
+
+### Verdict
+
+Does what `TASKS.md` claimed and matches §16: asks retain-or-delete first, warns
+the specific "₹18,920 won't reconcile" consequence, deletes for real (base table,
+not the view), and keeps the deletion separate from §6's soft delete. The box is
+correctly ticked. **✅ DONE.**
+
+---
+
+## 2026-08-08 — `bf27ed7` — feat: member removal (owner removes anyone, a member leaves — Phase 9, §16)
+
+**Status: ✅ DONE**
+
+`/remove <label>` (owner removes that roster member) and bare `/remove` (leave
+yourself) both route through one authorization-bearing path,
+`db.remove_member(actor, target)`. The removed member is re-homed into a fresh
+household of one; their past entries are retained in the household they left.
+Also scopes `household_roster`'s label join to `i.household_id = m.household_id`
+(the `bc3b0e4` review's low finding), reachable now that a user can carry a used
+household invite from more than one household. No money, timezone,
+`active_transactions`-bypass, or LLM path is touched.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+5, route +
+  metering exclusion), `kanakko/db.py` (+61, `remove_member` + roster join
+  scope), `kanakko/handlers.py` (+84, `_is_remove`/`handle_remove`),
+  `tests/test_member_removal.py` (new, 283 lines), `tests/test_webhook.py` (+28).
+  No migration, no schema change.
+- **Full suite**: `uv run pytest` → **272 passed** (1 pre-existing Starlette
+  deprecation warning, unrelated).
+- **Spec fit against `docs/DECISIONS.md` §16**: matches the removal rules —
+  "owner may remove anyone; any member may remove themselves" (self case is
+  `actor == target` in one path), "owner leaving must transfer ownership first"
+  (`owner_must_transfer`, also blocks a solo owner leaving their household of
+  one). The retain-or-delete prompt is correctly deferred: §16's "ask retain or
+  delete" is a *separate* task, left unchecked in `TASKS.md`; this task retains
+  by default and touches no `transactions` row — verified in the diff and by
+  the retain test asserting the ₹500 stays via `active_transactions`.
+- **Authorization lives in `db.remove_member`, not the call site** — confirmed
+  neither route can bypass it. Order: actor→household lookup, target-membership
+  check (`not_member`), `not_owner`, then `owner_must_transfer`. A member trying
+  to remove the owner hits `not_owner` first (correct — either refusal is right).
+- **Re-homing**: `create_household_of_one` runs after the `DELETE` in the same
+  transaction, so its `NOT EXISTS (… household_members …)` is true and a fresh
+  household is minted; the removed member's next confirm won't hit the NOT NULL
+  `transactions.household_id` (migration 008). Verified by
+  `test_owner_removes_a_member_...` asserting `new_hid != hid`.
+
+### Guards genuinely redden (verified by reverting each fix)
+
+- **Roster label scope**: removed the `AND i.household_id = m.household_id` line
+  from `household_roster` → `test_roster_label_is_scoped_to_the_current_household`
+  **FAILED** (a mover carrying a stale invite from a household they left
+  duplicates their roster row with the old label). Restored → green. This is a
+  guard that guards: it asserts the *behaviour* (one row, new label) via a real
+  cross-household move, not a string.
+- **`not_owner` authorization**: removed the `actor != owner and actor != target`
+  check → `test_a_member_cannot_remove_another_member` and
+  `test_handle_remove_member_cannot_remove_another_via_label` both **FAILED**.
+  Restored → green.
+
+### Routing / metering
+
+`test_webhook_routes_remove_to_handle_remove_and_never_meters_it` asserts
+`/remove ravi` routes to `handle_remove` (not `handle_text`, which would be an
+LLM call + junk pending card) and the claim is unmetered (`metered_user is
+None`). Confirmed `_is_remove` is in both the `is_parse` exclusion (line 330) and
+the dispatch chain (line 350), matching `/undo`, `/invite`, `/household`. A
+capped owner can still remove a member. `_is_remove` handles the group
+`/remove@bot` form and rejects `/removed` / `remove` — covered by
+`test_is_remove_recognises_the_command`.
+
+### No findings
+
+Money stays untouched, reads that exist go through `active_transactions`, no
+`float`, no timezone bucketing, no new dependency, no secret. The owner label is
+NULL in the current household (owner created it rather than consuming a household
+invite), so `/remove <label>` can never target the owner — an owner leaves only
+via the bare form, which `remove_member` refuses. One benign observation, not a
+finding: a solo owner sending bare `/remove` gets `owner_must_transfer` ("until
+then, you stay") — a permanent dead-end until ownership transfer ships, but
+spec-conformant (§16: a household always has an owner) and there is nothing for a
+solo user to leave anyway.
+
+---
+
+## 2026-08-08 — `bc3b0e4` — feat: add `/household` (who is in it, who owns it — Phase 9, §16)
+
+**Status: ✅ DONE**
+
+A read-only command. `db.household_roster` returns the querying user's household
+roster (owner first, each member's invite label); `handle_household` renders it,
+marking the owner and the viewer, and points a solo user at `/invite`. Routed
+after the auth gate and excluded from `is_parse` so it is never metered or capped.
+No money, timezone, `active_transactions`, or LLM path is touched.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+6),
+  `kanakko/db.py` (+28), `kanakko/handlers.py` (+41), two test files. No
+  migration, no schema change — the query reads existing `households`,
+  `household_members`, `invites` tables (`migrations/004`, `006`).
+- **Full suite**: `uv run pytest -q` → **258 passed**, 1 warning. Matches the
+  commit claim.
+- **Scope guard actually reddens.** The roster query is scoped
+  `WHERE m.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)`
+  (`db.py:250-251`). I replaced that scope with `WHERE %s IS NOT NULL OR TRUE`
+  (returns every household's members) and reran
+  `test_roster_lists_the_household_owner_first_with_member_labels` → **FAILED**
+  (a second household's member leaked in). Restored; suite green again. The guard
+  fails for the reason it exists, not on a surface string.
+- **Metering-exclusion guard actually reddens.** I removed `_is_household` from
+  the `is_parse` exclusion in `app.py:322-326` and reran
+  `test_webhook_routes_household_to_handle_household_and_never_meters_it` →
+  **FAILED** (claim went from `None` to metered). Restored. So the "never
+  metered/capped" claim is enforced by a test that breaks when it regresses.
+- **Routing**: `/household` is dispatched at `app.py:344-345` after the auth gate,
+  in the same `elif` chain as `/undo` and `/invite`; `_is_household` handles the
+  bare and `@bot` group forms and rejects `/households` and `household`
+  (`test_is_household_recognises_the_command`, all green).
+- **Marking logic**: owner renders as `Owner`, members as their label (or
+  `Member` when unlabelled), viewer gets ` (you)`; solo (`len(members) <= 1`)
+  short-circuits to `HOUSEHOLD_SOLO`. Verified live by the two handler tests
+  (owner-viewing and member-viewing both assert the right `(you)` placement).
+- **No PII leak**: the reply shows names/labels only, never the Telegram or
+  internal user id.
+- **Spec fit** (`docs/DECISIONS.md` §16): read-only display, household-scoped,
+  labelled attribution — consistent with §16. `TASKS.md` correctly splits display
+  from member removal (removal left unchecked, coupled to the next two tasks); the
+  ticked box matches shipped, non-stub code.
+
+### Findings
+
+**None blocking.**
+
+Low / informational (no fix required for this commit): the label `LEFT JOIN
+invites i ON i.used_by = m.user_id AND i.kind = 'household'` (`db.py:246-247`) is
+not scoped to `m.household_id`. Today a user has at most one used household
+invite (no way to leave a household yet), so at most one row matches and the
+roster is correct — I could not construct a duplicate. But once **member removal
++ re-invite** (the next task) lets a user leave one household and join another,
+that user will carry two `kind='household'` invites with their `used_by`, and the
+join will duplicate their roster row with two labels. Worth scoping the join to
+`i.household_id = m.household_id` when removal lands.
+
+---
+
+## 2026-08-08 — `2ed5ac4` — test: cover `/invite` webhook routing and metering exclusion (QA `8a8bbc8` finding 1)
+
+**Status: ✅ DONE**
+
+Test-only commit. Adds `test_webhook_routes_invite_to_handle_invite_and_never_meters_it`
+(`tests/test_webhook.py:744`) closing the sole open finding from the `8a8bbc8`
+review, and flips that review's status to RESOLVED in `REVIEWS.md`.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): only `REVIEWS.md` (+8/-1) and
+  `tests/test_webhook.py` (+35). No production code touched — the routing/metering
+  it guards already exists at `kanakko/app.py:322-340`.
+- **The test drives real code, not mocks of it.** It monkeypatches the seams
+  (`connect`, `is_authorized`, `get_or_create_user`, `within_daily_cap`,
+  `handle_invite`, `handle_text`, `claim_update`) but leaves the real `_is_invite`
+  / `_is_undo` classifiers and the real `/webhook` routing in place, so it
+  exercises `app.py:322-340` end to end.
+- **It asserts the effect, not a surface form.** `claims == [None]` after
+  `/invite ravi` and `claims == [None, 1]` after `spent 500 on food` capture the
+  actual `metered_user` value handed to `claim_update` — i.e. that the parse path
+  is metered with the user id and the invite path is not. That is the behaviour
+  §16 relies on for the daily cap, not a string match.
+- **`uv run pytest`** — `253 passed` (whole suite); `tests/test_webhook.py`
+  alone `32 passed`.
+- **Reddens on each claimed defect, verified independently by me:**
+  - Dropped the `elif _is_invite(action.text): handle_invite(...)` routing branch
+    (`app.py:339-340`) → `1 failed` (routing assertion).
+  - Dropped the `_is_invite(action.text)` term from `is_parse` (`app.py:322-323`)
+    → `1 failed` (metering assertion: `claims` becomes `[1]`, invite gets stamped
+    with the user id and would burn a cap unit).
+  Restored `app.py` after each; `git status` clean.
+- The `claim_update` mock (`lambda conn, uid, metered: claims.append(metered) or True`)
+  matches the real 3-arg signature `claim_update(conn, update_id, metered_user)`
+  and returns truthy so routing proceeds — the second positional it records is the
+  metered user, which is what the assertions read.
+
+No issues. The guard fails for the reason it exists, and both failure modes it
+names are the silent ones (an LLM call + garbage pending card on a miss-route; a
+cap unit burned per invite on a miss-meter).
+
+---
+
+## 2026-08-08 — `8a8bbc8` — add `/invite`: owner issues a labelled household link (Phase 9, §16)
+
+**Status: ✅ RESOLVED** — finding 1 fixed in a follow-up commit:
+`test_webhook_routes_invite_to_handle_invite_and_never_meters_it`
+(`tests/test_webhook.py`) drives `/invite ravi` through `/webhook` and asserts it
+routes to `handle_invite` (not `handle_text`) and that `claim_update`'s
+`metered_user` is `None`. Verified it reddens on both defects: dropping the
+`_is_invite` routing `elif`, and dropping the `_is_invite` term from `is_parse`.
+
+**Status (original): ⚠️ CHANGES REQUESTED**
+
+Scope: `/invite <label>` mints a single-use `household` invite for the household
+the sender owns and replies with its `https://t.me/<bot>?start=<code>` deep link.
+Owner-only enforced in SQL (`create_household_invite`: `INSERT … SELECT … FROM
+households WHERE owner = %s`). Bot username from `getMe` (`tg.get_bot_username`).
+Routed in `app.py` after the gate, alongside `/undo`, and excluded from
+`is_parse` so it is never metered or capped. `_start_payload` → `_command_arg`,
+shared by `/start` and `/invite`. Event `invite.issued` (ok/noop) via the §17 seam.
+
+### What I checked
+
+- **Full suite green.** `uv run pytest -q` → **252 passed, 1 warning**.
+  `tests/test_invite.py` alone → **5 passed**. Matches the commit's claim.
+- **Owner-only guard is genuine (reddens on revert).** Dropped the `WHERE owner
+  = %s` scope from `create_household_invite` (so the `SELECT … FROM households`
+  yields any household) and re-ran `test_invite.py` → **3 failed** (`test_member_
+  who_isnt_owner_is_refused`, `test_bare_invite_asks_for_a_label`,
+  `test_create_household_invite_scopes_to_the_owner`), 2 passed; restored → all
+  pass. The guard fails for the reason it exists — a non-owner member mints no row.
+- **Issued code is a valid, consumable `/start` payload.** `code = "h-" +
+  secrets.token_urlsafe(9)` → 14 chars, alphabet `A-Z a-z 0-9 _ -`; matches
+  `_START_PAYLOAD_RE = [A-Za-z0-9_-]{1,64}` (handlers.py:162) and the §16 64-char
+  limit. `kind='household'` with a non-NULL `household_id` satisfies the
+  `invites_household_matches_kind` CHECK (004_invites.sql). `consume_invite`
+  (db.py:193-201) routes a `household` code to `household_members` insert — the
+  end-to-end onboarding path is coherent.
+- **Owner id semantics.** `households.owner` is the internal `user_id`
+  (006_households.sql); `handle_invite` passes `get_or_create_user(...)` (internal
+  id) as `owner_user_id`. Correct axis — not the Telegram id.
+- **Metering exclusion is correct in the code.** `is_parse` now excludes
+  `_is_invite` (app.py:322-324); `/invite` makes no LLM call so it must not be
+  metered or capped. Read the path — correct as written.
+- **Idempotency / collision.** `/invite` is claimed (`claim_update`, metered_user
+  NULL) so a redelivery is deduped; a UNIQUE-code collision raises, the claim
+  rolls back, redelivery re-mints. A transient `getMe`/`send_message` failure
+  after the INSERT rolls the uncommitted row back too — no orphaned invite. Sound.
+- **No secret, no float, no `transactions` read, no new dependency.** `secrets`
+  is stdlib. Rename `_start_payload` → `_command_arg` left no dangling refs
+  (grep clean).
+
+### Findings
+
+**1 — (medium, test coverage) The `app.py` webhook wiring for `/invite` has no
+regression test; both a routing miss and a metering miss would be silent.**
+`kanakko/app.py:322-341`. The commit adds two behaviours in the webhook that
+`test_invite.py` does not exercise (it calls `handle_invite` directly):
+
+  - **Routing** — `elif _is_invite(action.text): handle_invite(...)`. If this
+    branch regressed, `/invite ravi` would fall through to `handle_text` and be
+    fed to the LLM parser as a transaction (an OpenRouter call + a garbage pending
+    card). This is the *exact* failure the repo already guards for `/undo` with a
+    dedicated test (`test_webhook.py:714` — "Routing it to `handle_text` would
+    feed …to the parser"). `/invite` got no equivalent.
+  - **Metering** — `is_parse = … and not (_is_undo(...) or _is_invite(...))`. If
+    the `_is_invite` term were dropped, `/invite` becomes metered *and* capped: an
+    owner at their daily cap could no longer invite, and every invite would burn a
+    cap unit — a silent money-path deviation. The repo tests this class for the
+    Confirm tap (`test_cap.py:148` — reverting the `metered_user` guard reddens
+    it) but not for `/invite`.
+
+  Failure scenario: a later refactor of the webhook dispatch drops or reorders
+  the `_is_invite` checks; the whole suite stays green because nothing asserts
+  `/invite` routes to `handle_invite` and stays off the metering count.
+  Suggested fix: one webhook-level test mirroring
+  `test_webhook_routes_undo_to_handle_undo_not_handle_text` — POST `/invite ravi`
+  through `/webhook`, assert `handle_invite` was called (not `handle_text`) and
+  `count_updates_on_day` stayed 0. Small, and it matches the coverage its two
+  siblings already have.
+
+The shipped code itself is correct and the task is genuinely done (owner-only is
+enforced and tested at the unit level); the gap is that the new webhook wiring —
+the money-adjacent part — carries no net beneath it, unlike every comparable
+command in the same file.
+
+---
+
+## 2026-08-08 — `2d2300a` — log the three scheduled jobs through the event seam (Phase 8, §17)
+
+**Status: ✅ DONE**
+
+Scope: `fan_out` (the shared shape all three jobs run through) now emits one
+`job.<name>` event per run — `source="cron"`, `considered`/`delivered`/`skipped`/
+`failed`/`duration_ms`, `status="ok"` on a clean run and `status="error"` on a
+run with failures (in addition to the `DeliveryFailures` raise, never instead of
+it). `evening/noon/monthly.py` pass `job=`. Tests extended in `test_evening.py`
+and `test_noon.py`; `TESTING.md` gains rows 5a.17/5a.18 and drops the closing
+note that recorded this gap; the task is ticked.
+
+### What I checked
+
+- **Full suite green.** `uv run pytest -q` → **247 passed, 1 warning**.
+  `test_evening.py` + `test_noon.py` alone → **12 passed**.
+- **Reddening claim verified live.** Deleted the `status=ERROR` `log_event` line
+  and ran `test_one_blocked_recipient_does_not_silence_the_others` → **FAILED**;
+  restored → passes. The error-event assertion genuinely guards.
+- **Production wiring is complete, not just the counts.** The bug this fixes was
+  an empty `events.jsonl` in `kanakko-cron`. Traced the path:
+  `main()` → `configure_logging()` (binds `file_sink` when `LOG_DIR` set,
+  `kanakko/__init__.py:26-30`) → `run()` → `fan_out()` → `log_event`. Sink is
+  bound before the event fires, so the line actually reaches the volume.
+- **Spec fit (§17).** `source="cron"` is one of the three permitted origins
+  (`webhook | miniapp | cron`, DECISIONS §17); statuses are `ok`/`error` from
+  `eventlog`. One event per *run*, not per user — matches "the run's counts …
+  without putting the whole ledger's shape on the volume".
+- **Count semantics correct.** `skipped` is incremented when `deliver` returns
+  False (noon suppresses active users, `noon.py:62`) — a deliberate skip, never
+  `failed`; the noon test asserts `(considered, delivered, skipped, failed) ==
+  (3, 2, 1, 0)`. The blocked-recipient test asserts `considered=3, delivered=2,
+  failed=1`. Error path commits before logging+raising, so successful users'
+  `reminder_log` rows survive (§12 failure-isolation, still asserted).
+- **`log_event` never raises** and is a no-op when unbound (`eventlog.py:96-106`),
+  so a broken/absent sink can't fail a job — matches §17.
+- No money/timezone/soft-delete surface touched; no `float`, no new dependency,
+  no category literal. `TESTING.md` refs are consistent (`5a.15–5a.18`, no
+  orphaned pointer left by the deleted note).
+
+### Findings
+
+None blocking. Two notes, neither a finding:
+
+- `monthly.py` gets `job="monthly"` but no dedicated event assertion; the
+  `fan_out` code path is fully covered by the evening/noon tests, so this is not
+  a gap.
+- `duration_ms` uses `time.perf_counter()`/`ms_since` — a monotonic clock, right
+  choice for a duration.
+
+---
+
+## 2026-08-07 — `08bd425` — `/start` deep-link onboarding: invites and household-of-one (Phase 9)
+
+**Status: ✅ DONE**
+
+Scope: adds the `/start` entry point — bare `/start` opens a household of one
+(open mode) or turns an unknown user toward an invite (invite mode); `/start
+<code>` consumes a signup/household invite. `consume_invite` +
+`create_household_of_one` in `db.py`, `handle_start` + payload validator in
+`handlers.py`, a pre-gate route in `app.py`, and `tests/test_start.py`. Ticked
+the onboarding task and added a housekeeping task to split `db.py`.
+
+### What I checked
+
+- **Full suite green.** `uv run pytest -q` → **247 passed, 1 warning**.
+  `tests/test_start.py` alone → **12 passed**.
+
+- **The task's own check is met and tested.** §16 requires a spent, an expired,
+  and a garbage payload to each refuse *distinctly* and store *nothing* — no
+  user row, no household, no membership. `test_spent_code_…`,
+  `test_expired_code_…`, `test_garbage_payload_…` each assert the distinct reply
+  string **and** `_footprint(...) == (0, 0, 1)` (only the seeded operator
+  household exists). Verified in the code that validity is checked *before*
+  `get_or_create_user` (`db.py:158-170`), and that a garbage payload is refused
+  by `_START_PAYLOAD_RE` *before* any DB lookup (`handlers.py:203-207`), so a
+  refusal cannot mint a partial household.
+
+- **The pre-gate route is load-bearing, not decorative.** Verified live: patched
+  the branch condition in `app.py:290` to `if False and …`, ran
+  `test_start_with_signup_code_bypasses_the_gate_in_invite_mode` → **FAILED**
+  (the invite-mode gate refuses the unknown sender with `ACCESS_REFUSED` before
+  the invite can admit them); restored with `git checkout`, re-ran → passes.
+  The guard fails for the reason it exists.
+
+- **Payload validator is correctly anchored.** `_START_PAYLOAD_RE =
+  \A[A-Za-z0-9_-]{1,64}\Z` uses `\A`/`\Z` (not `^`/`$`), so a
+  `code\nmalicious` payload cannot slip through on Python's `$`-before-trailing-
+  newline behaviour. Confirmed `_start_payload` (`handlers.py:180-182`) splits on
+  whitespace so an embedded newline lands inside the candidate and is rejected.
+  `test_payload_validator_enforces_the_64_char_charset` covers the 64/65
+  boundary, the full charset, spaces, punctuation, and empty.
+
+- **Redelivery is idempotent without `claim_update`.** The pre-gate branch
+  deliberately skips the claim (`app.py:284-293`). Verified the two idempotency
+  paths hold: `consume_invite` returns `"ok"` (not `"spent"`) when the *same*
+  Telegram user re-consumes a code they already used (`db.py:152-158`), and
+  `create_household_of_one` is a no-op for an existing member via `WHERE NOT
+  EXISTS (… household_members …)` (`db.py:127-132`).
+  `test_redelivered_start_is_idempotent` proves one membership, not two. Schema
+  backstop confirmed: `household_members.user_id` is `UNIQUE`
+  (`006_households.sql:24`).
+
+- **Transaction safety on the pre-gate path.** `connect()` returns a raw
+  `psycopg.Connection` (`db.py:67-72`) used as `with connect() as conn:`, which
+  commits on clean exit and **rolls back on exception** — so a `handle_start`
+  that raised mid-way (household inserted, membership not) would roll back both,
+  and the §14 500-and-redeliver contract still holds. No partial household on the
+  error path.
+
+- **Schema/column agreement.** `create_household_of_one` inserts
+  `households(owner)` and `household_members(household_id, user_id)`;
+  `consume_invite` reads `invites(invite_id, kind, household_id, used_by,
+  expires_at)`. All match `006_households.sql` and `004_invites.sql`. Expiry is
+  compared as an instant (`expires_at < now()`), no day-boundary bucketing, so no
+  `Asia/Kolkata` concern here.
+
+- **No money / view / category surface.** This commit touches none of the
+  `Decimal`/`NUMERIC`, `active_transactions`, or `categories.py` paths — nothing
+  to violate there.
+
+### Findings
+
+**1 — LOW / latent (non-blocking): a household invite consumed by a user who is
+already in a household is silently burned without joining.**
+`kanakko/db.py:171-179` (`consume_invite`, the `kind == "household"` branch). The
+membership insert is `ON CONFLICT (user_id) DO NOTHING`, and the invite is
+stamped `used_by` regardless of whether that insert actually added a row.
+
+Failure scenario, reproduced live (throwaway `consume_invite` call against the
+test DB): a user already homed in household A consumes a *household* invite to
+household B → `outcome='ok'` (user is sent `WELCOME`), `home_household` stays A,
+`invite.used_by` is set to them. The single-use invite is now spent forever, the
+user was told "Welcome", but they never joined B. This is exactly the
+"solo user joins a family" story §16 names as the purpose of a household invite,
+and it fails silently in both directions (false success + burned code).
+
+Why non-blocking: not reachable through any current product surface — `/invite`
+(issuing household invites) is still an unchecked task, so no household invite
+can be minted yet except by direct seeding. And §16 fixes "exactly one household
+per user" with no leave/transfer flow built, so the *correct* behaviour here
+(refuse? require leaving A first?) is genuinely undefined until member management
+lands. The task's stated check ("none creates a partial household", distinct
+refusals, new-user valid paths) is fully met. Flagging so the `/invite` +
+member-management iteration handles the already-a-member case rather than
+trusting `consume_invite` to have covered it — the `ON CONFLICT DO NOTHING`
+correctly avoids a crash but should not report `"ok"` or consume the code when no
+join happened.
+
+### Minor notes (not blocking, no action required)
+
+- `handlers.py` is now **442 lines** and `app.py` **349** — both over CLAUDE.md's
+  300-line guideline, but pre-existing (363 / 336 before this commit) and this
+  task legitimately adds a handler. `db.py` is **722**; the commit correctly adds
+  a housekeeping task to split it into a `db/` package, matching CLAUDE.md's
+  Phase-9 trigger.
+
+---
+
+## 2026-08-07 — `a418688` — prove per-member mutation scope within a shared household (Phase 9)
+
+**Status: ✅ DONE**
+
+Scope: test-only commit. Two new checks in `tests/test_db.py` proving the §16
+per-member rule holds *within one household* (A and B sharing household H), plus
+ticking "Enforce the per-member rules" in `TASKS.md`. No production code changed.
+
+### What I checked
+
+- **Diff is test + TASKS only.** `git show HEAD --stat`: `TASKS.md` (+1/-1) and
+  `tests/test_db.py` (+74). No change to `kanakko/db.py` or any runtime module —
+  the commit's premise is that the `user_id` scope was already enforced; this
+  adds the missing proof.
+
+- **Full suite green.** `uv run pytest -q` → **235 passed, 1 warning**. Matches
+  the claimed count. `tests/test_db.py` alone → 21 passed.
+
+- **The new tests are non-tautological — verified each redden claim myself by
+  temporarily neutralising the predicate in a working copy of `db.py`, then
+  restoring:**
+  - Removed the `user_id` scope from `undo_last`'s subquery (`WHERE user_id = %s`
+    → `user_id = user_id`, param dropped) →
+    `test_undo_removes_your_own_entry_not_a_housemates` **FAILED** (undo latched
+    onto B's newest row, 999.99, instead of A's 100.00). Restored → passes.
+  - Removed the `user_id` scope from `soft_delete_transaction` →
+    `test_dashboard_delete_and_recategorise_refuse_a_housemates_row` **FAILED**
+    (A's delete acted on B's row). Restored → passes.
+  - Removed the `user_id` scope from `set_transaction_category`'s gate SELECT
+    (delete scope left intact) → the same test **FAILED** on the recategorise
+    assertion. Restored → passes.
+  - Confirmed working tree clean after restore (`git diff --stat` empty) and
+    re-ran full suite → 235 passed.
+
+- **The tests exercise the real property, not a fixture artefact.** Because
+  `_member` joins B into A's existing household (shared `household_id`), the
+  `household_id` predicate passes for both members' rows, so *only* the `user_id`
+  predicate does the isolation work — this is exactly the gap the commit message
+  says the older same-rule tests (separate households) left uncovered.
+
+- **The tested scope is the one production uses.** Call sites resolve the acting
+  `user_id` from the request, not from a household or a payload field:
+  `handlers.py:255` (`get_or_create_user(conn, msg.from_id)` for `/undo`),
+  `app.py:186-188` and `app.py:231-232` (`get_or_create_user(conn,
+  telegram_user_id)` where `telegram_user_id = authenticated_user(request)` — the
+  *signed* Mini App user). So the `user_id` the tests scope on is who-entered-the-row,
+  as §16 requires.
+
+- **Newest-row ordering holds under identical `created_at`.** A and B's rows are
+  inserted in one uncommitted transaction, so `now()` (transaction-start time) is
+  equal for both; `undo_last`'s `ORDER BY created_at DESC, txn_id DESC` tiebreaks
+  on `txn_id`, keeping B's later-inserted row "newest" — the premise the undo test
+  relies on to prove A doesn't grab it.
+
+### Findings
+
+None. The tests are meaningful guards (each fails for the reason it exists), the
+task tick is earned, and no money/timezone/soft-delete path is touched. ✅ DONE.
+
+---
+
+## 2026-08-07 — `4010039` — re-scope ledger reads to the household (Phase 9)
+
+**Scope:** move every `active_transactions` read from a `user_id` scope onto the
+household tenancy axis (§16) — reporting reads (`day_summary`, `month_summary`,
+`recent_transactions`) now total the whole household; personal reads
+(`undo_last`, `logged_since`) and the two mutation subqueries
+(`soft_delete_transaction`, `set_transaction_category`) keep `user_id` and gain a
+redundant household predicate. Plus two guards.
+
+**Status: ✅ DONE** — no blocking issues. One non-blocking test/guard-coverage
+finding below.
+
+### What I checked (live, not assumed)
+
+- **Full suite:** `uv run pytest -q` → **233 passed, 1 warning** (matches the
+  commit claim).
+- **Schema soundness:** `household_members.user_id` is `UNIQUE` (migration 006),
+  so the scalar subquery `(SELECT household_id FROM household_members WHERE
+  user_id = %s)` returns exactly one value (or NULL) — no "more than one row"
+  risk. The view carries `household_id` (migration 007 rebuilt `SELECT *`).
+- **Behavioural guard reddens for the right reason:** temporarily reverted
+  `day_summary` to `WHERE user_id = %s` →
+  `test_household_reads_span_members_and_never_leak` **FAILED** (got 1 row /
+  100.00, expected 2 / 140.00) and `test_every_view_read_is_household_scoped`
+  **FAILED** (`db.py:371`). Restored; suite green again. So both guards catch a
+  dropped predicate.
+- **No `float`, still reads the view, timezone untouched:** the diff only swaps
+  the `WHERE` scope; `sum(amount)` still returns `NUMERIC`→`Decimal`, bucketing
+  stays on `occurred_on`, boundaries stay caller-computed. No spec regression.
+- **Personal reads are genuinely no-change:** for a user's own rows
+  `household_id` always equals their membership's household, so the added
+  predicate is redundant-true — the existing `test_noon.py` / undo / delete /
+  recategorise tests still pass, confirming no behaviour drift.
+
+### Findings
+
+**1 · Low (non-blocking) — the static household-scope guard asserts a substring,
+not a predicate; `month_summary`/`logged_since` have no behavioural
+household-span test** — `tests/test_read_paths.py:84` (`test_every_view_read_is_household_scoped`)
+
+`READS_VIEW.search(value) and "household_id" not in value` only checks that the
+string `household_id` appears *somewhere* in the same literal as `FROM
+active_transactions` — not that it constrains the rows. I defeated it live:
+changing `day_summary` back to `WHERE user_id = %s` **but** selecting
+`min(household_id)` in the projection kept the guard **green** (`1 passed`) while
+the read was back to per-user scope. The realistic regression (dropping the
+predicate entirely) *is* caught, so this is defence-in-depth, not a shipped bug.
+
+It matters because `month_summary` (a reporting read whose semantics genuinely
+changed user→household) has **no** behavioural test that a housemate's rows fold
+in — the existing `test_monthly.py` cases are all single-user (household-of-one),
+so they pass under either scope. That leaves the defeatable static guard as
+`month_summary`'s sole protection. `logged_since` is the same, though there the
+household predicate is redundant so the risk is lower.
+
+*Suggested fix:* extend `test_household_reads_span_members_and_never_leak` (or a
+sibling) to assert `month_summary` totals both members' income/expenses and
+excludes the outsider — the same two-members-plus-outsider fixture already in the
+test. Optionally tighten the static regex to require `household_id` after a
+`where`/`and`, but a behavioural test is the stronger guard and the existing one
+is a two-line extension.
+
+**Observation (out of scope, no action) —** `recent_transactions` now returns
+every member's rows but no `user_id`/`household_id`, while `soft_delete_transaction`
+stays `user_id`-scoped, so a future multi-member dashboard's per-row delete
+button on a housemate's row would silently no-op (`None`). Correct per §16
+("edit/delete only the member who entered it") and inert today (every household
+is of one); the dashboard/jobs re-scope is an explicitly separate task. Noted so
+the next reader doesn't rediscover it.
+
+---
+
+## 2026-08-07 — `b7e5649` — home confirmed transactions in the household, enforce NOT NULL (Phase 9)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope.** `kanakko/db.py`: `confirm_pending`'s INSERT now stamps
+`transactions.household_id` from a scalar subquery over the confirmer's
+`household_members` row. `migrations/008_transactions_household_not_null.sql`
+makes the column NOT NULL (the enforcement half of the 007 split). Tests:
+new `household_of` conftest helper mints a household-of-one for seeded users;
+two new guards in `test_db.py`, one in `test_migrate.py`; every direct
+transaction insert across 6 test modules routes through `household_of`, and
+`test_webapp`'s inline INSERTs collapse into `_insert_txn`. `TASKS.md` box ticked.
+
+### What I checked (and what it returned)
+
+- Read the full `git show HEAD`, `confirm_pending` (db.py:135-195),
+  `migrations/007`/`008`, `migrate.py`, `get_or_create_user`/`user_exists`,
+  `auth.py`, and DECISIONS §16.
+- `uv run pytest -q` → **231 passed** (clean).
+- **Guard verification — NOT NULL.** Replaced migration 008's body with a
+  no-op (`SELECT 1;`) and ran the two NOT NULL guards →
+  `test_confirm_without_a_household_is_refused` and
+  `test_transactions_household_id_is_not_null` both **FAILED**. Restored file,
+  tree clean. The guards fail for the reason they exist.
+- **Guard verification — homing.** Mutated the subquery to
+  `ORDER BY household_id DESC LIMIT 1` (wrong household when two exist) →
+  `test_confirm_homes_the_transaction_in_the_confirmers_household` **FAILED**.
+  Restored. The two-distinct-households setup genuinely catches cross-homing.
+- **Spec fit (§16).** `user_id` (who entered) is retained and `household_id`
+  (whose money) is added — the two axes §16 requires. `confirm_pending` is the
+  only production `INSERT INTO transactions` (grep confirmed), so no write path
+  is left un-homed. Scalar subquery is safe against multi-row: migration 006's
+  `UNIQUE(household_members.user_id)` guarantees ≤1 row.
+- Money path unchanged (`Decimal`/`NUMERIC` untouched); no float, no ORM, no new
+  dependency. `active_transactions` reads not in scope for this task.
+
+### Observation (non-blocking — future work, not a defect here)
+
+`get_or_create_user` mints a `users` row with **no** `household_members` row.
+Household-on-signup is the still-unchecked **Onboarding** task ("bare `/start`
+in `open` mode creates a household of one"). Consequence: if an operator sets
+`SIGNUP_MODE=open` *before* onboarding lands, a brand-new user's first Confirm
+tap hits the subquery → NULL → `NotNullViolation` → webhook 500. This is not
+reachable today: the default `invite` mode admits only pre-existing users (all
+backfilled into households by 006), and refuses unrecognised users before any
+row is minted. Before 008 the same open-mode user would have *silently orphaned*
+their money (the exact bug §16 forbids); 008 turns that silent orphaning into a
+loud failure, which is the safer of the two until onboarding creates the
+household. Flagged only so the ordering dependency (onboarding before `open`) is
+recorded, not a surprise. `TASKS.md` box for this commit is honestly ticked.
+
+---
+
+## 2026-08-07 — `e782b6f` — move the ledger's tenancy axis onto transactions (Phase 9)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope.** `migrations/007_transactions_household.sql` adds a **nullable**
+`transactions.household_id` (FK to `households`), backfills every existing row
+from migration 006's household-of-one mapping, adds a partial
+`(household_id, occurred_on)` report index, and recreates the `active_transactions`
+view so its `SELECT *` picks up the new column. `tests/test_migrate.py` gains
+`test_transactions_household_backfill_preserves_totals`. Migration only —
+NOT NULL and the confirm write-path are deferred to a new (unchecked) task.
+
+### What I checked (and what it returned)
+
+- `git show HEAD` / read the full diff, `migrations/007_transactions_household.sql`,
+  `migrations/006_households.sql`, `kanakko/migrate.py`, `tests/test_migrations.py`
+  (view guard), and `docs/DECISIONS.md` §16.
+- `uv run pytest tests/test_migrate.py -q` → **7 passed**.
+- `uv run pytest -q` → **228 passed** — the commit's claim holds.
+- **Defeated the central guard, confirmed it reddens.** Broke the backfill join
+  in the real migration file (`WHERE m.user_id = t.user_id` → `= t.user_id + 1`)
+  and ran the test:
+  `FAILED test_transactions_household_backfill_preserves_totals`. Restored the
+  file; `git diff --stat` clean. The test reads the UPDATE from the `.sql` file
+  (not paraphrased), so it guards the shipped SQL, not a copy.
+- **Spec fit (§16).** A household owns the money (`household_id`), a user owns
+  the entry (`user_id`) — the migration adds exactly the second axis §16 calls
+  for and homes each row from the one-membership-per-user mapping. §16's "exactly
+  one household per user" is enforced by 006's `UNIQUE(household_members.user_id)`,
+  so the backfill's `FROM household_members` join cannot fan a row into two
+  households.
+- **View change is safe.** The `active_transactions` view guard in
+  `test_migrations.py` re-runs against 007's new definition and still requires
+  `WHERE deleted_at IS NULL` on the last definition — passes. `CREATE OR REPLACE
+  VIEW ... SELECT *` legally appends the trailing `household_id` column, and the
+  test's SUM through `active_transactions` joined on `household_id` proves the
+  view now exposes it.
+- **No positional-unpacking breakage.** Grepped `kanakko/` — no read does
+  `SELECT *` from `active_transactions`; every read names its columns
+  (`db.py:358,383,389,413,496,…`), so the trailing column breaks nothing.
+- **Money exactness.** Test amounts are chosen so a float sum would drift
+  (`10.10+20.20`, `0.05+1.00`) and are stored via `parse_amount` (`Decimal`); the
+  final equality `dict(cur.fetchall()) == seeded` compares `Decimal` totals
+  through the view. No `float` enters the path.
+- **Soft-delete.** The seeded deleted row (500.00) is asserted homed
+  (`household_id IS NOT NULL`) yet absent from `active_transactions` and excluded
+  from the household total — the exact resurrection risk §6 guards.
+
+### Findings
+
+None blocking.
+
+- **Legitimacy of the tick.** The task box is ticked and the dangerous
+  requirement it names — "every pre-existing transaction still appears in exactly
+  one household's totals, with the same sum as before" — is genuinely proven by a
+  guard-verified test, not a stub. The split (nullable now, NOT NULL + write-path
+  next) is documented in both the commit and `TASKS.md`, and the deferred piece is
+  filed as a new unchecked task. Correct scoping, not a falsely-ticked box.
+- **Idempotency (non-issue, noted).** The migration's `ALTER TABLE ADD COLUMN`
+  and `CREATE INDEX` lack `IF NOT EXISTS`; only the `UPDATE` is guarded by
+  `household_id IS NULL`. This is fine because `migrate()` records applied files
+  in `schema_migrations` and runs the whole batch in one transaction, so 007
+  never re-executes and a mid-run failure rolls back cleanly. The comment's
+  idempotency claim is correctly scoped to the `UPDATE` alone.
+
+---
+
+## 2026-08-07 — `56c93f6` — add households + household_members, backfill users (Phase 9)
+
+**Status: ✅ DONE** — no blocking issues.
+
+**Scope.** `migrations/006_households.sql` adds the two tenancy tables, ALTERs the
+deferred FK onto `invites.household_id`, and backfills every existing user into a
+self-owned household of one; `tests/test_migrate.py` gains a seeded-multi-user
+backfill test and repairs the invite CHECK test the new FK broke.
+
+### What I checked (and what it returned)
+
+- `git show HEAD` / read the full diff, `migrations/006_households.sql`,
+  `migrations/004_invites.sql`, `kanakko/migrate.py`, and `docs/DECISIONS.md`
+  §16.
+- `uv run pytest tests/test_migrate.py -q` → **6 passed**.
+- `uv run pytest -q` → **227 passed** — the commit's claim holds.
+- **Defeated the new guard on purpose.** Tampered the backfill to assign the
+  wrong owner (`SELECT (SELECT min(user_id) FROM users)` instead of `u.user_id`)
+  and re-ran `test_household_backfill_migrates_seeded_users` →
+  **1 failed** on the exactly-one-self-owned assertion. Restored the file;
+  `git status` clean, `git diff` empty. The test fails for the reason it exists.
+- Confirmed the invites FK ALTER is safe on a real DB: `ADD CONSTRAINT ... FOREIGN
+  KEY` validates existing rows, but only `signup` invites exist today (household_id
+  NULL, which the FK permits). Grepped `kanakko/` for any code issuing
+  `household`-kind invites → **no matches**, so no bogus `household_id` can exist
+  to fail validation. (Fail-fast if one ever did — acceptable.)
+
+### Spec fit (§16)
+
+- Household always has an owner: `owner … NOT NULL` ✓
+- Exactly one household per user: `household_members.user_id … UNIQUE` +
+  `WHERE NOT EXISTS` backfill ✓
+- Owner is the creator: backfill sets `owner = u.user_id` and the member is the
+  same user ✓
+- `plan` defaults to `'beta'` ✓
+- Idempotent: single-transaction migrate under the advisory lock, recorded in
+  `schema_migrations` so it runs once; the `WHERE NOT EXISTS` guard makes a
+  partial-retry finish rather than duplicate — tested explicitly (second backfill
+  is a no-op on household and member counts) ✓
+- The data-modifying CTE (`INSERT … RETURNING` feeding the member `INSERT`) is
+  correct and atomic in Postgres; multi-statement file executes fine via
+  `cur.execute(read_text())` (no params).
+
+No money, timezone, `active_transactions`, category, or secret surface is touched
+by this change. The `transactions.household_id` tenancy move is correctly left as
+the next (still-unticked) task.
+
+### Findings
+
+None blocking. One informational note: the extracted-backfill test splits the
+`.sql` on `"WITH new_households"` and takes everything after it — fine today, but
+if a later statement is appended below the backfill it would be swept into the
+test's executed SQL. Not worth changing now.
+
+---
+
+## 2026-08-07 — `1b21b1d` — meter the daily cap on LLM calls only (Phase 9, QA of 1f6c28d)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: the fix for finding 1 of the `1f6c28d` review. The webhook now stamps
+`processed_updates.user_id` only on the metered text-parse claim
+(`metered_user = user_id if is_parse else None`, `app.py:315-316`); the free
+Confirm/Cancel/category/undo claims pass `None`, so `count_updates_on_day`'s
+`WHERE user_id = %s` counts exactly the LLM calls, not the free taps.
+`claim_update` now takes `user_id: int | None`. No new column, no new migration.
+
+**What I checked (live):**
+
+- Read the full diff, and `app.py:288-336`, `auth.py:45-73`, `db.py:293-327`,
+  `migrations/005`. The premise holds against the code: `handle_confirm`,
+  `handle_cancel`, `handle_category`, `handle_undo` make no LLM call — only
+  `handle_text` on the non-undo text path does. §16 counts "the thing that costs
+  money"; the fix now counts exactly that.
+- `uv run pytest tests/test_cap.py -q` → **4 passed**.
+- `uv run pytest -q` → **226 passed** (matches the commit claim).
+- **Defeated-the-guard check:** temporarily reverted the guard to
+  `metered_user = user_id` (stamp every claim) and ran
+  `test_callback_tap_does_not_consume_the_cap` → **1 failed** (`assert
+  count_updates_on_day(...) == 0`). Restored; suite green again. The new test
+  fails for the reason it exists.
+- Idempotency preserved: the test also asserts the Confirm row is still claimed
+  (`SELECT count(*) ... update_id=30` → 1); the NULL only drops it from the
+  *count*, not from the conflict-based dedupe. `claim_update`'s `ON CONFLICT
+  (update_id) DO NOTHING` is unaffected by the `user_id` value.
+- Spec fit: `AT TIME ZONE 'Asia/Kolkata'` bucketing (§10) and the pre-claim cap
+  check (cap-th admitted, (cap+1)th refused) are unchanged by this commit and
+  still covered by `test_message_under_the_cap_is_served` /
+  `test_message_past_the_cap_is_refused_and_costs_nothing`.
+
+**Non-blocking note (no fix required):**
+
+- `migrations/005_processed_updates_user.sql:12` still reads "New claims always
+  carry the user." That is now false — callback/undo claims carry NULL. The
+  migration is not editable once applied (CLAUDE.md), and the count is unaffected
+  (it filters on a specific non-null `user_id`), so this is stale prose in an
+  applied migration, not a defect. Left as-is deliberately.
+
+No `float` on a money path, no `transactions`-direct read, no secret, no
+timezone regression introduced by this change.
+
+---
+
+## 2026-08-07 — `1f6c28d` — per-user daily message cap (Phase 9, task 4)
+
+**Status: ✅ RESOLVED** (finding 1 fixed in the next commit) — the cap counted
+free (non-LLM) callback taps against the LLM-cost budget, so an active user was
+refused well before the configured cap.
+
+**Resolution:** the webhook now stamps `processed_updates.user_id` only on the
+metered text-parse claim (`metered_user = user_id if is_parse else None`);
+Confirm/Cancel/category/undo claims leave `user_id` NULL, so
+`count_updates_on_day`'s `WHERE user_id = %s` counts exactly the LLM calls, not
+the free taps. New `tests/test_cap.py::test_callback_tap_does_not_consume_the_cap`
+claims a Confirm through the real webhook and asserts the metering count stays 0
+(the tap is still claimed for idempotency); reverting the `is_parse` guard
+reddens it. `226 passed`.
+
+Scope: the §16 per-user daily message cap. `migrations/005` adds a nullable
+`user_id` FK to `processed_updates`; `claim_update` stamps it; new
+`db.count_updates_on_day` (IST-bucketed count), `auth.daily_message_cap`
+(`$DAILY_MESSAGE_CAP`, default 50) and `auth.within_daily_cap`; the webhook
+gates the text-parse path on the cap before `claim_update`; `CAP_REACHED`
+message; `.env.example` + compose wiring; `tests/test_cap.py` plus four
+`test_webhook.py` stub updates.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): 10 files, +287/-8. No `float` on a money
+  path (the cap touches no amounts). No secret introduced — `DAILY_MESSAGE_CAP`
+  is empty in `.env.example`, compose supplies `50`. No new dependency. No new
+  read of `transactions` — `count_updates_on_day` reads the base
+  `processed_updates` table, which is correct (it counts updates, not ledger
+  rows, so `active_transactions` does not apply).
+- **`uv run pytest -q`** → **225 passed, 1 warning**. Ran it myself.
+- **Spec fit against §16** (`docs/DECISIONS.md:487-495`): "a per-user daily
+  message cap, default 50, set by env var — never hardcoded"; counted off
+  `processed_updates` with an added `user_id`, "counting exactly the thing that
+  costs money." Env-driven default-50 and the `processed_updates.user_id`
+  mechanism match. The "exactly the thing that costs money" clause does **not**
+  — see finding 1.
+- **IST bucketing guard is real** (`db.py:307`): reverted
+  `(processed_at AT TIME ZONE 'Asia/Kolkata')::date` to a plain
+  `processed_at::date` and reran `tests/test_cap.py` →
+  `test_count_buckets_on_ist_midnight_not_utc` **FAILED** (the session TZ is
+  forced to UTC in the test, so the bucket collapses to 2 ≠ 3). The guard fails
+  for the reason it exists: a 23:50-IST message counting against the wrong day.
+- **Webhook cap guard is real** (`app.py:306-314`): deleted the cap block and
+  reran → `test_message_past_the_cap_is_refused_and_costs_nothing` **FAILED**
+  (the capped message reaches `handle_text`). Confirmed the refusal answers 200,
+  sends `CAP_REACHED`, never claims the update, and never calls the parser.
+- **Off-by-one**: cap checked before `claim_update`, so with N prior rows a cap
+  of N admits messages while `count < N` (N messages) and refuses the N+1th.
+  Correct.
+- **`daily_message_cap` fallback**: `os.environ.get(...) or ""` then `int()` in
+  a `try/except ValueError` → falls back to 50 on unset/empty/non-integer. The
+  `or` handles compose's `:-` present-but-empty trap. Verified by reading; a
+  non-integer does not crash the webhook.
+- **All `claim_update` callers updated** to the new 3-arg signature
+  (`grep claim_update`): only `app.py:315`. No stale 2-arg call.
+
+### Findings
+
+**1 — MEDIUM (spec fit / cost-cap semantics).** `kanakko/db.py:295-304`
+(`count_updates_on_day`) counts **every** `processed_updates` row for the user,
+but `claim_update` (`app.py:315`) stamps `user_id` on *all* handled updates —
+Confirm, Cancel, category taps, and `/undo` — none of which make an LLM call.
+The cap therefore meters far more than "exactly the thing that costs money"
+(§16, `docs/DECISIONS.md:495`).
+
+*Verified live*: seeded one text-parse claim + one Confirm claim + one category
+claim for a user, then called `count_updates_on_day` — it returned **3** for
+**1** actual LLM call. Because the dominant flow is *text → tap Confirm* (2
+updates per entry), a `DAILY_MESSAGE_CAP=50` gives a confirm-every-entry user
+only ~25 real entries before `CAP_REACHED`. The operator set 50; the user hits
+the wall at ~25, and the message says "today's message limit."
+
+Not dangerous on the bill — it errs strict, never undercounts cost, so no
+runaway is possible. But it diverges from the spec's stated meter and refuses
+legitimate users at roughly half the configured budget. The commit's own
+framing ("gates the parse path only") is about *refusing* only text; it does
+not address that the *count* still includes the free taps.
+
+*Suggested fix* (implementer's call — not applied): count only the updates that
+actually cost an LLM call. Simplest is to narrow `count_updates_on_day` to
+parse-path claims — e.g. stamp a boolean/`kind` on `processed_updates` and count
+`WHERE user_id = %s AND llm` — or only stamp `user_id` for the text-parse claim
+and leave callback claims' `user_id` NULL (they never need to be counted). Then
+add a check that a Confirm/category claim does **not** advance the count, which
+would have caught this.
+
+### Verdict
+
+Mechanism, env wiring, migration, IST bucketing, off-by-one, and both guards
+are all correct and verified. The one open item is that the cap counts non-LLM
+callback updates against an LLM-cost budget, contradicting §16's "counting
+exactly the thing that costs money" and roughly halving the effective budget for
+a normal user. Fix the count (or its scope) and add a test that a callback claim
+does not consume budget before moving on.
+
+---
+
+## 2026-08-07 — `46005b7` — gate every inbound update on authorization (Phase 9, task 3)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: the §16 authorization gate. `auth.is_authorized(conn, telegram_user_id)`
+(open mode admits everyone; invite mode admits only users who already have a
+row), a new pure-lookup `db.user_exists`, an `ACCESS_REFUSED` message in
+`handlers.py`, and a check in `app.webhook` that runs *before* `claim_update`
+and any handler. `tests/test_gate.py` new; four routing tests in
+`test_webhook.py` gain an `is_authorized=True` stub.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): 7 files, +189/-1. Touches no money path, no
+  timezone bucketing, no soft-delete, no category source. No secrets introduced.
+  No new dependency.
+- **Spec fit against §16** (`docs/DECISIONS.md:476-480`): "In `invite` mode an
+  unrecognised user gets a polite refusal and **nothing is stored**, not even a
+  user row." The gate reads with `user_exists` (a `SELECT 1`, creates nothing),
+  never `get_or_create_user`, and sits before `claim_update` — so a refused
+  update mints no user row, no `processed_updates` claim, no pending row. Matches
+  the spec exactly.
+- **Gate placement / identity**: gated on `action.from_id` — the sender's
+  identity, the same field every handler resolves the user from (§16,
+  `handlers.py:48`), not `chat_id`. Both `TextMessage` and `ButtonPress` carry
+  `from_id` with a `chat_id` fallback, so callback taps are gated too, not just
+  text.
+- **`uv run pytest`**: `222 passed`. `tests/test_gate.py tests/test_webhook.py`:
+  `34 passed`.
+- **Guard actually guards (revert test)**: replaced the gate condition with
+  `if not True:` and ran `tests/test_gate.py` → **all 3 failed**
+  (`test_unknown_user_..._stores_nothing`, `test_known_user_..._is_served`,
+  `test_open_mode_admits_an_unknown_user`), then restored via
+  `git checkout kanakko/app.py`. The core test asserts *both* directions the
+  gate exists for — `parse_calls == []` (no OpenRouter call, the cost) and
+  `users/claimed/pending == 0` (no rows, the storage) — and the two
+  counter-direction tests stop it degrading to "refuse everyone" (known user in
+  invite mode, and any user in open mode, both reach the handler).
+- **No circular import**: `auth.py` now imports `db.user_exists`; `db.py`
+  imports neither `auth` nor `app`. `uv run python -c "import kanakko.auth,
+  kanakko.app"` → `imports OK`.
+- **Monkeypatch surface**: `app.py` does `from kanakko.auth import
+  is_authorized` and calls the bare name, so the four routing tests'
+  `monkeypatch.setattr(app_module, "is_authorized", ...)` correctly intercept it
+  — confirmed by the suite passing.
+
+### Notes (non-blocking, not findings)
+
+- A refused user gets one outbound `send_message` per message they send (no LLM
+  call, no storage). That is the spec's "polite refusal" and is intended.
+- If Telegram's `sendMessage` persistently fails for a refused chat (e.g. the
+  user blocked the bot), the refusal path raises → 500 → redelivery → re-refusal
+  loop, since the update was never claimed. This is the *same* deliberate
+  500-and-redeliver contract every handler follows (`app.py:249-265`), carries
+  no cost or storage, and is not a regression introduced here.
+- The per-user daily message cap (§16 "Cost control") is a separate, still
+  unticked task — out of scope for this commit.
+
+No blocking issues. The gate does what task 3 asked, matches §16, and its check
+fails for the reason it exists.
+
+---
+
+## 2026-08-07 — `7fbbd40` — add `invites` table and `SIGNUP_MODE` (Phase 9, task 2)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: migration `004_invites.sql` creates the `invites` table (§16), a new
+`kanakko/auth.py` with `signup_mode()`, and wires `SIGNUP_MODE` into
+`.env.example` and `docker-compose.yml`. The authorization *gate* itself is the
+next task (TASKS.md line 373, still unchecked), so `auth.py` holding only the
+config reader is the scoped deliverable, not a stub.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): 7 files, +129/-1. No money path, no timezone
+  bucketing, no soft-delete, no category path is touched. No secrets introduced.
+- **Table matches §16 and the TASKS.md column list exactly.** `code` unique,
+  `kind` CHECK `IN ('signup','household')`, `household_id` nullable, `label`
+  (NOT NULL — §16 requires codes be labelled), `created_by` REFERENCES users,
+  `used_by` nullable REFERENCES users, `used_at`, `expires_at`, `created_at`.
+  All three timestamp columns are `TIMESTAMPTZ`. `household_id` has no FK yet —
+  deliberate and documented; the households migration ALTERs it in two tasks
+  later.
+- **The CHECK is behavioural, not cosmetic.** `CHECK ((kind = 'household') =
+  (household_id IS NOT NULL))` enforces the §16 pairing both ways: signup ⇒ no
+  household, household ⇒ a household. Because `kind` is NOT NULL and
+  `IS NOT NULL` never yields NULL, the predicate is always TRUE/FALSE — no
+  NULL-passes-CHECK loophole.
+- **Defeat test on the guard.** Ran `pytest
+  tests/test_migrate.py::test_invite_kind_and_household_must_agree` → PASSED. I
+  then stripped the `CONSTRAINT invites_household_matches_kind` block from the
+  migration and re-ran: **FAILED** (the two violating INSERTs no longer raise
+  `CheckViolation`). Restored the file (`git status` clean). The guard fails for
+  the reason it exists.
+- **`signup_mode()` fails closed.** Reads `$SIGNUP_MODE` at call time; returns
+  `"open"` only for the exact string `open`, else `"invite"`. `pytest
+  tests/test_auth.py` → 10 passed, covering unset, `""`, `" "`, `"Open"`,
+  `"OPEN"`, `"open "` (trailing space), `"true"`, `"yes"` — all correctly stay
+  `invite`.
+- **Two-places default is safe here.** `.env.example` leaves `SIGNUP_MODE`
+  empty; compose defaults it to `invite`. Unlike §17's `LOG_DIR` (no code
+  default), the code *also* defaults to `invite` and fails closed regardless, so
+  the two cannot drift into an unsafe state — the code always resolves toward
+  closed. Not a "second definition" defect.
+- **Schema-wide migration guards cover 004.** `test_migrations.py`'s
+  money/timestamp scanners iterate every migration file; the full run confirms
+  004's `TIMESTAMPTZ` columns pass the naive-timestamp regex and it introduces
+  no `NUMERIC`/float columns.
+- **Full suite:** `uv run pytest -q` → **219 passed** on a real ephemeral
+  Postgres cluster. `git status` clean after the revert experiment.
+
+### Findings
+
+None blocking. One observation, not a finding: the `code` column has no length
+or charset CHECK for the §16 deep-link payload (≤64 chars, `A-Z a-z 0-9 _ -`).
+That validation belongs at code generation / the gate, not the DB, and codes are
+operator-issued — so its absence here is fine and consistent with the design.
+
+---
+
+## 2026-08-07 — `af2f0a8` — resolve the user by `from.id`, not `chat.id` (Phase 9, task 1)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: separates identity from delivery address (§16). `TextMessage` and
+`ButtonPress` gain a `from_id` field, captured in `dispatch` from
+`message.from.id` / `callback_query.from.id`; all five handlers now resolve the
+user via `get_or_create_user(conn, X.from_id)` while `chat_id` stays the send
+target. `from_id` falls back to `chat_id` in `__post_init__` when unset.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): the only production change is `chat_id →
+  from_id` in the `get_or_create_user` call of all five handlers
+  (`handle_text` 178, `handle_undo` 244, `handle_confirm` 272, `handle_cancel`
+  300, `handle_category` 341), plus the two new dataclass fields, the two
+  `__post_init__` fallbacks, and the two `dispatch` captures. No money, timezone,
+  soft-delete, or category path is touched. `chat_id` is still used correctly for
+  every `send_message`/`delete_message`/`edit_message_text` (the delivery
+  address), verified by grep.
+- **All handlers covered.** `grep` for `get_or_create_user`/`from_id`/`chat_id`
+  across `kanakko/` confirms no sixth handler and no other constructor of
+  `TextMessage`/`ButtonPress` was left resolving by `chat_id`. `app.py`'s three
+  Mini App routes resolve by `telegram_user_id` from the verified `initData`
+  (lines 121/183/227) — the correct identity source there, rightly unchanged.
+- **`dispatch` null-safety.** `from_id=(message.get("from") or {}).get("id")`
+  tolerates a missing `from` block (→ `None` → falls back to `chat_id` in
+  `__post_init__`). Real private-chat messages always carry `from.id == chat.id`,
+  so the fallback only serves the pre-existing test construction sites, as
+  claimed.
+- **Full suite:** `uv run pytest -q` → **208 passed, 1 warning**.
+- **Guard reddens without the fix.** Temporarily reverted `handle_text`'s
+  resolution to `msg.chat_id` and ran
+  `test_handle_text_resolves_the_user_by_from_id_not_chat_id` → **1 failed**
+  (pending row landed under 12345, `chat_as_user` ≠ 0). Restored via
+  `git checkout`. The new test is exactly the guard §16 asked for — impossible to
+  write before the split, since `from_id == chat_id` in a private chat — and it
+  asserts the *behaviour* (which user row the pending row keys to, and that the
+  chat id never became a user) rather than a surface string. The two dispatch
+  field-tests correctly assert `from_id` is captured and distinct from `chat_id`.
+
+### Findings
+
+None. The change is minimal, correctly scoped, and its guard fails for the
+reason it exists. `TASKS.md` tick is legitimate: `from.id` is captured in
+`dispatch`, the user is resolved from it in every handler, `chat_id` stays the
+send target, and the differing-id guard is present and effective.
+
+---
+
+## 2026-08-07 — `71388bb` — §17 `LOG_DIR`/`TRACE_MODE`/`TRACE_KEEP` in `.env.example` and compose (Phase 8, task 8)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: adds the three §17 env vars to `.env.example` (empty, committed) and to
+compose's shared `x-app-env` with defaults (`LOG_DIR: ${LOG_DIR:-/app/logs}`,
+`TRACE_MODE: ${TRACE_MODE:-on}`, `TRACE_KEEP: ${TRACE_KEEP:-}`); ticks task 8 in
+`TASKS.md`. No code change — config wiring only.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **207 passed, 1 warning** (pre-existing Starlette/httpx
+  deprecation, unrelated).
+- `uv run pytest tests/test_compose.py -q` → **10 passed**.
+- **The missing-key guard reddens for its reason.** Simulated dropping `LOG_DIR`
+  from `.env.example` in a throwaway script reusing the guard's own parse logic:
+  `LOG_DIR` is in `COMPOSE_VARS` (True) but absent from env keys after the drop
+  (True) → `test_env_example_lists_every_key_compose_interpolates` would fail.
+  Restored file is green. Confirmed all three keys are both interpolated by
+  compose and present as empty keys in `.env.example`, so both guard directions
+  (`…_every_key_compose_interpolates` and `…_no_key_no_service_consumes`) hold.
+- **No values, no secrets.** `test_env_example_holds_no_values` passes; the three
+  keys carry empty values and none is a secret.
+- **Spec fit (`docs/DECISIONS.md` §17, lines 600–601, 665).** Names match
+  exactly — unprefixed `LOG_DIR`, `TRACE_MODE` (default on), `TRACE_KEEP`. Compose
+  defaults agree with the code reads: `trace.py:90` `os.environ.get("TRACE_MODE")
+  or "on"` and `_keep()` `int(os.environ.get("TRACE_KEEP") or 500)` both tolerate
+  compose's `:-` present-but-empty value (the §2 trap), and `__init__.py:26`
+  reads `LOG_DIR` with `.get` (unset/empty ⇒ disabled). The concrete `/app/logs`
+  default living in compose rather than code is correct: code treats unset as
+  "disabled" so `uv run pytest` writes nothing, while a prod deploy still logs.
+
+### Findings
+
+None. The change is a pure config-wiring commit that the existing
+`test_compose.py` guards already cover in both directions, the box in `TASKS.md`
+is ticked for work that is actually present, and every default matches §17.
+
+---
+
+## 2026-08-07 — `7dbf6be` — §17 trace mode: per-update artefact folders (Phase 8, task 7)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: adds `kanakko/trace.py` (per-update folder under `LOG_DIR/trace/<update_id>/`,
+one JSON step-file with the outcome in the filename, rotation to the last
+`TRACE_KEEP` folders, never raises) and wires `open_trace` into `handle_text`;
+ticks task 7 in `TASKS.md`; new `tests/test_trace.py`.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **207 passed, 1 warning** (pre-existing Starlette/httpx
+  deprecation, unrelated). `uv run pytest tests/test_trace.py -q` → **6 passed**.
+- `uv run ruff check kanakko/trace.py kanakko/handlers.py tests/test_trace.py`
+  → **All checks passed**.
+- **Guard 1 reddens for its reason.** Made `_rotate` early-return (no-op), ran
+  `test_rotation_deletes_the_oldest` → **FAILED** (`'1' != '4'`, oldest folders
+  not deleted). Restored.
+- **Guard 2 reddens for its reason.** Dropped the `tr.write("parse", …,
+  outcome="invalid")` line in `handle_text`, ran
+  `test_failed_parse_names_the_failure` → **FAILED** (no `*invalid*` artefact).
+  Restored. `git status` clean afterward.
+- **Spec fit (§17 / DECISIONS.md:524).** Env names match the pinned interface
+  (`LOG_DIR`, `TRACE_MODE` default-on, `TRACE_KEEP`); outcome-in-filename,
+  rotation-from-env, never-raises, and scrub-backstop are all present and
+  match the "adopted" list. `TRACE_KEEP` is read with `or` (not `get(k, default)`)
+  so compose's `:-` empty-string trap is handled, and clamped to `max(1, …)` so
+  it can't delete the live folder — verified by reading `_keep()`.
+- **No secret leak.** `build_request` returns `model`/`messages`/`response_format`/
+  `provider` — no key (the API key rides in headers, not the body), so writing the
+  request to disk is the deliberate §17 prompt-capture, not a credential leak.
+  `NEVER_LOG` (`prompt`) doesn't collide with any key in that dict, so the prompt
+  content is written as intended. `scrub` still sweeps for key-shaped substrings —
+  `test_write_never_raises_and_scrubs` confirms an `sk-or-v1-…` value is redacted
+  while `lunch` survives.
+- **Rotation ordering.** Runs after the current folder is `mkdir`-ed, sorts by
+  numeric `update_id` (monotonic per Telegram), non-numeric names sort to `-1`
+  and get culled first — no clock/mtime read, current folder always kept.
+- **Never-raises envelope.** Both `write` and `open_trace` wrap in bare
+  `except Exception` and downgrade to no tracing; `default=str` in `json.dumps`
+  serialises the `Decimal`/`date` a parse carries.
+
+### Findings
+
+**Low — `build_request` (and the input dict) are evaluated on every text
+message, even when tracing is off.** `kanakko/handlers.py:164`
+`tr.write("request", build_request(msg.text))` evaluates `build_request` as an
+argument before `write` checks `folder is None`, so with `TRACE_MODE=off` or
+`LOG_DIR` unset the full request (including `parse_schema()`) is built and
+discarded — and when tracing is on (the prod default) `build_request` runs
+twice per message, once here and once inside `parse_message`. Pure function, no
+network, no correctness impact (207 tests green); purely wasted CPU. Not
+blocking. If it ever matters, guard the two writes behind `if tr.folder:` or
+add a cheap `Trace.enabled` property. Noting only so it's a known, deliberate
+cost rather than an accident.
+
+Minor test-gap (not a finding to fix): no test exercises `write` swallowing an
+actual filesystem/serialisation failure — the `except` is there and reasoned,
+but only the disabled-no-op path is asserted. Acceptable for a never-raises
+backstop.
+
+---
+
+## 2026-08-07 — `762fb9a` — write the §17 audit trail inside the money transaction (Phase 8, task 6)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: adds `migrations/003_transaction_events.sql` and makes the four money
+functions (`confirm_pending`, `undo_last`, `soft_delete_transaction`,
+`set_transaction_category`) write one `transaction_events` audit row on the same
+cursor, inside the function's own `conn.transaction()` block. Each takes `source`
+and a nullable `update_id` as arguments; `set_transaction_category` reads the old
+category with a `SELECT` before its `UPDATE` (Postgres 16, no `RETURNING OLD.*`).
+`before`/`after` serialise through `json.dumps(default=str)` so the amount and
+date are canonical strings, never a float. Judged against §17 and TASKS.md task 6.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — the whole diff: `migrations/003_transaction_events.sql` (new
+  table + index), `db.py` (`_record_event` helper, four functions now wrap in
+  `conn.transaction()` and record an event), `handlers.py`/`app.py` (call sites
+  pass `source`/`update_id`), `tests/test_db.py` (4 new audit tests + seed-call
+  updates), `tests/test_webhook.py` (seed-call updates), `TASKS.md` (task 6 ticked).
+- `uv run pytest -q` → **201 passed**, 1 warning (pre-existing Starlette
+  testclient deprecation, unrelated).
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Reddened the audit guards myself.** Replaced `_record_event(...)` in
+  `confirm_pending` with `pass` and ran `-k "audit or atomic"` →
+  `test_confirm_writes_an_audit_row` and `test_undo_and_delete_write_audit_rows`
+  **FAILED** (2 failed, 1 passed). Restored (`git checkout`, tree clean). The
+  content guards fail for the reason they exist.
+- **Spec fit, verified against the code, not the message:**
+  - Columns match task 6 / §17: `txn_id`, `user_id`, `action`
+    (`CHECK IN (confirm|undo|delete|recategorise)`), `before`/`after` JSONB
+    (nullable), `source` (`CHECK IN (webhook|miniapp|cron)`, always present),
+    `update_id BIGINT` nullable, `created_at` default `now()`. Migration is
+    auto-discovered by `migrate.py`'s `glob("*.sql")`; FKs reference tables in 001.
+  - Money stays `Decimal`/string: `after["amount"] == "250.00"` in the test, and
+    the functions *return* the raw `Decimal` for the caller's log line — no float
+    anywhere. Reads for `undo`/`delete`/`recategorise` all go through
+    `active_transactions` (§6).
+  - All call sites updated — grep for the four function names shows no caller
+    missing `source=`; `msg.source`/`press.source` and `msg.update_id`/
+    `press.update_id` exist on the handler models (`handlers.py:56,72`), and the
+    two Mini App routes pass `source="miniapp", update_id=None` (§17 gap 2).
+
+### On the atomicity guard — checked and found adequate (not a finding)
+
+The one guard worth attacking is `test_the_ledger_row_and_its_audit_row_are_atomic`,
+whose docstring says it "reddens the moment either write is committed independently
+of the other." I tried to defeat it: **removing the inner `conn.transaction()`
+wrapper** from `undo_last` (the mechanism that is supposed to make db.py
+self-sufficient) left **all 46 db+webhook tests green**. So the test does *not*
+pin the inner wrapper.
+
+That is **not a defect**, because the task text itself calls it out
+(`TASKS.md:322-325`): *"Note what that check does not prove: it exercises today's
+call ordering, which is exactly why the write's location is specified rather than
+left to judgement."* The guarantee against the §16-reorders-the-calls regression
+is delivered by pinning the audit write's **location** (adjacent, inside db.py's
+`conn.transaction()`), which the shipped code does, not by the test. Under every
+current caller (`with connect() as conn: … <mutation>`) the money and audit
+statements share one connection-level transaction regardless, so removing the
+inner wrapper changes no production behaviour today — it only removes the
+future-proofing. The check asserts *both* rows absent (not one), as the task
+required. Adequate as specified.
+
+### Low-severity observation (non-blocking, loud failure — not silent wrongness)
+
+`set_transaction_category` (`kanakko/db.py:454-463`) unpacks the UPDATE's
+`RETURNING` with `tid, amount = cur.fetchone()` and does **not** guard for `None`,
+unlike its siblings (`confirm_pending`, `soft_delete_transaction`, `undo_last` all
+do `if row is None: return None`). The `SELECT` at the top proves the row is active
+*at SELECT time*, but the `UPDATE`'s subquery re-reads `active_transactions`. If the
+same user's Mini App fires a `/app/delete` and `/app/category` on the identical row
+near-simultaneously (separate connections, READ COMMITTED) and the delete commits
+between this transaction's `SELECT` and `UPDATE`, the subquery yields nothing, the
+UPDATE affects 0 rows, `fetchone()` returns `None`, and the unpack raises
+`TypeError` → HTTP 500 with a full rollback. No partial write, no money error, no
+silent total drift — it fails loud and clean, and the race is a narrow same-user
+double-tap. Worth a `if row is None: return None` for parity, but not blocking.
+
+---
+
+## 2026-08-07 — `2d0eaca` — log the parse success side through the §17 seam (Phase 8, task 5)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `handle_text` emits one `parse.completed` (status `ok`) after a
+successful parse, carrying `duration_ms` (the parse call alone, retry included),
+the resolved `model`, and the §17 correlation fields (`update_id`, `source`,
+`user_id`). `resolve_model()` is extracted in `parse.py` so `build_request` and
+the log line share one definition of the model id. The 4xx/5xx paths log nothing
+here — Phase 6's WARNING owns the failure side. Judged against §17 (greppable
+event+status; `source` always present; never-log/scrubber; amounts/prompts not
+leaked) and TASKS.md task 5.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — the whole diff: `TASKS.md` (task 5 ticked), `handlers.py`
+  (+`parse_start` mark, +`parse.completed` log on success only), `parse.py`
+  (new `resolve_model`, `build_request` now calls it), `test_webhook.py` (one
+  new test).
+- `uv run pytest -q` → **197 passed**, 1 warning (pre-existing Starlette
+  testclient deprecation, unrelated).
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Reddened the guard myself**: removed the `parse.completed` `log_event` block
+  from `handlers.py` and ran the new test →
+  `test_handle_text_logs_the_parse_success_but_not_the_failure` **FAILED**
+  (1 failed). Restored (`git diff --stat` clean). The check fails for the reason
+  it exists.
+
+### Correctness notes (verified, not assumed)
+
+- **Success-only placement is right.** The `log_event` sits after all three
+  `except` branches — `ValidationError` and 4xx both `return None` before it, 5xx
+  `raise`s — so `parse.completed` fires only on a genuinely successful parse. The
+  model's own schema-failure retry lives inside `parse_message`, so only a final
+  success reaches the log line. The test asserts both directions (success logs
+  exactly one; a 402 logs none), so a future second call on the failure path
+  would redden it.
+- **`duration_ms` isolates model latency correctly.** `parse_start` is marked
+  immediately before `parse_message` (after `get_or_create_user`), and `start`
+  (line 155) still times the whole handler for `pending.created`. Two distinct
+  marks, no cross-contamination — the parse duration excludes the later
+  `send_message`/`save_pending`, which is the point.
+- **One definition of the model.** The log's `resolve_model()` and
+  `build_request`'s `resolve_model(model)` are the same function reading the same
+  env with the `or ""`-safe compose trap in one place. In the real flow both read
+  a process-stable `OPENROUTER_MODEL`, so the reported model equals the sent one;
+  no realistic path desyncs them.
+- **No secret or money exposure.** Only `model`, a duration, and correlation ids
+  are logged — no prompt, no `initData`, no amount; nothing on the never-log list
+  or key-shaped. No `float` and no money path touched.
+
+No findings. Clean, well-scoped commit; the box is honestly ticked.
+
+---
+
+## 2026-08-07 — `0383f74` — log the dashboard money mutations through the §17 seam (Phase 8, task 4)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: the two Mini App money routes now emit one `log_event` each —
+`transaction.deleted` (`/app/delete`) and `transaction.recategorised`
+(`/app/category`) — with `source="miniapp"` and **no `update_id`** (an HTTP POST
+is not a Telegram update, §17 gap 2), status following the outcome (`ok` with
+`txn_id`+`amount`; a 404 → `noop` with no amount). `db.soft_delete_transaction`
+and `set_transaction_category` now return the touched row (`{txn_id, amount}`)
+instead of a bare id, mirroring the bot-side pair. Two new `test_webapp.py`
+tests. Judged against §17 (three statuses; `source` always present; `update_id`
+absent on a Mini App event; amount on the operational log) and TASKS.md task 4.
+
+### What I checked (commands and results)
+
+- Full `uv run pytest -q` → **196 passed**, 1 unrelated Starlette/httpx
+  deprecation warning — matches the commit's "196 passed." `uv run ruff check
+  kanakko/ tests/` → **All checks passed!**
+- **The load-bearing guard actually reddens.** Programmatically dropped the
+  `log_event(status="ok", …)` line from `mini_app_delete` →
+  `test_delete_route_logs_the_money_mutation` **FAILED** (the events list no
+  longer starts with the `ok` line). Restored; tree clean (`git diff --stat`
+  empty).
+- **Scope is correct.** This task is the *operational* log only. The §17 audit
+  row (`transaction_events`, written inside the money statement's
+  `conn.transaction()` in `db.py`) is task 6, still unchecked in TASKS.md — so
+  logging *after* the `with connect()` block commits is right here, not the
+  atomicity trap §17 warns about. The `ponytail:` comments name the real
+  ceiling (a synchronous sink in an async route) and upgrade path (a queue).
+- **`amount` is a genuine `Decimal`, not a float.** It flows straight from
+  `RETURNING txn_id, amount` on a `NUMERIC(12,2)` column through psycopg's
+  cursor into the dict — no arithmetic touches it. (Noted: the test's
+  `== Decimal("300.00")` would also pass for a float `300.0`, so the assertion
+  alone doesn't *pin* the type, but the code path introduces no float, and the
+  default sink serialises with `default=str`, so nothing float-shaped is stored.)
+- **`noop` carries no amount, `ok` does.** Confirmed in both routes: the `None`
+  branch passes only `user_id`+`duration_ms`; the tests assert `"amount" not in
+  events[1]`. The cross-user 404 (delete/recategorise another user's row) is
+  scoped through `active_transactions`, so it correctly logs `noop`, not `ok`.
+- `update_id` genuinely absent (not `None`): the routes never pass it and the
+  test asserts `"update_id" not in events[0]`.
+
+No findings.
+
+---
+
+## 2026-08-07 — `5f3bc47` — log the bot-side money mutations through the §17 seam (Phase 8, task 3)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: every bot-side handler now emits one `log_event` (§17) — `pending.created`,
+`transaction.confirmed`, `transaction.undone`, `pending.cancelled`,
+`pending.recategorised` — with status following the outcome (`ok`/`noop`); the
+error side is logged once in the webhook (`update.handled`, `status="error"`)
+inside a single `try/except … raise` around the dispatch. `db.py`: `undo_last`
+now returns `txn_id`, and `confirm_pending` returns the stored row (dict) rather
+than a bare id so the amount is loggable. Tests in `test_db.py`/`test_webhook.py`
+updated for the dict return; two new webhook tests. Judged against §17 (three
+statuses `ok`/`error`/`noop`; error logged once in the webhook not seven
+handlers; amounts on the two ledger paths; `source` always present).
+
+### What I checked (commands and results)
+
+- Full `uv run pytest -q` → **194 passed**, 1 unrelated Starlette/httpx
+  deprecation warning. Matches the commit's "194 passed." `uv run ruff check
+  kanakko/` → **All checks passed!**
+- **Both load-bearing guards actually redden.** Programmatically:
+  - Mutated `handle_confirm`'s `noop` branch to log `status="ok"` →
+    `test_handle_confirm_logs_ok_then_noop_on_a_redelivery` **FAILED** (a
+    redelivered Confirm now looks like a second real confirm). Restored.
+  - Dropped only the `log_event(status="error", …)` from the webhook's
+    `except` (kept the bare `raise`) →
+    `test_webhook_logs_exactly_one_error_line_when_a_handler_raises` **FAILED**
+    (`len(errors) == 0`, not 1). Restored, `git diff` clean, full suite 194
+    again. Neither guard is decorative.
+- **Money stays `Decimal`.** `confirm_pending` logs `txn.amount` (Decimal off
+  the `Transaction` model); `undo_last` logs the `NUMERIC(12,2)` column value
+  (Decimal). `scrub()` returns non-str/dict/list values untouched, so a Decimal
+  reaches the sink intact and `file_sink`'s `default=str` serialises it. No
+  `float` enters any amount. The `test_db` check asserts `row["amount"] ==
+  Decimal("1234.56")`.
+- **Coverage is complete for the task's scope.** All five bot handlers log;
+  `handle_text`'s null-category branch still routes through `save_pending` and
+  reaches the `pending.created` line (`handlers.py:174-180`). The two ledger
+  paths carry `txn_id`+`amount`; the pending-only paths carry neither, exactly
+  as §17 and `TASKS.md` specify. The dashboard/miniapp paths and the audit
+  table are their own (still-unchecked) tasks — correctly out of scope here.
+- **`update.handled` on success is intentional**, replacing the pre-existing
+  `log.info("handled update …")` tail line; a successful update emits both its
+  per-handler event and the `update.handled` umbrella — matches the commit's
+  stated intent. The `claim_update` redelivery short-circuit returns before any
+  event, which is fine — it's not a money mutation and §17 doesn't require it.
+- **No secret/PII in the new lines.** `pending.created` carries only
+  `update_id`/`source`/`user_id`/`duration_ms` — no note or raw text; the
+  ledger lines add only `txn_id`+`amount`. The forged-tap `pending.recategorised`
+  omits `user_id` by design (commented).
+- The "does not commit — the caller owns the transaction" claim added to
+  `confirm_pending`'s docstring holds in the webhook: `claim_update` opens the
+  transaction first, so the inner `conn.transaction()` is a savepoint, matching
+  the identical `undo_last` docstring. Pre-existing behaviour, unchanged here.
+
+### Findings
+
+None blocking. Nothing cosmetic worth raising.
+
+---
+
+## 2026-08-07 — `8154340` — the §17 scrubber and never-log list (Phase 8, task 2)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `kanakko/eventlog.py` gains `scrub()` (recursive redaction) plus the
+`NEVER_LOG` name set and `_SECRET` pattern; `log_event` now routes `**fields`
+through `scrub()` before the sink. `tests/test_eventlog.py` adds two checks;
+`TASKS.md` ticks the scrubber task. Judged against §17 ("never logged … and a
+scrubber as the backstop: … redacts anything key-shaped and any base64 run over
+500 characters … a scrubber is a net, not a policy").
+
+### What I checked (commands and results)
+
+- `uv run pytest tests/test_eventlog.py -q` → **8 passed**; full `uv run pytest
+  -q` → **192 passed**, 1 unrelated Starlette/httpx deprecation warning. Matches
+  the commit's "192 passed."
+- **The load-bearing guard actually reddens.** Programmatically reverted
+  `**scrub(fields)` back to `**fields` in `log_event`, ran
+  `test_log_event_scrubs_before_the_sink` → **FAILED** (`'the full LLM prompt'
+  != '[REDACTED]'`), then restored the file and confirmed byte-identical. The
+  scrub wiring is load-bearing, not decorative.
+- **Tried to defeat the scrubber** with a probe script (`/tmp/probe.py`):
+  - `sk-or-v1-…` OpenRouter key → `[REDACTED]` ✓
+  - `8123456789:AA…` bot token → `[REDACTED]` ✓
+  - standard base64 blob of 600 chars → redacted ✓
+  - `prompt` nested one dict deep → redacted by name ✓ (recursion + name match)
+  - `Decimal('500.00')` → returned **unchanged** as `Decimal('500.00')` ✓ — the
+    money path is untouched; `scrub` falls through to `return value` for any
+    non-str/dict/list/tuple, so amounts and ids survive verbatim.
+- Read §17 (lines 660–663) and the task text: the check requirement — a bot
+  token, an `sk-or-` key, a long base64 blob each asserted absent *and* the
+  surrounding fields asserted present at depth — is met by
+  `test_scrub_redacts_secrets_but_keeps_the_rest`. A redact-everything scrubber
+  fails its survival asserts, so the test discriminates in both directions.
+
+### Findings
+
+**None blocking.** One note, deliberately below the bar for CHANGES REQUESTED:
+
+- **(low / note) `kanakko/eventlog.py:42` — the base64 catch-all misses the
+  URL-safe alphabet.** `_SECRET`'s third branch is `[A-Za-z0-9+/]{500,}={0,2}`,
+  i.e. standard base64 only. A 600-char **base64url** run (`-`/`_` instead of
+  `+`/`/`) passes through un-redacted — verified: `scrub('A'*300 + '-'*10 +
+  '_'*10 + 'B'*300)` returns the string intact. This is a heuristic backstop of
+  a backstop, and the real secrets are covered independently (bot token and
+  `sk-` keys by their own patterns; `initData`/`prompt` by name), so nothing
+  §17 names as never-log actually leaks. But "any base64 run over 500 chars" in
+  both the spec and the commit message reads as covering the url-safe variant
+  too — JWTs and many opaque tokens use it. If you want the guard to mean what
+  it says, widen the class to `[A-Za-z0-9+/_-]{500,}={0,2}`. Left as the
+  implementer's call since it changes no named-secret coverage.
+
+Not findings, checked and cleared: `event`/`status` are unscrubbed but they are
+controlled literals at call sites, never user data; `sk-[A-Za-z0-9-]{20,}`
+omits `_` (OpenAI `sk-proj-…_…` keys), but this project's key is OpenRouter
+`sk-or-v1-<hex>` which is fully covered; `tuple`→`list` coercion is invisible
+after JSON serialisation.
+
+---
+
+## 2026-08-07 — `ab8eafc` — the §17 event-log seam (Phase 8, task 1)
+
+**Status: ✅ DONE** — no blocking issues.
+
+Scope: `kanakko/eventlog.py` (`log_event` / `bind_sink` / `unbind_sink` /
+`ms_since` / `file_sink`, pinned `ok|error|noop`), the sink bound inside the
+existing `configure_logging()` on truthy `LOG_DIR`, and `update_id` / `source`
+added to both dispatch dataclasses (gap 1). No call sites, sinks-to-Postgres, or
+scrubber yet — those are the still-unchecked tasks and correctly out of scope.
+
+### What I checked (commands and results)
+
+- `uv run pytest -q` → **190 passed**, 1 unrelated Starlette/httpx deprecation
+  warning.
+- **The load-bearing guard actually reddens.** Temporarily replaced the
+  `try/except` in `log_event` with a bare `sink(record)` and ran
+  `tests/test_eventlog.py` → **1 failed** (`test_a_raising_sink_never_breaks_the
+  _caller`, `RuntimeError: sink is down` propagating). Restored; `git diff
+  --stat` clean. The "never raises" contract fails for the reason it exists —
+  this is the check the commit claimed and it holds.
+- **The `LOG_DIR` empty-string trap is real and tested.**
+  `test_configure_logging_binds_only_when_log_dir_is_set` asserts unbound for
+  both unset *and* present-but-empty (`""`), bound only for a real path. The
+  code reads `os.environ.get("LOG_DIR")` then `if log_dir:` — truthiness, not
+  `get(key, default)`, so compose's `:-` empty value slips through to unbound.
+  Matches §17 / CLAUDE.md's "assert the effect" bar.
+- **No JSONL leaked into the repo.** After the full run, `git status --short`
+  clean and `find . -name events.jsonl` (excl. `.venv`) empty. `grep -rn
+  LOG_DIR` confirms it is set nowhere in tests, `.env*`, or compose, so the sink
+  stays unbound under pytest as designed.
+- **Dataclass fields are additive.** `update_id: int | None = None` and
+  `source: str = "webhook"` are appended with defaults; all 16 construction
+  sites in `tests/test_webhook.py` are keyword-based, so positional construction
+  is unaffected. The two equality assertions now assert the correlation id is
+  captured (`update_id=4242/4243`) plus `action.source == "webhook"`.
+
+### Spec fit
+
+- No `float` anywhere; no money path touched this commit. `file_sink` uses
+  `json.dumps(record, default=str)` so the `Decimal` amounts later call sites
+  pass serialise as strings — the right seam for the money tasks that follow.
+- Statuses pinned to exactly `ok|error|noop` (§17), module named `eventlog.py`
+  not `logging.py`, seam is `bind_sink`/`unbind_sink`, correlation id is
+  `update_id`, origin field is `source` — all names match §17's pinned list.
+- Rotation is stdlib `RotatingFileHandler` on a dedicated `kanakko.events`
+  logger with `propagate=False` — no new dependency, JSON lines kept out of the
+  operational stderr handler (§17 storage).
+
+### Notes (not blocking, not findings)
+
+- `file_sink` reuses the process-wide `kanakko.events` logger and only adds a
+  handler `if not events.handlers`; a second `file_sink(other_dir)` in the same
+  process would silently keep the first path. In production `configure_logging`
+  is only ever called with one `LOG_DIR` per process, and the test fixture
+  clears the handler between tests, so this is a documented gotcha, not a bug in
+  this diff.
+- `dispatch` sets `update_id` but leans on the dataclass default for `source`
+  rather than setting it explicitly. Harmless — `dispatch` only ever handles
+  webhook updates — but worth a glance when the miniapp call sites land.
+
+---
+
 ## 2026-08-07 — `d561153` — period-over-period delta on each dashboard hero (Phase 7)
 
 **Status: ✅ DONE** — no blocking issues.

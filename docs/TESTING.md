@@ -36,6 +36,12 @@ log searchable afterwards.
 > environment. Prefer distinctive amounts (₹1.11, ₹2.22) so test rows are easy to
 > find and remove afterwards, and clean up with `/undo` or the dashboard when done.
 
+> **Trace mode is on by default, so everything you type here lands on disk** —
+> the raw message, the prompt built from it, and the model's reply, kept until
+> rotation (§17). That is deliberate for a beta among friends and is what makes a
+> parse bug diagnosable, but assume a test session is recorded verbatim. Section
+> 5a.12 is where you look at what was kept.
+
 ---
 
 ## 1. Entry and the confirm loop
@@ -45,12 +51,14 @@ The core path — §2, §3, §4. If this is broken, nothing else matters.
 | # | Step | Expected | Status | Notes |
 |---|---|---|---|---|
 | 1.1 | Send `spent 250 on lunch` | A confirm card appears within a few seconds: amount ₹250.00, type expense, category Food, today's date, the note | ⬜ | |
-| 1.2 | Tap **Confirm** | Toast says "Saved ✅"; the card stops offering Confirm | ⬜ | |
+| 1.2 | Tap **Confirm** | Toast says "Saved ✅"; the card settles into a "✅ Saved" receipt and stops offering Confirm/Cancel | ⬜ | |
 | 1.3 | Send `got 50000 salary` | Confirm card: ₹50,000.00, **income**, Salary | ⬜ | |
 | 1.4 | Confirm it | Saved | ⬜ | |
 | 1.5 | Send `paid 1200 to bigbasket yesterday` | Card shows **yesterday's** date, not today, and category Groceries | ⬜ | |
 | 1.6 | Send `spent 99.50 on coffee` | Card shows **₹99.50** — paise preserved exactly, not ₹99 or ₹100 | ⬜ | |
 | 1.7 | Send `hello how are you` | A rephrase prompt. **No card, no amount invented.** | ⬜ | |
+| 1.7a | Send `hi` (or `/help`) | The help text — how to log an expense. Answered instantly, **no parser call**; it does not count against your daily message cap | ⬜ | |
+| 1.7b | Send `spent five hundred on lunch` | Still reaches the parser (a card or category buttons) — an exact-greeting short-circuit must never swallow a real entry with no digits | ⬜ | |
 | 1.8 | Send `bought something for 300` | Category buttons instead of a confirm card (the model couldn't tell) | ⬜ | |
 | 1.9 | Tap a category on that card | Card re-renders as a full confirm card with your category and gains Confirm/Cancel | ⬜ | |
 
@@ -67,6 +75,7 @@ somewhere, and that is a stop-everything bug.
 |---|---|---|---|---|
 | 2.1 | Send `spent 111 on tea`, then tap **Cancel** | Toast "Discarded ❌", and **the card disappears from the chat entirely** | ⬜ | |
 | 2.2 | Scroll up — is the cancelled card gone? | Yes. No leftover card with dead buttons | ⬜ | |
+| 2.2a | Confirm an entry, then tap **Cancel** on that same (now settled) card | Toast "Already gone"; **the receipt stays in the chat** and the entry stays in the ledger — a stale Cancel never wipes a saved receipt | ⬜ | |
 | 2.3 | Confirm a new entry, then send `/undo` | Reply names exactly what was removed (type, amount, category) | ⬜ | |
 | 2.4 | Send `/undo` again immediately | "Nothing to undo." — it does **not** delete a second, older transaction | ⬜ | |
 | 2.5 | On a confirm card, tap a *different* category | Card re-renders with the new category; amount and date unchanged | ⬜ | |
@@ -149,12 +158,55 @@ Some need an operator to break something deliberately.
 | 5.4 | *(operator)* Check the container log during 5.1 | A `WARNING` line with the status code and provider message. **The API key must not appear in it** | ⬜ | |
 | 5.5 | Send 3–4 messages rapidly | Each gets its own card; none is lost or duplicated | ⬜ | |
 
+### 5a. Logging, the audit trail, and trace mode
+
+§17 (Phase 8). Almost all operator checks — they need a shell in the
+`kanakko-web` container and `psql` on `kanakko-db`. The operational log is
+`$LOG_DIR/events.jsonl` (JSON Lines, rotated by stdlib at 5 MB × 5); the audit
+trail is the `transaction_events` table; trace artefacts are
+`$LOG_DIR/trace/<update_id>/`.
+
+**Before starting**, log one distinctive expense (₹3.33) and confirm it — most rows
+below refer back to it. Note its `update_id` from the log.
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 5a.1 | `tail -3 $LOG_DIR/events.jsonl` after confirming it | A `transaction.confirmed` line, `"status":"ok"`, with `txn_id`, `amount`, `duration_ms` and `source":"webhook"` | ⬜ | |
+| 5a.2 | Compare that line's `update_id` with the `pending.created` line before it | **Different** ids — the card and the tap are two updates. The confirm's id must match the tap, not the typing | ⬜ | |
+| 5a.3 | Tap **Confirm** a second time on the same card | A second line with `"status":"noop"` — **not** `ok` — and no second ledger row | ⬜ | |
+| 5a.4 | `jq -r 'select(.status=="error")' $LOG_DIR/events.jsonl` | Empty on a normal day. Anything here is a handler that raised, and it should correspond to a 500 | ⬜ | |
+| 5a.5 | `grep -c "$TELEGRAM_BOT_TOKEN" $LOG_DIR/events.jsonl` and the same for the OpenRouter key | **0 for both**, and repeat it against `$LOG_DIR/trace/` | ⬜ | |
+| 5a.6 | `select action, before, after, source, update_id from transaction_events where txn_id = <yours>` | One row: `action='confirm'`, `before` **NULL**, `after` carrying the amount, `source='webhook'`, `update_id` set | ⬜ | |
+| 5a.7 | Change that row's category in the dashboard, re-run 5a.6 | A second row, `action='recategorise'`, `before`/`after` showing **both** categories, `source='miniapp'`, `update_id` **NULL** | ⬜ | |
+| 5a.8 | `/undo` a fresh entry, then query its events | `action='undo'`, `after` NULL. Every money change has exactly one row | ⬜ | |
+| 5a.9 | `select count(*) from transactions t where not exists (select 1 from transaction_events e where e.txn_id = t.txn_id)` | **0** — a ledger row with no audit row means the two came apart, which is the failure §17 exists to prevent | ⬜ | |
+| 5a.10 | `ls $LOG_DIR/trace/<update_id>/` for a successful parse | `01__input.json`, `02__request.json`, `03__parse__ok.json` — the listing alone tells you it succeeded | ⬜ | |
+| 5a.11 | Send `hello how are you`, then `ls` that update's folder | `03__parse__invalid.json` — the **filename** names the failure, no file opened | ⬜ | |
+| 5a.12 | Open `01__input.json` and `02__request.json` from any folder | Your raw text and the full prompt, in clear. **Expected** — this is the trade §17 records for revisiting before real customers | ⬜ | |
+| 5a.13 | *(operator)* Set `TRACE_KEEP=3`, send 5 messages, `ls $LOG_DIR/trace/ \| wc -l` | **3.** Rotation that never fires is the bug that fills the shared volume | ⬜ | |
+| 5a.14 | *(operator)* Set `TRACE_MODE=off`, send a message | No new folder appears, and the bot still works normally | ⬜ | |
+| 5a.15 | *(operator)* Restart `kanakko-web`, then check `events.jsonl` | **Still there, with the old lines.** This is the volume mount — without it every deploy wipes the evidence | ⬜ | |
+| 5a.16 | *(operator)* In `kanakko-cron`, write a file into `$LOG_DIR` and read it back from `kanakko-web` | The **same** volume is mounted on both — §17 requires it, and the jobs are the reason | ⬜ | |
+| 5a.17 | *(operator)* Run `python -m kanakko.jobs.evening` in `kanakko-cron`, then `jq 'select(.event\|startswith("job."))' $LOG_DIR/events.jsonl` | **One** line per run — `event":"job.evening"`, `"status":"ok"`, `"source":"cron"`, with `considered`, `delivered`, `skipped`, `failed` and `duration_ms`. One event per *run*, not per user | ⬜ | |
+| 5a.18 | *(operator)* Force a delivery failure (a blocked recipient), re-run the job | A `"status":"error"` line **and** the job exits non-zero (`echo $?` ≠ 0) — the log line is *in addition* to the raise, never instead of it. Earlier users' `reminder_log` rows are still present | ⬜ | |
+
+**5a.5 and 5a.9 are the two that matter.** A token in the log is a leak that
+survives on disk until rotation, and an orphan ledger row means the audit write is
+no longer inside the money transaction — the exact regression the arrangement in
+`db.py` exists to make impossible.
+
+**5a.15–5a.18 cannot pass until the volume is mounted** on both applications
+(the `[human]` task in Phase 8) — the job rows need the `kanakko-cron` container
+writing to the shared volume. Until then, mark them ⛔ rather than ❌ — nothing is
+broken, the infrastructure just isn't there yet.
+
 ---
 
 ## 6. Access control and households
 
-**Phase 9 — not built yet.** Leave ⛔ until it ships; listed now so the plan is
-testable the day it lands.
+**Phase 9 shipped 2026-08-08** — these are live checks now, not a forward plan.
+Every row needs a **second Telegram account** you control; 6b onwards needs a
+third for the "other member" cases.
 
 ### 6a. Signup gate
 
@@ -162,10 +214,23 @@ testable the day it lands.
 |---|---|---|---|---|
 | 6a.1 | From a Telegram account that has never used the bot, send `/start` (invite mode) | Polite refusal. No ledger created | ⬜ | |
 | 6a.2 | After 6a.1, *(operator)* check the database | **No user row** was created for that person | ⬜ | |
+| 6a.7 | From an account that has **never** used the bot, open the chat and tap the **menu button** to open the Mini App — do *not* press Start | The dashboard shows **no data** and the request is refused (403). This is the door the bot's own gate doesn't cover | ⬜ | |
+| 6a.8 | After 6a.7, *(operator)* `select count(*) from users where telegram_user_id = <that account>` | **0.** Opening the Mini App must mint nothing | ⬜ | |
+| 6a.9 | After 6a.7, from that same account send `spent 100 on tea` in the chat | Still the invite-only refusal. Opening the dashboard must not have made them known to the bot | ⬜ | |
+| 6a.10 | Admit that account properly (invite link), then open the Mini App again | Dashboard loads normally | ⬜ | |
 | 6a.3 | Same account, open a valid signup invite link | Welcome message; a household of one is created | ⬜ | |
 | 6a.4 | Open the **same** link again from a third account | Refused — codes are single-use | ⬜ | |
 | 6a.5 | Open an expired code | Refused, and says so distinctly from "already used" | ⬜ | |
 | 6a.6 | Send `/start garbage_payload` | Refused cleanly; no half-created household | ⬜ | |
+
+**6a.7–6a.9 are a real defect that was found and fixed before the merge, so
+re-run them after any change to the Mini App routes.** The routes resolved their
+caller with `get_or_create_user`, which *created* a row for whoever opened the
+dashboard. That row then satisfied the bot's gate — which asks "does a user row
+exist?" — so the Mini App let anyone past the invite gate. It also left them in no
+household, and a Confirm then hit a NOT NULL violation on `household_id`, 500ing
+into a Telegram redelivery loop. A user row is now the credential: it exists only
+after `/start` admitted the person, so resolving must never create one.
 
 ### 6b. Household membership
 
@@ -253,7 +318,8 @@ survives.
 | 3. Dashboard | | | |
 | 4. Reminders | | | |
 | 5. Failure handling | | | |
-| 6. Households *(not built)* | | | |
+| 5a. Logging and audit trail | | | |
+| 6. Access control and households | | | |
 | 7. Security | | | |
 | 8. Recovery | | | |
 

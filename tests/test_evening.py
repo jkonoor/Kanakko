@@ -11,7 +11,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+from conftest import household_of, join_household
 
+from kanakko import eventlog
 from kanakko.db import day_summary, get_or_create_user
 from kanakko.jobs import DeliveryFailures, evening
 from kanakko.jobs.evening import summary_text, today_ist
@@ -23,9 +25,9 @@ def _insert(conn, user_id, amount, type_, occurred_on, deleted=False):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, amount, type, category, note, occurred_on, deleted_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (user_id, amount, type_, None, None, occurred_on, deleted_at),
+            " (user_id, household_id, amount, type, category, note, occurred_on, deleted_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (user_id, household_of(conn, user_id), amount, type_, None, None, occurred_on, deleted_at),
         )
 
 
@@ -76,12 +78,52 @@ def test_run_logs_an_evening_reminder_for_each_user(conn, monkeypatch):
     b = get_or_create_user(conn, 700801)
     monkeypatch.setattr(evening, "send_message", lambda tg_id, text: None)
 
-    sent = evening.run(conn)
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        sent = evening.run(conn)
+    finally:
+        eventlog.unbind_sink()
 
     assert sent == 2
     with conn.cursor() as cur:
         cur.execute("SELECT user_id, kind FROM reminder_log ORDER BY user_id")
         assert cur.fetchall() == [(a, "evening"), (b, "evening")]
+
+    # §17: one `ok` event per run (not per user), carrying the run's shape.
+    assert len(events) == 1
+    assert events[0]["event"] == "job.evening"
+    assert events[0]["status"] == "ok"
+    assert events[0]["source"] == "cron"
+    assert (events[0]["considered"], events[0]["delivered"], events[0]["skipped"]) == (2, 2, 0)
+    assert isinstance(events[0]["duration_ms"], int)
+    conn.rollback()
+
+
+def test_evening_carries_the_household_figure_to_every_member(conn, monkeypatch):
+    """Both members of a household get the *household* day total, not a personal one (§16).
+
+    Two members share one household; only `a` logs anything (₹150.50 across two
+    entries). §16 makes the evening summary a household figure, so both members
+    must receive the same total — `b`, who logged nothing, still sees the
+    household's spend, not "no entries". A personal-scoped summary (reverting
+    `day_summary` to filter on `user_id`) would send `b` the empty-day message,
+    which this asserts against.
+    """
+    migrate(conn)
+    day = today_ist()
+    a = get_or_create_user(conn, 701000)
+    b = get_or_create_user(conn, 701001)
+    join_household(conn, household_of(conn, a), b)
+    _insert(conn, a, Decimal("120.50"), "expense", day)
+    _insert(conn, a, Decimal("30.00"), "expense", day)
+
+    sent = {}
+    monkeypatch.setattr(evening, "send_message", lambda tg_id, text: sent.__setitem__(tg_id, text))
+    evening.run(conn)
+
+    both = "🌙 Today: 2 entries, spent ₹150.50."
+    assert sent == {701000: both, 701001: both}  # b sees the household spend, not an empty day
     conn.rollback()
 
 
@@ -132,12 +174,28 @@ def test_one_blocked_recipient_does_not_silence_the_others(conn, monkeypatch):
 
     monkeypatch.setattr(evening, "send_message", flaky_send)
 
-    with pytest.raises(DeliveryFailures) as caught:
-        evening.run(conn)
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        with pytest.raises(DeliveryFailures) as caught:
+            evening.run(conn)
+    finally:
+        eventlog.unbind_sink()
 
     assert delivered == [700900, 700902]  # the blocked user did not stop the rest
     assert caught.value.sent == 2
     assert [tg for tg, _ in caught.value.failures] == [700901]
+
+    # §17: the failure-isolation property already held silently; the log line is
+    # what makes it observable. One `status="error"` event, with both halves of
+    # the story — the two that succeeded and the one that failed.
+    assert len(events) == 1
+    assert events[0]["event"] == "job.evening"
+    assert events[0]["status"] == "error"
+    assert events[0]["source"] == "cron"
+    assert events[0]["considered"] == 3
+    assert events[0]["delivered"] == 2
+    assert events[0]["failed"] == 1
 
     with conn.cursor() as cur:
         cur.execute("SELECT user_id FROM reminder_log ORDER BY user_id")

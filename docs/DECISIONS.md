@@ -570,6 +570,20 @@ disagree with the ledger. A file write cannot be atomic with a database write: a
 process death between the two leaves an audit that is wrong, which is worse than
 one that is absent. It is also queryable, and it rides the existing backup.
 
+**And it is written inside the same `conn.transaction()` block as the money
+statement — in `db.py`, not in the calling handler.** Decided 2026-08-07, walking
+the money paths before writing any of this. A handler-level write is atomic
+*today*, but only because a prior statement happens to have opened the
+transaction, which makes `db.py`'s inner `conn.transaction()` a savepoint rather
+than a top-level commit. Change how the user is resolved — §16's identity fix does
+exactly that — and the money row commits when the db function returns, leaving the
+handler's audit write outside it: a confirmed transaction with no record of who
+created it. The failure is silent, production-only, and a test written today would
+stay green through it. Physical adjacency to the money statement is the only form
+of this that cannot come apart. The price, accepted: the money functions take the
+acting user and the correlation id as arguments rather than the handler supplying
+them afterwards.
+
 Some of this trail already exists implicitly — §6's soft delete keeps
 `deleted_at`, and rows carry `created_at`. What is genuinely missing is **category
 change history** and **who acted**, and "who" only becomes a real question when
@@ -581,7 +595,8 @@ change history** and **who acted**, and "who" only becomes a real question when
 task invents: the module is **`kanakko/eventlog.py`** (not `logging.py` — sitting
 beside `import logging` is a trap for a reader even though Python 3's absolute
 imports make it safe), the call is **`log_event`**, the seam is
-**`bind_sink`/`unbind_sink`**, the audit table is **`transaction_events`**, and
+**`bind_sink`/`unbind_sink`**, the audit table is **`transaction_events`**, the
+origin field is **`source`**, and
 the environment reads **`LOG_DIR`**, **`TRACE_MODE`** (default on) and
 **`TRACE_KEEP`** — unprefixed, matching `SIGNUP_MODE` and `DATABASE_URL` rather
 than inventing a `KANAKKO_` convention that exists nowhere else here.
@@ -606,7 +621,41 @@ log_event("transaction.confirmed", status="ok", update_id=…, user_id=…,
   is a new sink and **zero call-site changes**. This is why `ha-backend` made its
   signature `async` despite being synchronous; a bound sink achieves the same in
   Python without forcing `await` through handlers that are otherwise sync.
-- **Unbound is a silent no-op**, so unit tests need no mock.
+- **Unbound is a silent no-op**, so unit tests need no mock. `LOG_DIR` unset is
+  what leaves it unbound, so `uv run pytest` writes no files without a fixture
+  saying so — the sink binds inside the existing `configure_logging()`, which is
+  already idempotent and already called from all four entry points (the web app
+  and each of the three jobs). A second startup hook would be a second list of
+  entry points to keep in step.
+
+**Every event carries a `source`** — `webhook` | `miniapp` | `cron`. Decided
+2026-08-07: two of the six money paths have **no `update_id` at all**, because
+`/app/delete` and `/app/category` are HTTP routes rather than Telegram updates.
+The event name alone could imply the origin, but "everything done from the
+dashboard" deserves to be a filter, not a name-matching exercise. So `update_id`
+is absent on a Mini App event and **nullable in `transaction_events`**, and
+`source` is the field that is always present.
+
+**Three statuses, and no more:** `ok`, `error`, `noop`. `noop` earns its place
+because the redelivery paths are neither of the other two — a Confirm whose
+pending row is already gone, a `/undo` with nothing to undo, a dashboard delete of
+an already-deleted row. Folding those into `ok` inflates the count of confirms
+that actually happened; folding them into `error` makes an ordinary double-tap
+look like a defect.
+
+**The error status is logged once, in the webhook, not in seven handlers.** The
+handlers deliberately let exceptions escape so the webhook 500s and Telegram
+redelivers (§14, and the Phase 1 confirm contract). A `try/except` that logs and
+re-raises around the dispatch keeps that behaviour and still gives every failed
+update a line; the per-handler calls then only ever report `ok` or `noop`.
+
+**Amounts go in the operational log too, not only the audit row.** "My total is
+wrong" should be answerable from the log before anyone opens Postgres. It costs
+nothing extra: the audit row's before/after needs the whole row anyway, so each
+money function returns the row it touched, and the log line and the audit row read
+from the same value. This is a deliberate widening of what sits on the volume, and
+it is covered by the trace-mode revisit below rather than being a separate
+question.
 
 **Never logged, and a scrubber as the backstop:** the bot token, the OpenRouter
 key, the full `initData` string, and full LLM prompts. The scrubber redacts

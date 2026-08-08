@@ -41,6 +41,17 @@ def _call(method: str, payload: dict) -> dict:
     return response.json()
 
 
+def get_bot_username() -> str:
+    """The bot's @username from getMe — used to build `/start` deep links (§16).
+
+    Derived from the token, so the invite link can never name a different bot than
+    the one the token belongs to (the drift a separate BOT_USERNAME env var would
+    invite). `/invite` is a rare, owner-only call, so one round-trip per issue is
+    fine.
+    """
+    return _call("getMe", {})["result"]["username"]
+
+
 def answer_callback_query(callback_query_id: str, text: str | None = None) -> dict:
     """Acknowledge an inline-button tap so Telegram clears the loading spinner."""
     payload: dict = {"callback_query_id": callback_query_id}

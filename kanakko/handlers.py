@@ -10,51 +10,99 @@ anything on a path that failed.
 """
 
 import logging
+import re
+import secrets
+import string
+import time
 from dataclasses import dataclass
 
 import httpx
 import psycopg
 from pydantic import ValidationError
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from kanakko.auth import signup_mode
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
-from kanakko.confirm import category_prompt, confirm_card
+from kanakko.confirm import category_prompt, confirm_card, settled_card
 from kanakko.db import (
     cancel_pending,
+    check_removal,
     confirm_pending,
+    consume_invite,
+    create_household_invite,
+    create_household_of_one,
     get_or_create_user,
+    household_roster,
+    remove_member,
     save_pending,
     set_pending_category,
+    transfer_ownership,
     undo_last,
+    user_exists,
 )
+from kanakko.eventlog import log_event, ms_since
 from kanakko.money import format_amount
-from kanakko.parse import Transaction, parse_message
+from kanakko.parse import Transaction, build_request, parse_message, resolve_model
 from kanakko.tg import (
     answer_callback_query,
     delete_message,
     edit_message_text,
+    get_bot_username,
     send_message,
 )
+from kanakko.trace import open_trace
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class TextMessage:
-    """A user typed something — a transaction to parse (§2)."""
+    """A user typed something — a transaction to parse (§2).
+
+    `from_id` is *who sent it* (Telegram `message.from.id`), the identity every
+    handler resolves the user from (§16); `chat_id` is only the send target.
+    They coincide in a private chat, so the two split apart the moment a
+    household or a group exists. `from_id` falls back to `chat_id` when unset —
+    the private-chat truth — which keeps the many test sites that predate the
+    split valid.
+
+    `update_id`/`source` are the §17 correlation fields, set by `dispatch`: the
+    `update_id` is what ties every event of one Telegram delivery together, and
+    `source` is always `webhook` here. They default so the many test
+    construction sites that predate §17 stay valid.
+    """
 
     chat_id: int
     message_id: int
     text: str
+    from_id: int | None = None
+    update_id: int | None = None
+    source: str = "webhook"
+
+    def __post_init__(self) -> None:
+        if self.from_id is None:
+            object.__setattr__(self, "from_id", self.chat_id)
 
 
 @dataclass(frozen=True)
 class ButtonPress:
-    """A user tapped an inline button — Confirm/Cancel/category (§4, §5)."""
+    """A user tapped an inline button — Confirm/Cancel/category (§4, §5).
+
+    `from_id` is the sender's identity, `chat_id` the send target — see
+    `TextMessage`. `update_id`/`source`: the §17 correlation fields.
+    """
 
     chat_id: int
     message_id: int
     callback_query_id: str
     data: str
+    from_id: int | None = None
+    update_id: int | None = None
+    source: str = "webhook"
+
+    def __post_init__(self) -> None:
+        if self.from_id is None:
+            object.__setattr__(self, "from_id", self.chat_id)
 
 
 def dispatch(update: dict) -> TextMessage | ButtonPress | None:
@@ -66,6 +114,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
     these live in the following tasks (parse→confirm card, Confirm, Cancel,
     category buttons).
     """
+    update_id = update.get("update_id")
     message = update.get("message") or {}
     if isinstance(message.get("text"), str):
         chat = message.get("chat") or {}
@@ -73,6 +122,8 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             chat_id=chat.get("id"),
             message_id=message.get("message_id"),
             text=message["text"],
+            from_id=(message.get("from") or {}).get("id"),
+            update_id=update_id,
         )
 
     callback = update.get("callback_query") or {}
@@ -84,19 +135,108 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             message_id=msg.get("message_id"),
             callback_query_id=callback.get("id"),
             data=callback["data"],
+            from_id=(callback.get("from") or {}).get("id"),
+            update_id=update_id,
         )
     return None
 
 
 REPHRASE_PROMPT = (
-    'I couldn\'t find an amount in that. Try again with the amount — '
-    'like "spent 500 on groceries" or "got 20000 salary".'
+    "I keep track of what you spend and earn — just tell me the amount, like "
+    '"spent 500 on groceries" or "got 20000 salary", and I\'ll log it after a '
+    "one-tap confirm. You can /undo your last entry any time, or tap the menu "
+    "button to open your dashboard."
 )
 
 PARSER_DOWN_PROMPT = (
     "I can't reach my parser right now — your message wasn't saved. "
     "Please try again shortly."
 )
+
+ACCESS_REFUSED = (
+    "This bot is invite-only right now. Ask whoever told you about it for an "
+    "invite link to get started."
+)
+
+CAP_REACHED = (
+    "You've hit today's message limit — nothing was saved. Your entries so far "
+    "are safe, and this resets at midnight (IST)."
+)
+
+START_COMMAND = "/start"
+
+# A /start deep-link payload: A-Z a-z 0-9 _ -, up to 64 chars (§16, verified
+# against core.telegram.org/bots/features). Anything else is a garbage payload.
+_START_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+
+WELCOME = (
+    "Welcome to Kanakko — your personal finance tracker.\n\n"
+    'Just tell me what you spent or earned — like "spent 500 on groceries" or '
+    '"got 20000 salary" — and I\'ll log it after a one-tap confirm. Use the menu '
+    "button any time to open your dashboard."
+)
+
+# Three distinct refusals so a user knows which problem they have (§16 onboarding
+# check): a spent link, an expired link, and a payload that was never a link.
+START_SPENT = "That invite link has already been used. Ask for a fresh one."
+START_EXPIRED = "That invite link has expired. Ask whoever invited you for a new one."
+START_BAD_CODE = "That invite link isn't valid."
+
+
+def _is_start(text: str) -> bool:
+    """True when `text` is the `/start` command — bare or `/start@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == START_COMMAND
+
+
+def _command_arg(text: str) -> str:
+    """The argument after a command word — a `/start` payload, a `/invite` label —
+    or `""` when the command was sent bare."""
+    parts = text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def handle_start(conn: psycopg.Connection, msg: TextMessage) -> str:
+    """Onboard a `/start`: consume an invite, or open a household of one (§16).
+
+    The bot's entry point, and the one handler that runs *before* the
+    authorization gate (`app.py`): consuming an invite is how an unknown user
+    becomes known, so the gate cannot precede it. `/start <code>` consumes the
+    invite — a signup code opens a household of one, a household code joins that
+    household — and a spent, expired, or invalid code is refused distinctly,
+    storing nothing (§16). A bare `/start` explains the bot: it opens a household
+    of one in `open` mode, welcomes an already-known user, and (in `invite` mode)
+    turns an unknown user toward an invite. The payload is verified — 64 chars,
+    `A-Z a-z 0-9 _ -` (§16) — and anything else is refused as invalid before any
+    lookup. Does not commit — the caller owns the transaction. Returns the outcome
+    slug for the log line.
+    """
+    start = time.perf_counter()
+    payload = _command_arg(msg.text)
+    if payload:
+        if _START_PAYLOAD_RE.match(payload):
+            outcome = consume_invite(conn, payload, msg.from_id)
+        else:
+            outcome = "unknown"  # a garbage payload — never a valid code (§16)
+        reply = {
+            "ok": WELCOME,
+            "spent": START_SPENT,
+            "expired": START_EXPIRED,
+            "unknown": START_BAD_CODE,
+        }[outcome]
+    elif signup_mode() == "open":
+        create_household_of_one(conn, get_or_create_user(conn, msg.from_id))
+        outcome, reply = "ok", WELCOME
+    elif user_exists(conn, msg.from_id):
+        outcome, reply = "ok", WELCOME  # a known user, already in a household
+    else:
+        outcome, reply = "refused", ACCESS_REFUSED  # invite mode, no invite
+
+    send_message(msg.chat_id, reply)
+    log_event("user.onboarded", status="ok" if outcome == "ok" else "noop",
+              update_id=msg.update_id, source=msg.source,
+              duration_ms=ms_since(start), outcome=outcome)
+    return outcome
 
 
 def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
@@ -130,14 +270,25 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     row is still written (keyed by the sent card's id) so the category press can
     update it; the amount, not the category, is what makes it a transaction.
 
-    In a private chat the chat id is the user's Telegram id, so it doubles as the
-    `telegram_user_id`. Does not commit — the caller owns the transaction.
+    The user is resolved from `from_id` (the sender), never `chat_id` (the send
+    target) — they coincide in a private chat but split under a household or group
+    (§16). Does not commit — the caller owns the transaction.
     Returns the new `pending_id`, or `None` when the message couldn't be parsed.
     """
-    user_id = get_or_create_user(conn, msg.chat_id)
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    # Trace mode (§17): the raw text, the prompt built from it, and the outcome —
+    # written to a per-update folder so a hard parse bug is diagnosable. On by
+    # default, a no-op when disabled or unconfigured, and it never raises.
+    tr = open_trace(msg.update_id)
+    tr.write("input", {"text": msg.text, "user_id": user_id,
+                       "update_id": msg.update_id, "source": msg.source})
+    tr.write("request", build_request(msg.text))
+    parse_start = time.perf_counter()
     try:
         txn = parse_message(msg.text)
-    except ValidationError:
+    except ValidationError as exc:
+        tr.write("parse", {"error": str(exc)}, outcome="invalid")
         send_message(msg.chat_id, REPHRASE_PROMPT)
         return None
     except httpx.HTTPStatusError as exc:
@@ -148,15 +299,28 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
             exc.response.status_code,
             exc.response.text,
         )
+        tr.write("parse", {"status": exc.response.status_code,
+                           "body": exc.response.text},
+                 outcome=f"upstream_{exc.response.status_code}")
         if not 400 <= exc.response.status_code < 500:
             raise  # 5xx is transient — let it 500 so Telegram redelivers
         send_message(msg.chat_id, PARSER_DOWN_PROMPT)
         return None
+    tr.write("parse", txn.model_dump(), outcome="ok")
+    # §17: the success side of the parse — Phase 6's WARNING covers the failure.
+    # `duration_ms` is the call alone (retry included) so a slow model is visible
+    # before it reads as the bot feeling sluggish.
+    log_event("parse.completed", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id,
+              duration_ms=ms_since(parse_start), model=resolve_model())
     render = category_prompt if txn.category is None else confirm_card
     text, keyboard = render(txn)
     sent = send_message(msg.chat_id, text, reply_markup=keyboard)
     card_message_id = sent["result"]["message_id"]
-    return save_pending(conn, user_id, card_message_id, txn)
+    pending_id = save_pending(conn, user_id, card_message_id, txn)
+    log_event("pending.created", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return pending_id
 
 
 UNDO_COMMAND = "/undo"
@@ -177,16 +341,403 @@ def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     or a `/undo` past the last row — gets a plain "Nothing to undo." Does not
     commit — the caller owns the transaction. Returns the removed row, or `None`.
     """
-    user_id = get_or_create_user(conn, msg.chat_id)
-    removed = undo_last(conn, user_id)
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    removed = undo_last(conn, user_id, source=msg.source, update_id=msg.update_id)
     if removed is None:
         send_message(msg.chat_id, "Nothing to undo.")
+        log_event("transaction.undone", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
     line = f"Removed: {removed['type'].capitalize()} — {format_amount(removed['amount'])}"
     if removed["category"]:
         line += f" ({removed['category']})"
     send_message(msg.chat_id, line)
+    log_event("transaction.undone", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+              txn_id=removed["txn_id"], amount=removed["amount"])
     return removed
+
+
+HELP_COMMAND = "/help"
+
+# The greetings a lost user actually types, matched on an EXACT normalised equality
+# — never a substring or heuristic. Any looser test ("no digits", "ends in ?") would
+# eventually swallow a real expense: "spent five hundred on lunch" has no digits and
+# "500 lunch" has no verb, and a silently refused entry costs the trust the ledger
+# runs on. A stray LLM call costs a fraction of a rupee, so the parse path stays the
+# default and only these exact strings short-circuit it. "spent 500 on hi" is not an
+# exact match, so it can never misfire.
+_GREETINGS = frozenset({
+    "hi", "hello", "hey", "help", "thanks", "thank you",
+    "what can you do", "how do i use this",
+})
+
+
+def _is_help(text: str) -> bool:
+    """True when `text` is the `/help` command — bare or `/help@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == HELP_COMMAND
+
+
+def _is_greeting(text: str) -> bool:
+    """True when the normalised `text` (lowercased, edge whitespace and punctuation
+    trimmed) is exactly a known greeting — the zero-LLM-cost short-circuit (§ chat
+    polish). Exact match only, so a real entry can never be mistaken for one."""
+    normalised = text.strip().lower().strip(string.punctuation + string.whitespace)
+    return normalised in _GREETINGS
+
+
+def handle_help(conn: psycopg.Connection, msg: TextMessage) -> None:
+    """Answer a lost user with how the bot works — the same text a failed parse
+    sends (§ chat polish), routed from `/help` and from an exact greeting, making
+    zero OpenRouter calls. Does not commit — the caller owns the transaction."""
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    send_message(msg.chat_id, REPHRASE_PROMPT)
+    log_event("help.sent", status="ok", update_id=msg.update_id, source=msg.source,
+              user_id=user_id, duration_ms=ms_since(start))
+
+
+INVITE_COMMAND = "/invite"
+
+INVITE_USAGE = (
+    "Add a label so you can tell who's who — e.g. `/invite ravi`. Each invite is "
+    "a single-use link to join your household."
+)
+
+INVITE_NOT_OWNER = (
+    "Only the household owner can invite people. Ask whoever set up your household "
+    "to send an invite."
+)
+
+
+def _is_invite(text: str) -> bool:
+    """True when `text` is the `/invite` command — bare or `/invite@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == INVITE_COMMAND
+
+
+def handle_invite(conn: psycopg.Connection, msg: TextMessage) -> str | None:
+    """Issue a labelled single-use household invite link — owner only (§16).
+
+    `/invite <label>` mints a `household` invite for the household this user owns
+    and replies with its `https://t.me/<bot>?start=<code>` deep link; the label
+    (`ravi`, `priya`) is how the operator tells who is active (§16). Owner-only is
+    enforced in `create_household_invite`: a member who isn't the owner gets a
+    refusal and no row. A bare `/invite` with no label is a usage hint, not a row.
+    The code is a random base64url token (valid `/start` payload — A-Z a-z 0-9 _ -,
+    §16), so a collision is astronomically unlikely; if one ever did occur the
+    UNIQUE on `invites.code` raises, the update's claim rolls back, and Telegram's
+    redelivery mints a fresh code. Does not commit — the caller owns the
+    transaction. Returns the issued code, or `None` when nothing was issued.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    label = _command_arg(msg.text)
+    if not label:
+        send_message(msg.chat_id, INVITE_USAGE)
+        log_event("invite.issued", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    code = "h-" + secrets.token_urlsafe(9)
+    if not create_household_invite(conn, user_id, code, label):
+        send_message(msg.chat_id, INVITE_NOT_OWNER)
+        log_event("invite.issued", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    link = f"https://t.me/{get_bot_username()}?start={code}"
+    send_message(msg.chat_id,
+                 f"Invite for {label} — a single-use link to join your household:\n{link}")
+    log_event("invite.issued", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return code
+
+
+HOUSEHOLD_COMMAND = "/household"
+
+HOUSEHOLD_SOLO = (
+    "👥 Your household — just you so far. Use `/invite <name>` to add someone."
+)
+
+
+def _is_household(text: str) -> bool:
+    """True when `text` is the `/household` command — bare or `/household@bot`."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == HOUSEHOLD_COMMAND
+
+
+def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
+    """Show who is in the sender's household and who owns it (§16).
+
+    A read, never a mutation: lists every member with their invite label, marks
+    the owner and the viewer, and points a solo user at `/invite`. Member removal
+    is a separate operation (§16 — it asks retain-or-delete of the departing
+    member's entries). Does not commit. Returns the outcome slug for the log line.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    members = household_roster(conn, user_id)
+    if len(members) <= 1:
+        reply = HOUSEHOLD_SOLO
+    else:
+        lines = []
+        for member_id, is_owner, label in members:
+            name = "Owner" if is_owner else (label or "Member")
+            if member_id == user_id:
+                name += " (you)"
+            lines.append(f"• {name}")
+        reply = f"👥 Your household — {len(members)} members\n\n" + "\n".join(lines)
+    send_message(msg.chat_id, reply)
+    log_event("household.viewed", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return "ok"
+
+
+REMOVE_COMMAND = "/remove"
+
+# Bare `/remove` leaves the household yourself; `/remove <label>` is the owner
+# removing that member. So there is no "usage" error — the bare form is an action.
+REMOVE_NO_MATCH = (
+    "No member is labelled {label!r}. Check `/household` for the exact labels, or "
+    "send `/remove` on its own to leave the household yourself."
+)
+REMOVE_AMBIGUOUS = (
+    "More than one member is labelled {label!r}, so I won't guess which to remove. "
+    "Give them distinct invite labels first (`/invite`)."
+)
+REMOVE_NOT_OWNER = (
+    "Only the household owner can remove other members. To leave the household "
+    "yourself, send `/remove` on its own."
+)
+REMOVE_OWNER_MUST_TRANSFER = (
+    "You own this household, so you can't leave it — a household always needs an "
+    "owner. Hand ownership to someone first with `/transfer <name>`, then you can "
+    "leave."
+)
+REMOVE_NOT_MEMBER = "That person isn't in your household."
+
+# The retain/delete choice a removal asks (§16). The button carries the target's
+# user id — `remove_member` re-authorizes the presser against it, so the id is a
+# routing hint, not a trust boundary. `rm:retain:<id>` / `rm:delete:<id>`.
+REMOVE_PREFIX = "rm:"
+REMOVE_RETAIN = "retain"
+REMOVE_DELETE = "delete"
+
+# §16 requires the warning to name the specific consequence — hard deletion makes
+# past reports stop reconciling — not just "this cannot be undone".
+_REMOVE_WARNING = (
+    "{lead}\n\n"
+    "Keep {whose} past entries in the shared ledger, or delete them for good?\n\n"
+    "⚠️ Deleting is permanent — it can't be undone, and past reports stop matching: "
+    "a month that summarised ₹18,920 won't reconcile when it's re-opened."
+)
+
+
+def _is_remove(text: str) -> bool:
+    """True when `text` is the `/remove` command — bare or `/remove@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == REMOVE_COMMAND
+
+
+def _removal_keyboard(target_id: int) -> InlineKeyboardMarkup:
+    """The Keep/Delete choice offered before a removal acts (§16)."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "Keep entries", callback_data=f"{REMOVE_PREFIX}{REMOVE_RETAIN}:{target_id}"),
+        InlineKeyboardButton(
+            "Delete entries", callback_data=f"{REMOVE_PREFIX}{REMOVE_DELETE}:{target_id}"),
+    ]])
+
+
+def handle_remove(conn: psycopg.Connection, msg: TextMessage) -> int | None:
+    """Ask retain-or-delete before removing a household member (§16).
+
+    `/remove <label>` targets the member carrying that invite label; a bare
+    `/remove` targets the sender (the `actor == target` case §16 folds into one
+    path). The label is resolved against the sender's own `/household` roster, so it
+    can only name a member of their household; the owner has no label (they created
+    the household, not joined by invite), so `/remove <label>` can never target the
+    owner — an owner leaves only via the bare form, which is refused until ownership
+    transfers (§16). A label matching no member, or two (labels aren't unique), is
+    refused without asking.
+
+    Authorization is checked here (`check_removal`) so the retain/delete warning is
+    shown *only* when the removal will go through. The removal itself is deferred to
+    the button tap (`handle_remove_choice`): §16 asks what to do with the departing
+    member's entries first, warning that deletion makes past reports stop
+    reconciling. Does not commit — the caller owns the transaction. Returns the
+    target's `user_id` when the choice is presented, or `None` when refused.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    label = _command_arg(msg.text)
+    if not label:
+        target_id, is_self = user_id, True  # bare /remove — leave the household yourself
+    else:
+        matches = [
+            member_id
+            for member_id, _is_owner, member_label in household_roster(conn, user_id)
+            if member_label and member_label.lower() == label.lower()
+        ]
+        if len(matches) != 1:
+            reply = (REMOVE_NO_MATCH if not matches else REMOVE_AMBIGUOUS).format(label=label)
+            send_message(msg.chat_id, reply)
+            log_event("member.removed", status="noop", update_id=msg.update_id,
+                      source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+            return None
+        target_id, is_self = matches[0], False
+
+    verdict = check_removal(conn, user_id, target_id)
+    if verdict != "ok":
+        send_message(msg.chat_id, {
+            "not_owner": REMOVE_NOT_OWNER,
+            "owner_must_transfer": REMOVE_OWNER_MUST_TRANSFER,
+            "not_member": REMOVE_NOT_MEMBER,
+        }[verdict])
+        log_event("member.removed", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+                  outcome=verdict)
+        return None
+
+    lead = "Leave the household?" if is_self else f"Remove {label} from your household?"
+    whose = "your" if is_self else "their"
+    send_message(msg.chat_id, _REMOVE_WARNING.format(lead=lead, whose=whose),
+                 reply_markup=_removal_keyboard(target_id))
+    log_event("member.removed", status="noop", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+              outcome="asked")
+    return target_id
+
+
+def handle_remove_choice(conn: psycopg.Connection, press: ButtonPress) -> int | None:
+    """Act on the retain/delete button a removal warning offered (§16).
+
+    `handle_remove` presented the choice with the warning; this tap performs it.
+    The button is untrusted — `remove_member` re-runs the full §16 authorization
+    keyed by the *presser* (`from_id`), not the button — so a forged
+    `rm:delete:<id>` for a member the presser can't remove is refused here exactly
+    as the typed command would be. `rm:delete:<id>` hard-deletes the departing
+    member's entries (irreversible, §16 — not §6's soft delete); `rm:retain:<id>`
+    keeps them. The warning card is edited into a settled state so the transcript
+    records the outcome. Does not commit — the caller owns the transaction. Returns
+    the target's `user_id` on removal, or `None` when refused.
+    """
+    start = time.perf_counter()
+    actor = get_or_create_user(conn, press.from_id)
+    choice, _, target_str = press.data.removeprefix(REMOVE_PREFIX).partition(":")
+    if choice not in (REMOVE_RETAIN, REMOVE_DELETE) or not target_str.isdigit():
+        answer_callback_query(press.callback_query_id, "That button's expired")
+        log_event("member.removed", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=actor, duration_ms=ms_since(start))
+        return None
+    target_id = int(target_str)
+    delete_entries = choice == REMOVE_DELETE
+
+    outcome = remove_member(conn, actor, target_id, delete_entries=delete_entries)
+    if outcome != "removed":
+        answer_callback_query(press.callback_query_id, {
+            "not_owner": REMOVE_NOT_OWNER,
+            "owner_must_transfer": REMOVE_OWNER_MUST_TRANSFER,
+            "not_member": REMOVE_NOT_MEMBER,
+        }[outcome])
+        log_event("member.removed", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=actor, duration_ms=ms_since(start),
+                  outcome=outcome)
+        return None
+
+    if target_id == actor:
+        settled = "You've left the household. You're tracking on your own again now."
+        settled += (" Your past entries were deleted." if delete_entries
+                    else " Your past entries stay in the shared ledger.")
+    else:
+        settled = "Removed from your household."
+        settled += (" Their past entries were deleted." if delete_entries
+                    else " Their past entries stay in the shared ledger.")
+    edit_message_text(press.chat_id, press.message_id, settled)
+    answer_callback_query(press.callback_query_id, "Done")
+    log_event("member.removed", status="ok", update_id=press.update_id,
+              source=press.source, user_id=actor, duration_ms=ms_since(start),
+              outcome="removed", deleted_entries=delete_entries)
+    return target_id
+
+
+TRANSFER_COMMAND = "/transfer"
+
+TRANSFER_USAGE = (
+    "Name the member to hand ownership to — e.g. `/transfer ravi`. Check "
+    "`/household` for the exact labels."
+)
+TRANSFER_NO_MATCH = (
+    "No member is labelled {label!r}. Check `/household` for the exact labels."
+)
+TRANSFER_AMBIGUOUS = (
+    "More than one member is labelled {label!r}, so I won't guess which to hand it "
+    "to. Give them distinct invite labels first (`/invite`)."
+)
+TRANSFER_NOT_OWNER = "Only the household owner can transfer ownership."
+TRANSFER_NOT_MEMBER = "That person isn't in your household."
+TRANSFER_DONE = (
+    "Ownership transferred to {label}. They own the household now — you can leave "
+    "it with `/remove` if you like."
+)
+
+
+def _is_transfer(text: str) -> bool:
+    """True when `text` is the `/transfer` command — bare or `/transfer@bot`."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == TRANSFER_COMMAND
+
+
+def handle_transfer(conn: psycopg.Connection, msg: TextMessage) -> int | None:
+    """Hand household ownership to another member — owner only (§16).
+
+    A household always has an owner, so an owner can't leave until they transfer
+    first; this is the command that unblocks that `/remove`. `/transfer <label>`
+    resolves the label against the sender's own `/household` roster (so it can only
+    name a member of their household) and hands ownership over. The owner carries no
+    label, so `/transfer` can never name them — a bare `/transfer` is a usage hint,
+    not an action. Authorization lives in `transfer_ownership`, which refuses a
+    non-owner. Does not commit — the caller owns the transaction. Returns the new
+    owner's `user_id` on success, or `None` when refused.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    label = _command_arg(msg.text)
+    if not label:
+        send_message(msg.chat_id, TRANSFER_USAGE)
+        log_event("ownership.transferred", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    matches = [
+        member_id
+        for member_id, _is_owner, member_label in household_roster(conn, user_id)
+        if member_label and member_label.lower() == label.lower()
+    ]
+    if len(matches) != 1:
+        reply = (TRANSFER_NO_MATCH if not matches else TRANSFER_AMBIGUOUS).format(label=label)
+        send_message(msg.chat_id, reply)
+        log_event("ownership.transferred", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    target_id = matches[0]
+
+    outcome = transfer_ownership(conn, user_id, target_id)
+    if outcome != "transferred":
+        send_message(msg.chat_id, {
+            "not_owner": TRANSFER_NOT_OWNER,
+            "not_member": TRANSFER_NOT_MEMBER,
+            "already_owner": TRANSFER_NOT_MEMBER,
+        }[outcome])
+        log_event("ownership.transferred", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+                  outcome=outcome)
+        return None
+
+    send_message(msg.chat_id, TRANSFER_DONE.format(label=label))
+    log_event("ownership.transferred", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return target_id
 
 
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
@@ -198,13 +749,30 @@ def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     is already stored) — either way we answer the callback query so Telegram
     clears the spinner. Does not commit — the caller owns the transaction.
     Returns the new `txn_id`, or `None` when there was nothing to confirm.
+
+    On a real confirm the card is edited into a settled receipt with no keyboard
+    (§4, §5): the only lasting evidence a transaction was saved is otherwise a
+    toast that fades, and dropping the Confirm/Cancel buttons is also what stops a
+    later stale Cancel from removing the receipt. A redelivered tap (`row is None`)
+    leaves the already-settled card untouched.
     """
-    user_id = get_or_create_user(conn, press.chat_id)
-    txn_id = confirm_pending(conn, user_id, press.message_id)
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, press.from_id)
+    row = confirm_pending(conn, user_id, press.message_id,
+                          source=press.source, update_id=press.update_id)
+    if row is not None:
+        edit_message_text(press.chat_id, press.message_id, settled_card(row))
     answer_callback_query(
-        press.callback_query_id, "Saved ✅" if txn_id else "Already saved"
+        press.callback_query_id, "Saved ✅" if row else "Already saved"
     )
-    return txn_id
+    if row is None:
+        log_event("transaction.confirmed", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    log_event("transaction.confirmed", status="ok", update_id=press.update_id,
+              source=press.source, user_id=user_id, duration_ms=ms_since(start),
+              txn_id=row["txn_id"], amount=row["amount"])
+    return row["txn_id"]
 
 
 def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
@@ -218,17 +786,25 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     caller owns the transaction. Returns the discarded `pending_id`, or `None`
     when there was nothing to cancel.
     """
-    user_id = get_or_create_user(conn, press.chat_id)
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, press.from_id)
     pending_id = cancel_pending(conn, user_id, press.message_id)
-    # Take the cancelled card out of the chat rather than leaving a dead card
-    # with live buttons. The toast still reports what happened, and the user's
-    # own message stays — only the bot's card goes. `delete_message` returns
-    # False for a card older than the Bot API's 48-hour window; that just leaves
-    # it in place, which is better than 500ing the tap into a redelivery loop.
-    delete_message(press.chat_id, press.message_id)
+    # Delete the card *only when this tap actually cancelled a pending row*. A
+    # Cancel on an already-confirmed card finds no pending row (Confirm cleared it
+    # and settled the card into a receipt), so deleting it would strip the receipt
+    # from the chat while the transaction stays in the ledger — the transcript and
+    # the ledger would then disagree. The toast still reports what happened, and
+    # the user's own message stays — only the bot's live card goes. `delete_message`
+    # returns False for a card older than the Bot API's 48-hour window; that just
+    # leaves it in place, better than 500ing the tap into a redelivery loop.
+    if pending_id is not None:
+        delete_message(press.chat_id, press.message_id)
     answer_callback_query(
         press.callback_query_id, "Discarded ❌" if pending_id else "Already gone"
     )
+    log_event("pending.cancelled", status="ok" if pending_id else "noop",
+              update_id=press.update_id, source=press.source, user_id=user_id,
+              duration_ms=ms_since(start))
     return pending_id
 
 
@@ -247,16 +823,25 @@ def handle_category(conn: psycopg.Connection, press: ButtonPress) -> Transaction
     nothing. Does not commit — the caller owns the transaction. Returns the
     updated `Transaction`, or `None` when there was nothing to update.
     """
+    start = time.perf_counter()
     category = press.data.removeprefix(CATEGORY_PREFIX)
     if category not in ALL_CATEGORIES:
         answer_callback_query(press.callback_query_id, "Unknown category")
+        # A forged tap the keyboard never emits; user left unresolved on purpose,
+        # so no `user_id` on this line.
+        log_event("pending.recategorised", status="noop", update_id=press.update_id,
+                  source=press.source, duration_ms=ms_since(start))
         return None
-    user_id = get_or_create_user(conn, press.chat_id)
+    user_id = get_or_create_user(conn, press.from_id)
     txn = set_pending_category(conn, user_id, press.message_id, category)
     if txn is None:
         answer_callback_query(press.callback_query_id, "That card's gone")
+        log_event("pending.recategorised", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
         return None
     text, keyboard = confirm_card(txn)
     edit_message_text(press.chat_id, press.message_id, text, reply_markup=keyboard)
     answer_callback_query(press.callback_query_id, f"Category: {category}")
+    log_event("pending.recategorised", status="ok", update_id=press.update_id,
+              source=press.source, user_id=user_id, duration_ms=ms_since(start))
     return txn

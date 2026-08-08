@@ -10,15 +10,16 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from conftest import household_of
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
-from kanakko import db, handlers
+from kanakko import db, eventlog, handlers
 from kanakko.app import WEBHOOK_SECRET_HEADER, app
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import get_or_create_user, save_pending
-from kanakko.handlers import ButtonPress, TextMessage, dispatch
+from kanakko.handlers import REMOVE_PREFIX, ButtonPress, TextMessage, dispatch
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 
@@ -46,25 +47,46 @@ def _set_secret(monkeypatch, value=SECRET):
 
 
 def test_text_message_is_dispatched_with_its_fields():
+    # The update_id is the §17 correlation id — dispatch must carry it onto the
+    # action, not drop it for the webhook to read separately (gap 1).
     action = dispatch(
-        {"message": {"message_id": 7, "chat": {"id": 42}, "text": "spent 500 on food"}}
+        {
+            "update_id": 4242,
+            "message": {
+                "message_id": 7,
+                "chat": {"id": 42},
+                "from": {"id": 99},
+                "text": "spent 500 on food",
+            },
+        }
     )
-    assert action == TextMessage(chat_id=42, message_id=7, text="spent 500 on food")
+    assert action == TextMessage(
+        chat_id=42, message_id=7, text="spent 500 on food", from_id=99, update_id=4242
+    )
+    # §16: identity is the sender (from.id), send target is the chat (chat.id).
+    assert action.from_id == 99 and action.chat_id == 42
+    assert action.source == "webhook"
 
 
 def test_button_press_is_dispatched_with_its_fields():
     action = dispatch(
         {
+            "update_id": 4243,
             "callback_query": {
                 "id": "cbq1",
                 "data": "confirm",
+                "from": {"id": 99},
                 "message": {"message_id": 9, "chat": {"id": 42}},
-            }
+            },
         }
     )
     assert action == ButtonPress(
-        chat_id=42, message_id=9, callback_query_id="cbq1", data="confirm"
+        chat_id=42, message_id=9, callback_query_id="cbq1", data="confirm",
+        from_id=99, update_id=4243,
     )
+    # The tap's identity is the tapper (callback_query.from.id), not the chat.
+    assert action.from_id == 99 and action.chat_id == 42
+    assert action.source == "webhook"
 
 
 def test_irrelevant_updates_are_ignored():
@@ -81,10 +103,13 @@ def test_webhook_returns_200_for_a_text_update(monkeypatch):
     # exercises the routing, not a live DB. A handler exception is deliberately
     # left to 500 so Telegram redelivers a transiently-failed transaction.
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: None)
     response = client.post(
         "/webhook",
-        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "spent 500 on food"}},
         headers=AUTH,
     )
     assert response.status_code == 200
@@ -189,6 +214,57 @@ def test_handle_text_keys_the_pending_row_on_the_sent_card(conn, monkeypatch):
     assert card_message_id == 909  # the card's id, not the inbound message's (1)
     assert telegram_user_id == 12345  # chat id resolved to a users row
     assert parsed["amount"] == "500.00"  # §9: stored as a string, not a float
+    conn.rollback()
+
+
+def test_handle_text_resolves_the_user_by_from_id_not_chat_id(conn, monkeypatch):
+    """Identity is the sender (from_id), the chat is only the send target (§16).
+
+    Impossible to write before the split: in a private chat from_id == chat_id, so
+    a handler resolving by chat_id passed silently. Here from_id (777) differs from
+    chat_id (12345), so the pending row must belong to 777 and *no* user row may
+    exist for 12345 — resolving by chat_id would redden both asserts. The card
+    still goes back to chat_id, which stays the delivery address.
+    """
+    migrate(conn)
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "spent 500 on food",
+        }
+    )
+    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(handlers, "send_message", fake_send)
+
+    pending_id = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, from_id=777,
+                          text="spent 500 on food")
+    )
+    assert sent["chat_id"] == 12345  # the card still goes to the chat
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT u.telegram_user_id"
+            " FROM pending_transactions p JOIN users u USING (user_id)"
+            " WHERE pending_id = %s",
+            (pending_id,),
+        )
+        (telegram_user_id,) = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM users WHERE telegram_user_id = %s", (12345,)
+        )
+        (chat_as_user,) = cur.fetchone()
+    assert telegram_user_id == 777  # resolved by from_id, the sender
+    assert chat_as_user == 0  # the chat id never became a user
     conn.rollback()
 
 
@@ -356,6 +432,50 @@ def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
     conn.rollback()
 
 
+def test_handle_text_logs_the_parse_success_but_not_the_failure(conn, monkeypatch):
+    """§17: a successful parse emits `parse.completed` with the model and a
+    duration; a failed parse does not — Phase 6's WARNING owns the failure side, so
+    a second `parse.completed` on the 402 path would double-log it and also lie that
+    the parse succeeded. Assert both directions.
+    """
+    migrate(conn)
+    monkeypatch.setattr(handlers, "send_message", lambda *a, **k: {"result": {"message_id": 909}})
+    monkeypatch.setenv("OPENROUTER_MODEL", "acme/fast-1")
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "lunch",
+        }
+    )
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+        app_module.handle_text(
+            conn, TextMessage(chat_id=12345, message_id=1, text="spent 500", update_id=9)
+        )
+        monkeypatch.setattr(
+            handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
+        )
+        app_module.handle_text(
+            conn, TextMessage(chat_id=12345, message_id=2, text="spent 500", update_id=10)
+        )
+    finally:
+        eventlog.unbind_sink()
+
+    completed = [e for e in events if e["event"] == "parse.completed"]
+    assert len(completed) == 1  # only the success side; the 402 does not log here
+    assert completed[0]["status"] == "ok"
+    assert completed[0]["model"] == "acme/fast-1"  # the resolved model, greppable
+    assert completed[0]["update_id"] == 9 and completed[0]["source"] == "webhook"
+    assert isinstance(completed[0]["duration_ms"], int)
+    conn.rollback()
+
+
 def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypatch):
     """A null category shows the category picker, not a confirm card (§3).
 
@@ -410,6 +530,7 @@ def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypa
 
 def _seed_pending(conn, chat_id, card_message_id, amount="100.00"):
     user_id = get_or_create_user(conn, chat_id)
+    household_of(conn, user_id)  # confirm_pending homes the row in the user's household (§16)
     txn = Transaction.model_validate(
         {
             "type": "expense",
@@ -435,6 +556,7 @@ def test_handle_confirm_writes_the_ledger_row_and_acknowledges(conn, monkeypatch
     monkeypatch.setattr(
         handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
 
     txn_id = app_module.handle_confirm(
         conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
@@ -459,6 +581,7 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     monkeypatch.setattr(
         handlers, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
 
     first = app_module.handle_confirm(conn, press)
@@ -476,6 +599,76 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     conn.rollback()
 
 
+def test_handle_confirm_logs_ok_then_noop_on_a_redelivery(conn, monkeypatch):
+    """The §17 event line follows the outcome: a real confirm is `ok` and carries
+    the amount; the redelivered tap (pending row already gone) is `noop`, not a
+    second `ok` that would inflate the count of confirms that actually happened.
+    """
+    migrate(conn)
+    _seed_pending(conn, chat_id=12345, card_message_id=909)
+    monkeypatch.setattr(handlers, "answer_callback_query", lambda *a, **k: None)
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
+    press = ButtonPress(
+        chat_id=12345, message_id=909, callback_query_id="c", data=CONFIRM, update_id=7
+    )
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        app_module.handle_confirm(conn, press)
+        app_module.handle_confirm(conn, press)  # redelivery
+    finally:
+        eventlog.unbind_sink()
+
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("transaction.confirmed", "ok"),
+        ("transaction.confirmed", "noop"),
+    ]
+    assert events[0]["amount"] == Decimal("100.00")  # ledger path carries the amount
+    assert events[0]["update_id"] == 7 and events[0]["source"] == "webhook"
+    assert "amount" not in events[1]  # a noop touched no row
+    conn.rollback()
+
+
+def test_webhook_logs_exactly_one_error_line_when_a_handler_raises(monkeypatch):
+    """The error side of §17 is logged once, in the webhook, not per handler (gap 5).
+
+    A raising handler must produce exactly one `update.handled` with
+    `status="error"` and then re-raise so the webhook still 500s and Telegram
+    redelivers (§14). Folding the error log into every handler would multiply the
+    line; keeping it in the one `try/except` around the dispatch is what makes
+    "exactly one" true.
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+
+    def boom(conn, msg):
+        raise RuntimeError("handler down")
+
+    monkeypatch.setattr(app_module, "handle_text", boom)
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        with pytest.raises(RuntimeError):
+            client.post(
+                "/webhook",
+                json={"message": {"message_id": 1, "chat": {"id": 42},
+                                  "text": "spent 500 on food"}},
+                headers=AUTH,
+            )
+    finally:
+        eventlog.unbind_sink()
+
+    errors = [e for e in events if e["status"] == "error"]
+    assert len(errors) == 1  # not seven — logged in the webhook, not the handler
+    assert errors[0]["event"] == "update.handled"
+    assert errors[0]["source"] == "webhook"
+
+
 def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     """CONFIRM routes to handle_confirm, CANCEL to handle_cancel — never crossed.
 
@@ -486,6 +679,9 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     _set_secret(monkeypatch)
     opened = []
     monkeypatch.setattr(app_module, "connect", lambda: opened.append(True) or _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     confirmed, cancelled, texted, categorised = [], [], [], []
     monkeypatch.setattr(app_module, "handle_confirm", lambda conn, press: confirmed.append(press))
     monkeypatch.setattr(app_module, "handle_cancel", lambda conn, press: cancelled.append(press))
@@ -514,8 +710,15 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     assert len(confirmed) == 1 and len(cancelled) == 1  # not to Confirm/Cancel
     assert len(opened) == 3  # and opened its own connection
 
+    chose = []
+    monkeypatch.setattr(app_module, "handle_remove_choice", lambda conn, press: chose.append(press))
+    client.post("/webhook", json=press(f"{REMOVE_PREFIX}delete:7"), headers=AUTH)
+    assert len(chose) == 1  # an rm: tap routes to the removal-choice handler
+    assert len(categorised) == 1 and len(confirmed) == 1  # not to category/Confirm
+    assert len(opened) == 4
+
     client.post("/webhook", json={"channel_post": {"text": "x"}}, headers=AUTH)
-    assert len(opened) == 3  # an ignored update opens nothing
+    assert len(opened) == 4  # an ignored update opens nothing
     assert texted == []
 
 
@@ -529,6 +732,9 @@ def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
     """
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     undone, texted = [], []
     monkeypatch.setattr(app_module, "handle_undo", lambda conn, msg: undone.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -546,6 +752,125 @@ def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
     assert len(texted) == 1 and len(undone) == 2  # ordinary text still parses
 
 
+def test_webhook_routes_invite_to_handle_invite_and_never_meters_it(monkeypatch):
+    """`/invite` is an owner command, not a transaction, and must never be metered.
+
+    Two failures this guards, both silent (`8a8bbc8` review finding 1): a routing
+    miss would feed "/invite ravi" to `handle_text` — an LLM call and a garbage
+    pending card; a metering miss would stamp its `claim_update` with `user_id`,
+    so an owner at their daily cap could no longer invite and every invite would
+    burn a cap unit. Asserts it routes to `handle_invite` (not `handle_text`) and
+    that the claim is unmetered (`metered_user is None`). A plain text message
+    still parses and still meters.
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    invited, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_invite", lambda conn, msg: invited.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    def text(body, update_id):
+        return {"update_id": update_id, "message": {"message_id": 1, "chat": {"id": 42}, "text": body}}
+
+    client.post("/webhook", json=text("/invite ravi", 100), headers=AUTH)
+    assert len(invited) == 1 and texted == []  # routed to invite, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+    client.post("/webhook", json=text("spent 500 on food", 101), headers=AUTH)
+    assert len(texted) == 1 and len(invited) == 1  # ordinary text still parses
+    assert claims == [None, 1]  # and the parse path is metered with the user id
+
+
+def test_webhook_routes_household_to_handle_household_and_never_meters_it(monkeypatch):
+    """`/household` is a read, not a transaction, so it must never be metered.
+
+    Same two silent failures as `/invite`: a routing miss would feed "/household"
+    to `handle_text` (an LLM call and a junk pending card), and a metering miss
+    would burn a daily-cap unit per lookup and could lock a capped user out of
+    ever seeing their household. Asserts it routes to `handle_household` and the
+    claim is unmetered (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    viewed, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_household", lambda conn, msg: viewed.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 200, "message": {"message_id": 1, "chat": {"id": 42}, "text": "/household"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(viewed) == 1 and texted == []  # routed to the roster, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
+def test_webhook_routes_remove_to_handle_remove_and_never_meters_it(monkeypatch):
+    """`/remove` is a household command, not a transaction, so it must never be metered.
+
+    Same two silent failures as `/invite` and `/household`: a routing miss would
+    feed "/remove ravi" to `handle_text` (an LLM call and a junk pending card), and
+    a metering miss would burn a daily-cap unit per removal — letting a capped owner
+    be unable to remove a member. Asserts it routes to `handle_remove` and the claim
+    is unmetered (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    removed, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_remove", lambda conn, msg: removed.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 300, "message": {"message_id": 1, "chat": {"id": 42}, "text": "/remove ravi"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(removed) == 1 and texted == []  # routed to removal, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
+def test_webhook_routes_transfer_to_handle_transfer_and_never_meters_it(monkeypatch):
+    """`/transfer` is an owner command, not a transaction, so it must never be metered.
+
+    Same two silent failures as `/invite`, `/household` and `/remove`: a routing
+    miss would feed "/transfer ravi" to `handle_text` (an LLM call and a junk
+    pending card), and a metering miss would burn a daily-cap unit — letting a
+    capped owner be unable to hand off ownership. Asserts it routes to
+    `handle_transfer` and the claim is unmetered (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    transferred, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_transfer", lambda conn, msg: transferred.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 300, "message": {"message_id": 1, "chat": {"id": 42}, "text": "/transfer ravi"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(transferred) == 1 and texted == []  # routed to transfer, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
 def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
 
@@ -556,8 +881,8 @@ def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909, amount="250.00")
-    txn_id = db.confirm_pending(conn, user_id, 909)
-    assert isinstance(txn_id, int)
+    row = db.confirm_pending(conn, user_id, 909, source="webhook", update_id=None)
+    assert isinstance(row["txn_id"], int)
     sent = {}
     monkeypatch.setattr(
         handlers, "send_message", lambda chat_id, text, reply_markup=None: sent.update(chat_id=chat_id, text=text)
@@ -606,9 +931,9 @@ def test_a_redelivered_undo_does_not_soft_delete_a_second_row(conn, monkeypatch)
     """
     migrate(conn)
     uid, _ = _seed_pending(conn, chat_id=555, card_message_id=11, amount="250.00")
-    db.confirm_pending(conn, uid, 11)
+    db.confirm_pending(conn, uid, 11, source="webhook", update_id=None)
     _seed_pending(conn, chat_id=555, card_message_id=12, amount="100.00")
-    db.confirm_pending(conn, uid, 12)
+    db.confirm_pending(conn, uid, 12, source="webhook", update_id=None)
 
     monkeypatch.setattr(handlers, "send_message", lambda *a, **k: None)
     # connect() yields the shared test connection; __exit__ must not close it, so
@@ -696,6 +1021,60 @@ def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     assert isinstance(first, int)
     assert second is None  # nothing left to cancel
     assert acks == ["Discarded ❌", "Already gone"]  # spinner cleared both times
+    conn.rollback()
+
+
+def test_confirm_settles_the_card_and_a_stale_cancel_leaves_the_receipt(conn, monkeypatch):
+    """A confirmed card settles with no keyboard, and a later Cancel can't wipe it.
+
+    Two halves, both asserted (a card that only read the new text would pass with
+    the stale-Cancel trap still there):
+    (a) after Confirm the card is edited into a settled receipt carrying **no**
+        `reply_markup` — nothing left to re-tap;
+    (b) a Cancel arriving on that now-confirmed card finds no pending row, so it
+        must delete **nothing** and leave the ledger row in place — the transcript
+        and the ledger must not disagree (the stale-Cancel receipt bug).
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    edits, deletes = [], []
+    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
+    monkeypatch.setattr(
+        handlers,
+        "edit_message_text",
+        lambda chat_id, message_id, text, reply_markup=None: edits.append(
+            (message_id, text, reply_markup)
+        ),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "delete_message",
+        lambda chat_id, message_id: deletes.append((chat_id, message_id)) or True,
+    )
+
+    app_module.handle_confirm(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="c1", data=CONFIRM)
+    )
+    # (a) the card became a settled receipt with no buttons to re-tap
+    assert len(edits) == 1
+    edited_id, edited_text, edited_markup = edits[0]
+    assert edited_id == 909
+    assert edited_markup is None  # no Confirm/Cancel left on a saved card
+    assert "Saved" in edited_text
+
+    # (b) a stale Cancel on the confirmed card deletes nothing, ledger untouched
+    result = app_module.handle_cancel(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="c2", data=CANCEL)
+    )
+    assert result is None  # no pending row — Confirm already cleared it
+    assert deletes == []  # the receipt is NOT removed from the chat
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        (count,) = cur.fetchone()
+    assert count == 1  # the confirmed transaction stays in the ledger
     conn.rollback()
 
 

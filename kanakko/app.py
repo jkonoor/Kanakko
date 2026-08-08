@@ -1,35 +1,56 @@
 """FastAPI app: webhook and Mini App routes."""
 
 import hmac
-import logging
 import os
+import time
 from datetime import date, timedelta
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from kanakko import __version__, configure_logging
+from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import (
     claim_update,
     connect,
+    find_user,
     get_or_create_user,
     month_summary,
     recent_transactions,
     set_transaction_category,
     soft_delete_transaction,
 )
+from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
+    ACCESS_REFUSED,
+    CAP_REACHED,
+    REMOVE_PREFIX,
     TextMessage,
+    _is_greeting,
+    _is_help,
+    _is_household,
+    _is_invite,
+    _is_remove,
+    _is_start,
+    _is_transfer,
     _is_undo,
     dispatch,
     handle_cancel,
     handle_category,
     handle_confirm,
+    handle_help,
+    handle_household,
+    handle_invite,
+    handle_remove,
+    handle_remove_choice,
+    handle_start,
     handle_text,
+    handle_transfer,
     handle_undo,
 )
+from kanakko.tg import send_message
 from kanakko.webapp import (
     SHELL_HTML,
     InitDataError,
@@ -43,7 +64,6 @@ from kanakko.webapp import (
 )
 
 configure_logging()
-log = logging.getLogger(__name__)
 
 app = FastAPI(title="Kanakko", version=__version__)
 
@@ -106,6 +126,30 @@ def authenticated_user(request: Request, max_age: timedelta | None = None) -> in
         raise HTTPException(status_code=401)
 
 
+def permitted_user(conn, telegram_user_id: int) -> int:
+    """This Mini App caller's internal `user_id`, or a 403 (§16).
+
+    `authenticated_user` proves *which* Telegram user is asking; it never asks
+    whether they are permitted. That is a separate question and this is where it
+    is answered — once, rather than once per route.
+
+    **Resolving must not create.** These routes previously called
+    `get_or_create_user`, so anyone who found the bot and tapped the menu button
+    minted a `users` row. That row then satisfied the bot's own gate, which asks
+    `user_exists` — so the Mini App was a way around the invite gate §16 exists to
+    be. Worse, the row belonged to no household, and `confirm_pending` derives
+    `household_id` from a membership that wasn't there: a NOT NULL violation, a
+    500, and a Telegram redelivery loop on every Confirm.
+
+    A user row is therefore the credential: it exists only after `/start` admitted
+    the person (an invite in `invite` mode, a household of one in `open` mode), so
+    "no row" means "has not been admitted" in either mode and gets a 403.
+    """
+    user_id = find_user(conn, telegram_user_id)
+    if user_id is None:
+        raise HTTPException(status_code=403)
+    return user_id
+
 
 @app.get("/app/data", response_class=HTMLResponse)
 def mini_app_data(request: Request) -> str:
@@ -118,7 +162,7 @@ def mini_app_data(request: Request) -> str:
     telegram_user_id = authenticated_user(request)
 
     with connect() as conn:
-        user_id = get_or_create_user(conn, telegram_user_id)
+        user_id = permitted_user(conn, telegram_user_id)
         first, next_first = current_month_ist()
         w_first, w_next = current_week_ist()
         # month_summary is a generic date-range summary, so the same function
@@ -178,11 +222,22 @@ async def mini_app_delete(request: Request) -> Response:
     except (ValueError, TypeError, KeyError):
         raise HTTPException(status_code=400)
 
+    start = time.perf_counter()
     with connect() as conn:
-        user_id = get_or_create_user(conn, telegram_user_id)
-        deleted = soft_delete_transaction(conn, user_id, txn_id)
+        user_id = permitted_user(conn, telegram_user_id)
+        deleted = soft_delete_transaction(conn, user_id, txn_id,
+                                          source="miniapp", update_id=None)
+    # ponytail: log_event is a synchronous write inside an async route — fine at
+    # this scale (one line, no fsync). Move to a queue only if the sink ever
+    # blocks the event loop. No `update_id`: a Mini App POST is not a Telegram
+    # update (§17 gap 2). A 404 (already gone, or never this user's) is `noop`.
     if deleted is None:
+        log_event("transaction.deleted", status="noop", source="miniapp",
+                  user_id=user_id, duration_ms=ms_since(start))
         raise HTTPException(status_code=404)
+    log_event("transaction.deleted", status="ok", source="miniapp",
+              user_id=user_id, duration_ms=ms_since(start),
+              txn_id=deleted["txn_id"], amount=deleted["amount"])
     return Response(status_code=204)
 
 
@@ -211,11 +266,20 @@ async def mini_app_category(request: Request) -> Response:
     if category not in ALL_CATEGORIES:
         raise HTTPException(status_code=400)
 
+    start = time.perf_counter()
     with connect() as conn:
-        user_id = get_or_create_user(conn, telegram_user_id)
-        updated = set_transaction_category(conn, user_id, txn_id, category)
+        user_id = permitted_user(conn, telegram_user_id)
+        updated = set_transaction_category(conn, user_id, txn_id, category,
+                                           source="miniapp", update_id=None)
+    # ponytail: synchronous log write in an async route — see /app/delete above
+    # for the ceiling and upgrade path. No `update_id` (§17 gap 2); 404 is `noop`.
     if updated is None:
+        log_event("transaction.recategorised", status="noop", source="miniapp",
+                  user_id=user_id, duration_ms=ms_since(start))
         raise HTTPException(status_code=404)
+    log_event("transaction.recategorised", status="ok", source="miniapp",
+              user_id=user_id, duration_ms=ms_since(start),
+              txn_id=updated["txn_id"], amount=updated["amount"])
     return Response(status_code=204)
 
 
@@ -234,6 +298,12 @@ async def webhook(request: Request) -> dict[str, bool]:
     at most once per update. That is what keeps `/undo` from soft-deleting a
     *second* real transaction on a redelivery — it has no per-message anchor the
     way Confirm/Cancel do — and hardens every other handler for free.
+
+    The dispatch is wrapped once so the error side of §17 is logged in one place,
+    not in seven handlers: a handler that raises produces exactly one
+    `update.handled` line with `status="error"` and then re-raises, keeping the
+    §14 500-and-redeliver contract. The per-handler events only ever report `ok`
+    or `noop`.
     """
     if not _origin_is_verified(request):
         raise HTTPException(status_code=403)
@@ -249,24 +319,89 @@ async def webhook(request: Request) -> dict[str, bool]:
     if action is None:
         return {"ok": True}
 
+    # /start is onboarding and the one path that must run *before* the gate:
+    # consuming an invite is how an unknown user becomes authorized (§16), so the
+    # gate cannot precede it. It makes no LLM call and carries no per-message
+    # anchor, so it is neither metered nor claimed — `consume_invite` is
+    # idempotent on a redelivery (a code this same user already used returns
+    # success, not a refusal), which is what a `claim_update` would otherwise buy.
+    if isinstance(action, TextMessage) and _is_start(action.text):
+        with connect() as conn:
+            handle_start(conn, action)
+        return {"ok": True}
+
     # One connection per handled update, committed on block exit. The claim and
     # the handler's writes share that transaction, so a redelivery that arrives
     # before the first commit blocks on the id and then finds it taken; a handler
     # that 500s rolls the claim back and the redelivery legitimately re-runs.
+    start = time.perf_counter()
+    update_id = update.get("update_id")
     with connect() as conn:
-        update_id = update.get("update_id")
-        if isinstance(update_id, int) and not claim_update(conn, update_id):
+        # §16: is this user permitted at all? — the one check before any LLM call
+        # (§2 costs money). An unrecognised user in invite mode is refused here and
+        # nothing is stored: the gate reads with `user_exists`, so the update is
+        # turned away before `claim_update` or any handler mints a row. `open` mode
+        # admits everyone; `invite` mode admits only users who already have a row.
+        if not is_authorized(conn, action.from_id):
+            send_message(action.chat_id, ACCESS_REFUSED)
+            log_event("update.refused", status="noop", update_id=update_id,
+                      source="webhook", duration_ms=ms_since(start))
+            return {"ok": True}
+        user_id = get_or_create_user(conn, action.from_id)
+        # §16 cost control: only the text-parse path is an LLM call (§2), so a
+        # runaway user is an unbounded bill on the owner's OpenRouter credits.
+        # /undo and the Confirm/Cancel/category taps cost nothing — they are never
+        # capped (a user at the cap can still finish or undo a pending card) and,
+        # crucially, never *metered*: the claim below stamps `user_id` only on the
+        # parse path, leaving callback/undo rows NULL so `count_updates_on_day`
+        # counts exactly the messages that spend credits (§16), not the free taps.
+        is_parse = isinstance(action, TextMessage) and not (
+            _is_undo(action.text)
+            or _is_help(action.text)
+            or _is_greeting(action.text)
+            or _is_invite(action.text)
+            or _is_household(action.text)
+            or _is_remove(action.text)
+            or _is_transfer(action.text)
+        )
+        if is_parse and not within_daily_cap(conn, user_id):
+            send_message(action.chat_id, CAP_REACHED)
+            log_event("update.capped", status="noop", update_id=update_id,
+                      source="webhook", user_id=user_id, duration_ms=ms_since(start))
+            return {"ok": True}
+        # Meter only the parse path (see above). Counted off the yet-unclaimed
+        # count, so the (cap+1)th message is the one refused.
+        metered_user = user_id if is_parse else None
+        if isinstance(update_id, int) and not claim_update(conn, update_id, metered_user):
             return {"ok": True}  # a prior delivery of this update was handled
-        if isinstance(action, TextMessage):
-            if _is_undo(action.text):
-                handle_undo(conn, action)
-            else:
-                handle_text(conn, action)
-        elif action.data == CONFIRM:
-            handle_confirm(conn, action)
-        elif action.data == CANCEL:
-            handle_cancel(conn, action)
-        elif action.data.startswith(CATEGORY_PREFIX):
-            handle_category(conn, action)
-    log.info("handled update %s: %s", update.get("update_id"), type(action).__name__)
+        try:
+            if isinstance(action, TextMessage):
+                if _is_undo(action.text):
+                    handle_undo(conn, action)
+                elif _is_help(action.text) or _is_greeting(action.text):
+                    handle_help(conn, action)
+                elif _is_invite(action.text):
+                    handle_invite(conn, action)
+                elif _is_household(action.text):
+                    handle_household(conn, action)
+                elif _is_remove(action.text):
+                    handle_remove(conn, action)
+                elif _is_transfer(action.text):
+                    handle_transfer(conn, action)
+                else:
+                    handle_text(conn, action)
+            elif action.data == CONFIRM:
+                handle_confirm(conn, action)
+            elif action.data == CANCEL:
+                handle_cancel(conn, action)
+            elif action.data.startswith(CATEGORY_PREFIX):
+                handle_category(conn, action)
+            elif action.data.startswith(REMOVE_PREFIX):
+                handle_remove_choice(conn, action)
+        except Exception:
+            log_event("update.handled", status="error", update_id=update_id,
+                      source="webhook", duration_ms=ms_since(start))
+            raise
+    log_event("update.handled", status="ok", update_id=update_id,
+              source="webhook", duration_ms=ms_since(start))
     return {"ok": True}

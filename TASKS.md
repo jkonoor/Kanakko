@@ -512,7 +512,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ### Housekeeping
 
-- [ ] Split `db.py` into a `db/` package. CLAUDE.md pins this trigger to Phase 9
+- [x] Split `db.py` into a `db/` package. CLAUDE.md pins this trigger to Phase 9
       ("households, memberships and invites will push it past 600") and it has
       fired: `db.py` is now 722 lines. Split by responsibility (users/households,
       pending+confirm flow, reads/reports, reminders, invites, audit), not by

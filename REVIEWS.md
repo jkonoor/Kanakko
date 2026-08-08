@@ -12,6 +12,84 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `bf27ed7` — feat: member removal (owner removes anyone, a member leaves — Phase 9, §16)
+
+**Status: ✅ DONE**
+
+`/remove <label>` (owner removes that roster member) and bare `/remove` (leave
+yourself) both route through one authorization-bearing path,
+`db.remove_member(actor, target)`. The removed member is re-homed into a fresh
+household of one; their past entries are retained in the household they left.
+Also scopes `household_roster`'s label join to `i.household_id = m.household_id`
+(the `bc3b0e4` review's low finding), reachable now that a user can carry a used
+household invite from more than one household. No money, timezone,
+`active_transactions`-bypass, or LLM path is touched.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+5, route +
+  metering exclusion), `kanakko/db.py` (+61, `remove_member` + roster join
+  scope), `kanakko/handlers.py` (+84, `_is_remove`/`handle_remove`),
+  `tests/test_member_removal.py` (new, 283 lines), `tests/test_webhook.py` (+28).
+  No migration, no schema change.
+- **Full suite**: `uv run pytest` → **272 passed** (1 pre-existing Starlette
+  deprecation warning, unrelated).
+- **Spec fit against `docs/DECISIONS.md` §16**: matches the removal rules —
+  "owner may remove anyone; any member may remove themselves" (self case is
+  `actor == target` in one path), "owner leaving must transfer ownership first"
+  (`owner_must_transfer`, also blocks a solo owner leaving their household of
+  one). The retain-or-delete prompt is correctly deferred: §16's "ask retain or
+  delete" is a *separate* task, left unchecked in `TASKS.md`; this task retains
+  by default and touches no `transactions` row — verified in the diff and by
+  the retain test asserting the ₹500 stays via `active_transactions`.
+- **Authorization lives in `db.remove_member`, not the call site** — confirmed
+  neither route can bypass it. Order: actor→household lookup, target-membership
+  check (`not_member`), `not_owner`, then `owner_must_transfer`. A member trying
+  to remove the owner hits `not_owner` first (correct — either refusal is right).
+- **Re-homing**: `create_household_of_one` runs after the `DELETE` in the same
+  transaction, so its `NOT EXISTS (… household_members …)` is true and a fresh
+  household is minted; the removed member's next confirm won't hit the NOT NULL
+  `transactions.household_id` (migration 008). Verified by
+  `test_owner_removes_a_member_...` asserting `new_hid != hid`.
+
+### Guards genuinely redden (verified by reverting each fix)
+
+- **Roster label scope**: removed the `AND i.household_id = m.household_id` line
+  from `household_roster` → `test_roster_label_is_scoped_to_the_current_household`
+  **FAILED** (a mover carrying a stale invite from a household they left
+  duplicates their roster row with the old label). Restored → green. This is a
+  guard that guards: it asserts the *behaviour* (one row, new label) via a real
+  cross-household move, not a string.
+- **`not_owner` authorization**: removed the `actor != owner and actor != target`
+  check → `test_a_member_cannot_remove_another_member` and
+  `test_handle_remove_member_cannot_remove_another_via_label` both **FAILED**.
+  Restored → green.
+
+### Routing / metering
+
+`test_webhook_routes_remove_to_handle_remove_and_never_meters_it` asserts
+`/remove ravi` routes to `handle_remove` (not `handle_text`, which would be an
+LLM call + junk pending card) and the claim is unmetered (`metered_user is
+None`). Confirmed `_is_remove` is in both the `is_parse` exclusion (line 330) and
+the dispatch chain (line 350), matching `/undo`, `/invite`, `/household`. A
+capped owner can still remove a member. `_is_remove` handles the group
+`/remove@bot` form and rejects `/removed` / `remove` — covered by
+`test_is_remove_recognises_the_command`.
+
+### No findings
+
+Money stays untouched, reads that exist go through `active_transactions`, no
+`float`, no timezone bucketing, no new dependency, no secret. The owner label is
+NULL in the current household (owner created it rather than consuming a household
+invite), so `/remove <label>` can never target the owner — an owner leaves only
+via the bare form, which `remove_member` refuses. One benign observation, not a
+finding: a solo owner sending bare `/remove` gets `owner_must_transfer` ("until
+then, you stay") — a permanent dead-end until ownership transfer ships, but
+spec-conformant (§16: a household always has an owner) and there is nothing for a
+solo user to leave anyway.
+
+---
+
 ## 2026-08-08 — `bc3b0e4` — feat: add `/household` (who is in it, who owns it — Phase 9, §16)
 
 **Status: ✅ DONE**

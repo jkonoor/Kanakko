@@ -12,6 +12,57 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `8f32caa` — split `db.py` into a `db/` package by responsibility (Phase 9)
+
+**Status: ✅ DONE**
+
+**Scope.** Pure refactor. Moves the 924-line `kanakko/db.py` into a `kanakko/db/`
+package (connection, users, households, invites, pending, reports, reminders,
+audit) with an `__init__.py` re-exporting the 26 public functions. Claims no
+behaviour change and no test edits.
+
+**What I checked (and what it returned).**
+
+- **No function was dropped, added, or altered.** AST-compared every
+  `def`/`async def` in `HEAD~1:kanakko/db.py` against the union of the new
+  modules: 28 functions old, 28 new, `missing=∅`, `extra=∅`, and **every body
+  byte-identical after strip** (`body-differing funcs: []`). This is the load-
+  bearing check for a "pure move" — it means no money path, timezone bucket, or
+  `active_transactions` read changed under cover of the reshuffle.
+- **The only module-level constant** (`_json_dumps = partial(json.dumps,
+  default=str)`) moved intact to `audit.py:17`, alongside its two `Jsonb(...)`
+  call sites — the audit-JSON serialisation is unchanged.
+- **Cross-module private references resolve correctly.** The money mutations
+  now import the shared helper explicitly: `from kanakko.db.audit import
+  _record_event` in both `reports.py:15` and `pending.py:17`; `_authorize_removal`
+  stays module-internal to `households.py` (defined :76, called :120, :156). No
+  private helper leaked into `__init__`'s surface.
+- **Import surface is unchanged.** Enumerated every `from kanakko.db import …`
+  across `handlers.py`, `app.py`, `auth.py`, and the three `jobs/*.py`; under
+  `uv run` all imported names `hasattr(kanakko.db, …)` — no `MISSING` printed.
+  `__all__` lists exactly the 26 public functions.
+- **No test or doc referenced an internal db path** that the split would break:
+  grep for `patch("kanakko.db…")`/`monkeypatch` targeting db internals in
+  `tests/`, and for `kanakko.db.*` in `docs/`/`AGENTS.md`, both empty.
+- **`uv run pytest -q` → `289 passed, 1 warning in 12.17s`.** The pre-existing
+  `httpx`/starlette deprecation warning is unrelated to this change.
+- **File sizes** all under the 300-line cap (largest: `households.py` 220,
+  `reports.py` 215, `pending.py` 209).
+- **TASKS.md** box flipped `[ ] → [x]` for "Split `db.py`" — accurate; the work
+  is real, not a stub.
+
+**Findings.** None blocking.
+
+- *(nit, non-blocking)* The `TASKS.md` line still reads "`db.py` is now 722
+  lines"; the file was actually **924** at the split (the commit message itself
+  says 924). Stale figure in the task prose, no code impact.
+
+Verdict: a genuine behaviour-preserving move. The AST body-equality plus the
+green suite plus the resolved import surface together establish that nothing on
+the money or timezone paths shifted. ✅ DONE.
+
+---
+
 ## 2026-08-08 — `5f0cd45` — household-scoping tests for the three jobs (Phase 9, §16)
 
 **Status: ✅ DONE**

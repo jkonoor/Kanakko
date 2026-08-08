@@ -14,7 +14,14 @@ returned, not what they were assumed to return.
 
 ## 2026-08-08 — `8a8bbc8` — add `/invite`: owner issues a labelled household link (Phase 9, §16)
 
-**Status: ⚠️ CHANGES REQUESTED**
+**Status: ✅ RESOLVED** — finding 1 fixed in a follow-up commit:
+`test_webhook_routes_invite_to_handle_invite_and_never_meters_it`
+(`tests/test_webhook.py`) drives `/invite ravi` through `/webhook` and asserts it
+routes to `handle_invite` (not `handle_text`) and that `claim_update`'s
+`metered_user` is `None`. Verified it reddens on both defects: dropping the
+`_is_invite` routing `elif`, and dropping the `_is_invite` term from `is_parse`.
+
+**Status (original): ⚠️ CHANGES REQUESTED**
 
 Scope: `/invite <label>` mints a single-use `household` invite for the household
 the sender owns and replies with its `https://t.me/<bot>?start=<code>` deep link.

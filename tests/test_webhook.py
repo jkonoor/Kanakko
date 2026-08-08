@@ -741,6 +741,41 @@ def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
     assert len(texted) == 1 and len(undone) == 2  # ordinary text still parses
 
 
+def test_webhook_routes_invite_to_handle_invite_and_never_meters_it(monkeypatch):
+    """`/invite` is an owner command, not a transaction, and must never be metered.
+
+    Two failures this guards, both silent (`8a8bbc8` review finding 1): a routing
+    miss would feed "/invite ravi" to `handle_text` — an LLM call and a garbage
+    pending card; a metering miss would stamp its `claim_update` with `user_id`,
+    so an owner at their daily cap could no longer invite and every invite would
+    burn a cap unit. Asserts it routes to `handle_invite` (not `handle_text`) and
+    that the claim is unmetered (`metered_user is None`). A plain text message
+    still parses and still meters.
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    invited, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_invite", lambda conn, msg: invited.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    def text(body, update_id):
+        return {"update_id": update_id, "message": {"message_id": 1, "chat": {"id": 42}, "text": body}}
+
+    client.post("/webhook", json=text("/invite ravi", 100), headers=AUTH)
+    assert len(invited) == 1 and texted == []  # routed to invite, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+    client.post("/webhook", json=text("spent 500 on food", 101), headers=AUTH)
+    assert len(texted) == 1 and len(invited) == 1  # ordinary text still parses
+    assert claims == [None, 1]  # and the parse path is metered with the user id
+
+
 def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
 

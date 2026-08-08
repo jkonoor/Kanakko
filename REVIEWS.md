@@ -12,6 +12,67 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `bc3b0e4` — feat: add `/household` (who is in it, who owns it — Phase 9, §16)
+
+**Status: ✅ DONE**
+
+A read-only command. `db.household_roster` returns the querying user's household
+roster (owner first, each member's invite label); `handle_household` renders it,
+marking the owner and the viewer, and points a solo user at `/invite`. Routed
+after the auth gate and excluded from `is_parse` so it is never metered or capped.
+No money, timezone, `active_transactions`, or LLM path is touched.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+6),
+  `kanakko/db.py` (+28), `kanakko/handlers.py` (+41), two test files. No
+  migration, no schema change — the query reads existing `households`,
+  `household_members`, `invites` tables (`migrations/004`, `006`).
+- **Full suite**: `uv run pytest -q` → **258 passed**, 1 warning. Matches the
+  commit claim.
+- **Scope guard actually reddens.** The roster query is scoped
+  `WHERE m.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)`
+  (`db.py:250-251`). I replaced that scope with `WHERE %s IS NOT NULL OR TRUE`
+  (returns every household's members) and reran
+  `test_roster_lists_the_household_owner_first_with_member_labels` → **FAILED**
+  (a second household's member leaked in). Restored; suite green again. The guard
+  fails for the reason it exists, not on a surface string.
+- **Metering-exclusion guard actually reddens.** I removed `_is_household` from
+  the `is_parse` exclusion in `app.py:322-326` and reran
+  `test_webhook_routes_household_to_handle_household_and_never_meters_it` →
+  **FAILED** (claim went from `None` to metered). Restored. So the "never
+  metered/capped" claim is enforced by a test that breaks when it regresses.
+- **Routing**: `/household` is dispatched at `app.py:344-345` after the auth gate,
+  in the same `elif` chain as `/undo` and `/invite`; `_is_household` handles the
+  bare and `@bot` group forms and rejects `/households` and `household`
+  (`test_is_household_recognises_the_command`, all green).
+- **Marking logic**: owner renders as `Owner`, members as their label (or
+  `Member` when unlabelled), viewer gets ` (you)`; solo (`len(members) <= 1`)
+  short-circuits to `HOUSEHOLD_SOLO`. Verified live by the two handler tests
+  (owner-viewing and member-viewing both assert the right `(you)` placement).
+- **No PII leak**: the reply shows names/labels only, never the Telegram or
+  internal user id.
+- **Spec fit** (`docs/DECISIONS.md` §16): read-only display, household-scoped,
+  labelled attribution — consistent with §16. `TASKS.md` correctly splits display
+  from member removal (removal left unchecked, coupled to the next two tasks); the
+  ticked box matches shipped, non-stub code.
+
+### Findings
+
+**None blocking.**
+
+Low / informational (no fix required for this commit): the label `LEFT JOIN
+invites i ON i.used_by = m.user_id AND i.kind = 'household'` (`db.py:246-247`) is
+not scoped to `m.household_id`. Today a user has at most one used household
+invite (no way to leave a household yet), so at most one row matches and the
+roster is correct — I could not construct a duplicate. But once **member removal
++ re-invite** (the next task) lets a user leave one household and join another,
+that user will carry two `kind='household'` invites with their `used_by`, and the
+join will duplicate their roster row with two labels. Worth scoping the join to
+`i.household_id = m.household_id` when removal lands.
+
+---
+
 ## 2026-08-08 — `2ed5ac4` — test: cover `/invite` webhook routing and metering exclusion (QA `8a8bbc8` finding 1)
 
 **Status: ✅ DONE**

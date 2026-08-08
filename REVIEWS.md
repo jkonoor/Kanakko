@@ -12,6 +12,85 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `8a8bbc8` — add `/invite`: owner issues a labelled household link (Phase 9, §16)
+
+**Status: ⚠️ CHANGES REQUESTED**
+
+Scope: `/invite <label>` mints a single-use `household` invite for the household
+the sender owns and replies with its `https://t.me/<bot>?start=<code>` deep link.
+Owner-only enforced in SQL (`create_household_invite`: `INSERT … SELECT … FROM
+households WHERE owner = %s`). Bot username from `getMe` (`tg.get_bot_username`).
+Routed in `app.py` after the gate, alongside `/undo`, and excluded from
+`is_parse` so it is never metered or capped. `_start_payload` → `_command_arg`,
+shared by `/start` and `/invite`. Event `invite.issued` (ok/noop) via the §17 seam.
+
+### What I checked
+
+- **Full suite green.** `uv run pytest -q` → **252 passed, 1 warning**.
+  `tests/test_invite.py` alone → **5 passed**. Matches the commit's claim.
+- **Owner-only guard is genuine (reddens on revert).** Dropped the `WHERE owner
+  = %s` scope from `create_household_invite` (so the `SELECT … FROM households`
+  yields any household) and re-ran `test_invite.py` → **3 failed** (`test_member_
+  who_isnt_owner_is_refused`, `test_bare_invite_asks_for_a_label`,
+  `test_create_household_invite_scopes_to_the_owner`), 2 passed; restored → all
+  pass. The guard fails for the reason it exists — a non-owner member mints no row.
+- **Issued code is a valid, consumable `/start` payload.** `code = "h-" +
+  secrets.token_urlsafe(9)` → 14 chars, alphabet `A-Z a-z 0-9 _ -`; matches
+  `_START_PAYLOAD_RE = [A-Za-z0-9_-]{1,64}` (handlers.py:162) and the §16 64-char
+  limit. `kind='household'` with a non-NULL `household_id` satisfies the
+  `invites_household_matches_kind` CHECK (004_invites.sql). `consume_invite`
+  (db.py:193-201) routes a `household` code to `household_members` insert — the
+  end-to-end onboarding path is coherent.
+- **Owner id semantics.** `households.owner` is the internal `user_id`
+  (006_households.sql); `handle_invite` passes `get_or_create_user(...)` (internal
+  id) as `owner_user_id`. Correct axis — not the Telegram id.
+- **Metering exclusion is correct in the code.** `is_parse` now excludes
+  `_is_invite` (app.py:322-324); `/invite` makes no LLM call so it must not be
+  metered or capped. Read the path — correct as written.
+- **Idempotency / collision.** `/invite` is claimed (`claim_update`, metered_user
+  NULL) so a redelivery is deduped; a UNIQUE-code collision raises, the claim
+  rolls back, redelivery re-mints. A transient `getMe`/`send_message` failure
+  after the INSERT rolls the uncommitted row back too — no orphaned invite. Sound.
+- **No secret, no float, no `transactions` read, no new dependency.** `secrets`
+  is stdlib. Rename `_start_payload` → `_command_arg` left no dangling refs
+  (grep clean).
+
+### Findings
+
+**1 — (medium, test coverage) The `app.py` webhook wiring for `/invite` has no
+regression test; both a routing miss and a metering miss would be silent.**
+`kanakko/app.py:322-341`. The commit adds two behaviours in the webhook that
+`test_invite.py` does not exercise (it calls `handle_invite` directly):
+
+  - **Routing** — `elif _is_invite(action.text): handle_invite(...)`. If this
+    branch regressed, `/invite ravi` would fall through to `handle_text` and be
+    fed to the LLM parser as a transaction (an OpenRouter call + a garbage pending
+    card). This is the *exact* failure the repo already guards for `/undo` with a
+    dedicated test (`test_webhook.py:714` — "Routing it to `handle_text` would
+    feed …to the parser"). `/invite` got no equivalent.
+  - **Metering** — `is_parse = … and not (_is_undo(...) or _is_invite(...))`. If
+    the `_is_invite` term were dropped, `/invite` becomes metered *and* capped: an
+    owner at their daily cap could no longer invite, and every invite would burn a
+    cap unit — a silent money-path deviation. The repo tests this class for the
+    Confirm tap (`test_cap.py:148` — reverting the `metered_user` guard reddens
+    it) but not for `/invite`.
+
+  Failure scenario: a later refactor of the webhook dispatch drops or reorders
+  the `_is_invite` checks; the whole suite stays green because nothing asserts
+  `/invite` routes to `handle_invite` and stays off the metering count.
+  Suggested fix: one webhook-level test mirroring
+  `test_webhook_routes_undo_to_handle_undo_not_handle_text` — POST `/invite ravi`
+  through `/webhook`, assert `handle_invite` was called (not `handle_text`) and
+  `count_updates_on_day` stayed 0. Small, and it matches the coverage its two
+  siblings already have.
+
+The shipped code itself is correct and the task is genuinely done (owner-only is
+enforced and tested at the unit level); the gap is that the new webhook wiring —
+the money-adjacent part — carries no net beneath it, unlike every comparable
+command in the same file.
+
+---
+
 ## 2026-08-08 — `2d2300a` — log the three scheduled jobs through the event seam (Phase 8, §17)
 
 **Status: ✅ DONE**

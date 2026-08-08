@@ -336,6 +336,29 @@ row, because there is no `txn_id` to hang one on.
       so the defaults live in compose (`${TRACE_MODE:-on}`) or in code, the way
       `OPENROUTER_MODEL` already does. Note the §2 trap: compose's `:-` makes the
       variable *present but empty*, so read it with `or`, not `get(key, default)`.
+- [ ] Log the three scheduled jobs through the seam (§17). Found 2026-08-08 while
+      writing the manual test rows: the jobs call `configure_logging` — which is
+      what binds the sink — but **never call `log_event`**, so a `kanakko-cron`
+      container writes an empty `events.jsonl`. §17's Storage section mounts the
+      volume on *both* applications precisely because "the jobs log too", and
+      `003_transaction_events.sql` already permits `source='cron'` with nothing
+      writing it. Phase 8 had no task for this; the phase is otherwise complete.
+      **One event per job run, not per user** — the fan-out is over every user, and
+      a line each would put the whole ledger's shape on the volume for a summary
+      that is already sent to the user. Carry `source="cron"`, the job name, how
+      many users were considered, how many were delivered to, how many were
+      deliberately skipped (the noon nudge suppresses active users, which is not a
+      failure — see `fan_out`), and `duration_ms`. `DeliveryFailures` is the
+      `status="error"` case and **must still raise**: the job exits non-zero, and
+      the log line is in addition to that, not instead of it (`jobs/__init__.py`
+      says so deliberately, "since logging is being designed separately" — this is
+      that design arriving).
+      The check that earns its place: a fan-out where one user's send raises leaves
+      an `error` event **and** the earlier users' `reminder_log` rows intact. That
+      is §12's failure-isolation property, which already holds and currently leaves
+      no trace — the log line is what makes it observable, so assert both halves.
+      In the same commit, delete the closing note in `docs/TESTING.md` §5a that
+      records this gap, and add the job rows it says to add.
 - [ ] `[human]` Mount a volume on **both** `kanakko-web` and `kanakko-cron` in
       Dokploy — they are separate applications and the jobs log too. Only `pgdata`
       exists today. Verify a container restart preserves the log, which is the

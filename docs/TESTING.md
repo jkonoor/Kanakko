@@ -36,6 +36,12 @@ log searchable afterwards.
 > environment. Prefer distinctive amounts (₹1.11, ₹2.22) so test rows are easy to
 > find and remove afterwards, and clean up with `/undo` or the dashboard when done.
 
+> **Trace mode is on by default, so everything you type here lands on disk** —
+> the raw message, the prompt built from it, and the model's reply, kept until
+> rotation (§17). That is deliberate for a beta among friends and is what makes a
+> parse bug diagnosable, but assume a test session is recorded verbatim. Section
+> 5a.12 is where you look at what was kept.
+
 ---
 
 ## 1. Entry and the confirm loop
@@ -149,6 +155,52 @@ Some need an operator to break something deliberately.
 | 5.4 | *(operator)* Check the container log during 5.1 | A `WARNING` line with the status code and provider message. **The API key must not appear in it** | ⬜ | |
 | 5.5 | Send 3–4 messages rapidly | Each gets its own card; none is lost or duplicated | ⬜ | |
 
+### 5a. Logging, the audit trail, and trace mode
+
+§17 (Phase 8). Almost all operator checks — they need a shell in the
+`kanakko-web` container and `psql` on `kanakko-db`. The operational log is
+`$LOG_DIR/events.jsonl` (JSON Lines, rotated by stdlib at 5 MB × 5); the audit
+trail is the `transaction_events` table; trace artefacts are
+`$LOG_DIR/trace/<update_id>/`.
+
+**Before starting**, log one distinctive expense (₹3.33) and confirm it — most rows
+below refer back to it. Note its `update_id` from the log.
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 5a.1 | `tail -3 $LOG_DIR/events.jsonl` after confirming it | A `transaction.confirmed` line, `"status":"ok"`, with `txn_id`, `amount`, `duration_ms` and `source":"webhook"` | ⬜ | |
+| 5a.2 | Compare that line's `update_id` with the `pending.created` line before it | **Different** ids — the card and the tap are two updates. The confirm's id must match the tap, not the typing | ⬜ | |
+| 5a.3 | Tap **Confirm** a second time on the same card | A second line with `"status":"noop"` — **not** `ok` — and no second ledger row | ⬜ | |
+| 5a.4 | `jq -r 'select(.status=="error")' $LOG_DIR/events.jsonl` | Empty on a normal day. Anything here is a handler that raised, and it should correspond to a 500 | ⬜ | |
+| 5a.5 | `grep -c "$TELEGRAM_BOT_TOKEN" $LOG_DIR/events.jsonl` and the same for the OpenRouter key | **0 for both**, and repeat it against `$LOG_DIR/trace/` | ⬜ | |
+| 5a.6 | `select action, before, after, source, update_id from transaction_events where txn_id = <yours>` | One row: `action='confirm'`, `before` **NULL**, `after` carrying the amount, `source='webhook'`, `update_id` set | ⬜ | |
+| 5a.7 | Change that row's category in the dashboard, re-run 5a.6 | A second row, `action='recategorise'`, `before`/`after` showing **both** categories, `source='miniapp'`, `update_id` **NULL** | ⬜ | |
+| 5a.8 | `/undo` a fresh entry, then query its events | `action='undo'`, `after` NULL. Every money change has exactly one row | ⬜ | |
+| 5a.9 | `select count(*) from transactions t where not exists (select 1 from transaction_events e where e.txn_id = t.txn_id)` | **0** — a ledger row with no audit row means the two came apart, which is the failure §17 exists to prevent | ⬜ | |
+| 5a.10 | `ls $LOG_DIR/trace/<update_id>/` for a successful parse | `01__input.json`, `02__request.json`, `03__parse__ok.json` — the listing alone tells you it succeeded | ⬜ | |
+| 5a.11 | Send `hello how are you`, then `ls` that update's folder | `03__parse__invalid.json` — the **filename** names the failure, no file opened | ⬜ | |
+| 5a.12 | Open `01__input.json` and `02__request.json` from any folder | Your raw text and the full prompt, in clear. **Expected** — this is the trade §17 records for revisiting before real customers | ⬜ | |
+| 5a.13 | *(operator)* Set `TRACE_KEEP=3`, send 5 messages, `ls $LOG_DIR/trace/ \| wc -l` | **3.** Rotation that never fires is the bug that fills the shared volume | ⬜ | |
+| 5a.14 | *(operator)* Set `TRACE_MODE=off`, send a message | No new folder appears, and the bot still works normally | ⬜ | |
+| 5a.15 | *(operator)* Restart `kanakko-web`, then check `events.jsonl` | **Still there, with the old lines.** This is the volume mount — without it every deploy wipes the evidence | ⬜ | |
+| 5a.16 | *(operator)* In `kanakko-cron`, write a file into `$LOG_DIR` and read it back from `kanakko-web` | The **same** volume is mounted on both — §17 requires it, and the jobs are the reason | ⬜ | |
+
+**5a.5 and 5a.9 are the two that matter.** A token in the log is a leak that
+survives on disk until rotation, and an orphan ledger row means the audit write is
+no longer inside the money transaction — the exact regression the arrangement in
+`db.py` exists to make impossible.
+
+**5a.15 and 5a.16 cannot pass until the volume is mounted** on both applications
+(the `[human]` task in Phase 8). Until then, mark them ⛔ rather than ❌ — nothing
+is broken, the infrastructure just isn't there yet.
+
+**No row here checks a scheduled job's events, because there are none.** The three
+jobs bind the sink through `configure_logging` but never call `log_event`, so a
+`kanakko-cron` container writes an empty `events.jsonl` — §17's storage section
+mounts the volume on both *because* "the jobs log too", and `transaction_events`
+even permits `source='cron'`, but nothing writes either. Phase 8 had no task for
+it. Add rows here when it lands, rather than testing for lines that cannot appear.
+
 ---
 
 ## 6. Access control and households
@@ -253,6 +305,7 @@ survives.
 | 3. Dashboard | | | |
 | 4. Reminders | | | |
 | 5. Failure handling | | | |
+| 5a. Logging and audit trail | | | |
 | 6. Households *(not built)* | | | |
 | 7. Security | | | |
 | 8. Recovery | | | |

@@ -552,6 +552,45 @@ means transactions with no home. Each task leaves the tree green and deployable.
       currently wrong about the code; it becomes true with this change, so no edit
       is needed there beyond adding a row for the stale-Cancel case.
 
+- [ ] Answer a non-transaction message helpfully, and without paying for it.
+      Raised by the user 2026-08-08: typing "How do I use this?" today returns
+      *"I couldn't find an amount in that"* — a natural question answered with a
+      complaint, **after two OpenRouter calls** (`parse_message` retries once on a
+      `ValidationError`, and a message with no amount fails both times). It also
+      spends two slots of the user's daily cap.
+      Three parts, one coherent change — they share a single string:
+      **(a)** Widen `REPHRASE_PROMPT` so it orients a lost user rather than only
+      correcting a failed entry. It already carries two examples; it needs to read
+      as help, not rejection.
+      **(b)** Add `/help`, routed beside `/undo` and `/household`, sending that
+      same text. It is what people try.
+      **(c)** Short-circuit the obvious greetings *before* the LLM call —
+      `hi`, `hello`, `hey`, `help`, `thanks`, `what can you do`, `how do i use
+      this` — on an **exact match** of the normalised message (lowercased,
+      stripped, punctuation trimmed), answering with the same help text and making
+      **zero** OpenRouter calls.
+      **The exact match is the whole safety argument, so do not loosen it.** Any
+      heuristic that decides "this isn't a transaction" — no digits, ends in a
+      question mark, missing a keyword — will eventually refuse a real expense:
+      "spent five hundred on lunch" has no digits, and "500 lunch" has no verb. A
+      wasted LLM call costs a fraction of a rupee; a silently refused entry costs
+      the trust the whole ledger runs on. Exact match cannot misfire on
+      "spent 500 on hi", because that is not an exact match.
+      The check that earns its place: `hi` produces the help text with the parse
+      function **never called** (assert the call count, not just the reply), and
+      `spent five hundred on lunch` still reaches the parser. Assert both — a check
+      that only covers the greeting would pass on a filter that swallowed
+      everything.
+- [ ] `[human]` Set up the BotFather surfaces — no code, and the bot currently has
+      none of them. `/setcommands` with `start`, `undo`, `household`, `invite`,
+      `help` so the "/" menu lists them (this is where a Telegram user looks first,
+      and there is nothing there today). Set the **description**, which is shown on
+      the empty chat screen *before* a new user presses Start — the first sentence
+      any tester reads, and the highest-leverage text in the product. Set the
+      **About** text on the profile. Do this alongside the Mini App menu button
+      already registered in Phase 4. Verify from a Telegram account that has never
+      opened the bot, because that is the only way to see the pre-Start screen.
+
 ---
 
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

@@ -36,6 +36,7 @@ from kanakko.db.users import (
     all_users,
     claim_update,
     count_updates_on_day,
+    find_user,
     get_or_create_user,
     user_exists,
 )
@@ -43,6 +44,7 @@ from kanakko.db.users import (
 __all__ = [
     "connect",
     "get_or_create_user",
+    "find_user",
     "user_exists",
     "claim_update",
     "count_updates_on_day",

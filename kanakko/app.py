@@ -15,6 +15,7 @@ from kanakko.confirm import CANCEL, CONFIRM
 from kanakko.db import (
     claim_update,
     connect,
+    find_user,
     get_or_create_user,
     month_summary,
     recent_transactions,
@@ -125,6 +126,30 @@ def authenticated_user(request: Request, max_age: timedelta | None = None) -> in
         raise HTTPException(status_code=401)
 
 
+def permitted_user(conn, telegram_user_id: int) -> int:
+    """This Mini App caller's internal `user_id`, or a 403 (§16).
+
+    `authenticated_user` proves *which* Telegram user is asking; it never asks
+    whether they are permitted. That is a separate question and this is where it
+    is answered — once, rather than once per route.
+
+    **Resolving must not create.** These routes previously called
+    `get_or_create_user`, so anyone who found the bot and tapped the menu button
+    minted a `users` row. That row then satisfied the bot's own gate, which asks
+    `user_exists` — so the Mini App was a way around the invite gate §16 exists to
+    be. Worse, the row belonged to no household, and `confirm_pending` derives
+    `household_id` from a membership that wasn't there: a NOT NULL violation, a
+    500, and a Telegram redelivery loop on every Confirm.
+
+    A user row is therefore the credential: it exists only after `/start` admitted
+    the person (an invite in `invite` mode, a household of one in `open` mode), so
+    "no row" means "has not been admitted" in either mode and gets a 403.
+    """
+    user_id = find_user(conn, telegram_user_id)
+    if user_id is None:
+        raise HTTPException(status_code=403)
+    return user_id
+
 
 @app.get("/app/data", response_class=HTMLResponse)
 def mini_app_data(request: Request) -> str:
@@ -137,7 +162,7 @@ def mini_app_data(request: Request) -> str:
     telegram_user_id = authenticated_user(request)
 
     with connect() as conn:
-        user_id = get_or_create_user(conn, telegram_user_id)
+        user_id = permitted_user(conn, telegram_user_id)
         first, next_first = current_month_ist()
         w_first, w_next = current_week_ist()
         # month_summary is a generic date-range summary, so the same function
@@ -199,7 +224,7 @@ async def mini_app_delete(request: Request) -> Response:
 
     start = time.perf_counter()
     with connect() as conn:
-        user_id = get_or_create_user(conn, telegram_user_id)
+        user_id = permitted_user(conn, telegram_user_id)
         deleted = soft_delete_transaction(conn, user_id, txn_id,
                                           source="miniapp", update_id=None)
     # ponytail: log_event is a synchronous write inside an async route — fine at
@@ -243,7 +268,7 @@ async def mini_app_category(request: Request) -> Response:
 
     start = time.perf_counter()
     with connect() as conn:
-        user_id = get_or_create_user(conn, telegram_user_id)
+        user_id = permitted_user(conn, telegram_user_id)
         updated = set_transaction_category(conn, user_id, txn_id, category,
                                            source="miniapp", update_id=None)
     # ponytail: synchronous log write in an async route — see /app/delete above

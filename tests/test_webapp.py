@@ -567,6 +567,7 @@ def test_delete_route_cannot_delete_another_users_row(conn, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
+    get_or_create_user(conn, 42)  # the caller must be admitted; the fix 403s an unknown one
     other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
     txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
@@ -733,6 +734,7 @@ def test_category_route_cannot_change_another_users_row(conn, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
 
+    get_or_create_user(conn, 42)  # the caller must be admitted; the fix 403s an unknown one
     other = get_or_create_user(conn, 99)  # not user 42, whom the initData names
     txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
 
@@ -844,3 +846,68 @@ def test_shell_reloads_when_the_mini_app_is_reopened():
     # and the handler must actually reload, not merely be registered
     listener = SHELL_HTML.split(call, 1)[1].split("\n", 1)[0]
     assert "load()" in listener
+
+
+def test_mini_app_refuses_a_user_who_was_never_admitted(conn, monkeypatch):
+    """A valid `initData` from an unadmitted user gets 403 and mints no row (§16).
+
+    `authenticated_user` proves *which* Telegram user is asking, never that they
+    are permitted. The routes used to call `get_or_create_user`, so anyone who
+    found the bot and tapped the menu button minted a `users` row — and that row
+    then satisfied the bot's own gate, which asks `user_exists`. The Mini App was
+    a way around the invite gate.
+
+    Both halves are asserted because either alone passes on a broken fix: a 403
+    that still created the row would leave the bypass in place, and no-row with a
+    200 would leak an empty dashboard. The `users` count is taken before and after
+    so the assertion is about *this* request, not the table being empty.
+    """
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("SIGNUP_MODE", "invite")
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
+        (before,) = cur.fetchone()
+    assert before == 0, "FIELDS' user 42 must be unknown for this to prove anything"
+
+    init_data = _sign(FIELDS)  # FIELDS carries user id 42 — never admitted
+    resp = client.get("/app/data", headers={"Authorization": "tma " + init_data})
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
+        (after,) = cur.fetchone()
+    conn.rollback()
+
+    assert resp.status_code == 403
+    assert after == 0, "the Mini App must not mint a user row for an unadmitted caller"
+
+
+def test_mini_app_mutations_refuse_an_unadmitted_user(conn, monkeypatch):
+    """The two mutating routes reject an unadmitted caller too (§16).
+
+    The read route is the one that minted the row, but a fix applied only there
+    would leave `/app/delete` and `/app/category` creating users. They pass a
+    24h `max_age`, so the payload is signed fresh.
+    """
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    fresh = dict(FIELDS, auth_date=str(int(datetime.now(timezone.utc).timestamp())))
+    init_data = _sign(fresh)
+    headers = {"Authorization": "tma " + init_data}
+
+    delete = client.post("/app/delete", json={"id": 1}, headers=headers)
+    category = client.post("/app/category", json={"id": 1, "category": "Food"},
+                           headers=headers)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
+        (after,) = cur.fetchone()
+    conn.rollback()
+
+    assert delete.status_code == 403
+    assert category.status_code == 403
+    assert after == 0

@@ -34,19 +34,33 @@ def get_or_create_user(conn: psycopg.Connection, telegram_user_id: int) -> int:
     return user_id
 
 
-def user_exists(conn: psycopg.Connection, telegram_user_id: int) -> bool:
-    """True if a `users` row already exists for this Telegram id — a pure lookup
-    that creates nothing, unlike `get_or_create_user`.
+def find_user(conn: psycopg.Connection, telegram_user_id: int) -> int | None:
+    """This Telegram id's internal `user_id`, or `None` — a pure lookup that
+    creates nothing, unlike `get_or_create_user`.
 
-    The §16 authorization gate uses it to refuse an unrecognised user *before* any
-    LLM call, without minting the very row §16 says must not be stored for a
-    refused update.
+    The Mini App routes resolve their caller through here (§16): a valid
+    `initData` proves *which* Telegram user is asking, never that they are
+    permitted, and `get_or_create_user` on that path would mint a `users` row for
+    anyone who taps the menu button — a row that then satisfies the bot's own
+    gate and belongs to no household.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM users WHERE telegram_user_id = %s", (telegram_user_id,)
+            "SELECT user_id FROM users WHERE telegram_user_id = %s",
+            (telegram_user_id,),
         )
-        return cur.fetchone() is not None
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def user_exists(conn: psycopg.Connection, telegram_user_id: int) -> bool:
+    """True if a `users` row already exists for this Telegram id.
+
+    The §16 authorization gate uses it to refuse an unrecognised user *before* any
+    LLM call, without minting the very row §16 says must not be stored for a
+    refused update. One definition, not two: it is `find_user` read as a boolean.
+    """
+    return find_user(conn, telegram_user_id) is not None
 
 
 def claim_update(

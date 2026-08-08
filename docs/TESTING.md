@@ -204,8 +204,9 @@ broken, the infrastructure just isn't there yet.
 
 ## 6. Access control and households
 
-**Phase 9 — not built yet.** Leave ⛔ until it ships; listed now so the plan is
-testable the day it lands.
+**Phase 9 shipped 2026-08-08** — these are live checks now, not a forward plan.
+Every row needs a **second Telegram account** you control; 6b onwards needs a
+third for the "other member" cases.
 
 ### 6a. Signup gate
 
@@ -213,10 +214,23 @@ testable the day it lands.
 |---|---|---|---|---|
 | 6a.1 | From a Telegram account that has never used the bot, send `/start` (invite mode) | Polite refusal. No ledger created | ⬜ | |
 | 6a.2 | After 6a.1, *(operator)* check the database | **No user row** was created for that person | ⬜ | |
+| 6a.7 | From an account that has **never** used the bot, open the chat and tap the **menu button** to open the Mini App — do *not* press Start | The dashboard shows **no data** and the request is refused (403). This is the door the bot's own gate doesn't cover | ⬜ | |
+| 6a.8 | After 6a.7, *(operator)* `select count(*) from users where telegram_user_id = <that account>` | **0.** Opening the Mini App must mint nothing | ⬜ | |
+| 6a.9 | After 6a.7, from that same account send `spent 100 on tea` in the chat | Still the invite-only refusal. Opening the dashboard must not have made them known to the bot | ⬜ | |
+| 6a.10 | Admit that account properly (invite link), then open the Mini App again | Dashboard loads normally | ⬜ | |
 | 6a.3 | Same account, open a valid signup invite link | Welcome message; a household of one is created | ⬜ | |
 | 6a.4 | Open the **same** link again from a third account | Refused — codes are single-use | ⬜ | |
 | 6a.5 | Open an expired code | Refused, and says so distinctly from "already used" | ⬜ | |
 | 6a.6 | Send `/start garbage_payload` | Refused cleanly; no half-created household | ⬜ | |
+
+**6a.7–6a.9 are a real defect that was found and fixed before the merge, so
+re-run them after any change to the Mini App routes.** The routes resolved their
+caller with `get_or_create_user`, which *created* a row for whoever opened the
+dashboard. That row then satisfied the bot's gate — which asks "does a user row
+exist?" — so the Mini App let anyone past the invite gate. It also left them in no
+household, and a Confirm then hit a NOT NULL violation on `household_id`, 500ing
+into a Telegram redelivery loop. A user row is now the credential: it exists only
+after `/start` admitted the person, so resolving must never create one.
 
 ### 6b. Household membership
 
@@ -305,7 +319,7 @@ survives.
 | 4. Reminders | | | |
 | 5. Failure handling | | | |
 | 5a. Logging and audit trail | | | |
-| 6. Households *(not built)* | | | |
+| 6. Access control and households | | | |
 | 7. Security | | | |
 | 8. Recovery | | | |
 

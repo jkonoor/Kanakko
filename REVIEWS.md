@@ -12,6 +12,71 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `27fc55f` — /help + exact-greeting short-circuit, answer a lost user without an LLM call (Phase 9)
+
+**Scope:** A non-transaction message ("How do I use this?") used to be answered
+with *"I couldn't find an amount in that"* after two OpenRouter calls and two
+daily-cap slots. The commit (a) widens `REPHRASE_PROMPT` into an orienting help
+text (shared by the failed-parse path and `/help`), (b) adds `handle_help`
+routed from `/help` and from exact-match greetings, (c) excludes both from the
+§16 parse metering/cap so they cost nothing.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD --stat` — diff touches `handlers.py` (`_is_help`, `_is_greeting`,
+  `handle_help`, widened `REPHRASE_PROMPT`), `app.py` (routing + metering
+  exclusion), `tests/test_help.py` (new), `tests/test_webhook.py` (two "hi"
+  samples retargeted to "spent 500 on food"), `docs/TESTING.md`, `TASKS.md`.
+  Nothing else.
+- `uv run pytest` — **291 passed**, 1 warning (pre-existing Starlette/httpx
+  deprecation). `tests/test_help.py tests/test_webhook.py` — 37 passed.
+- **Guard has teeth — routing (part 1).** Deleted the `elif _is_help(...) or
+  _is_greeting(...): handle_help(...)` routing branch, reran `test_help.py`:
+  **1 failed** (`sent` no longer equals the help text). Restored; clean tree.
+- **Guard has teeth — metering (part 2).** Removed `_is_help`/`_is_greeting`
+  from the `is_parse` exclusion so greetings would be metered, reran: **1
+  failed** (`count_updates_on_day == 0` breaks). Restored; `git status` clean.
+  So both the "answers with help" and the "costs no cap slot" claims are checked,
+  not asserted.
+- **Exact-match, no false positives.** Probed `_is_greeting`/`_is_help` directly:
+  `hi`, `Hi!`, `HELLO`, `How do I use this?`, `thanks.`, `  hey  ` → greeting
+  True; `spent five hundred on lunch`, `500 lunch`, `spent 500 on hi`,
+  `hi there`, `helping`, `""` → greeting False. `/help`, `/help@mybot`,
+  `/help me` → help True; `help`, `/helper` → help False (bare "help" is caught
+  by the greeting set instead). The safety argument — a real digitless expense
+  ("spent five hundred on lunch") still reaches the parser — holds.
+- **Auth precedes help.** The gate (`app.py:320`) runs before the help routing
+  (`app.py:356`), so an unauthorized user typing "hi" gets `ACCESS_REFUSED`, not
+  the help text — invite-only stays invite-only.
+- **One definition per thing.** The widened `REPHRASE_PROMPT` is the single
+  string used by both the failed-parse reply (`handlers.py:292`) and `handle_help`
+  (`handlers.py:397`); no second copy.
+- **Idempotency / transaction ownership.** `handle_help` does not commit (caller
+  owns the `with connect()` block, consistent with `handle_undo`); a greeting is
+  still `claim_update`-d (with `metered_user=None`), so a Telegram redelivery is
+  short-circuited rather than double-answered.
+
+### Findings
+
+None blocking.
+
+- **Minor (non-blocking): dangling spec citation.** `handlers.py:384,392,395`
+  and the new test/commit cite "§ chat polish", but no such section exists in
+  `docs/DECISIONS.md` (`grep "chat polish" docs/` → no match). The task is
+  legitimately tracked in `TASKS.md` (user-raised 2026-08-08) and the cost logic
+  is anchored in the real §16, so this is a loose reference, not a correctness
+  issue. Either add the section or cite §16. Not a reason to hold the commit.
+
+### Verdict
+
+The task box in `TASKS.md` is honestly ticked: the behaviour is implemented, both
+halves of the claim are covered by a check that actually reddens when reverted,
+and the exact-match design provably cannot swallow a digitless real entry. ✅ DONE.
+
+---
+
 ## 2026-08-08 — `36b808e` — settle the confirm card on Confirm; stop a stale Cancel wiping a receipt (Phase 9)
 
 **Scope:** `handle_confirm` now edits the confirm card into a text-only "✅ Saved"

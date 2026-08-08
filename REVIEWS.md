@@ -12,6 +12,76 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `84801f6` — feat: ownership transfer before an owner can leave (Phase 9, §16)
+
+**Status: ✅ DONE**
+
+`db.transfer_ownership(actor, target)` moves `households.owner` to another member
+of the same household, owner-only; `handle_transfer` resolves `/transfer <label>`
+against the sender's roster exactly as `/remove` does, routed after the §16 gate
+and excluded from metering. This closes the half that was missing since member
+removal shipped: an owner's bare `/remove` was refused (`owner_must_transfer`)
+with no way to move ownership. No money arithmetic, timezone bucket, LLM prompt,
+or `active_transactions` read is touched; the only DB writes are one `UPDATE
+households SET owner` and its guarding SELECTs. Authorization lives entirely in
+`transfer_ownership`, mirroring `_authorize_removal`.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+import, gate
+  exclusion, route), `kanakko/db.py` (`transfer_ownership`), `kanakko/handlers.py`
+  (`_is_transfer`, `handle_transfer`, updated `REMOVE_OWNER_MUST_TRANSFER`),
+  `tests/test_transfer.py` (new), `tests/test_webhook.py` (routing+metering).
+  No migration, no schema change.
+- **Full suite**: `uv run pytest` → **286 passed** (1 pre-existing Starlette
+  deprecation warning, unrelated). Targeted `tests/test_transfer.py
+  tests/test_webhook.py` → **44 passed**.
+- **The guard earns its place.** Reverting the UPDATE target
+  (`kanakko/db.py:401`, `(target_user_id, …)` → `(owner, …)`, making transfer a
+  silent no-op) and re-running `tests/test_transfer.py` →
+  **8 failed, 1 passed** — `test_owner_transfers_then_can_leave` and the seven
+  DB/handler checks that assert `_owner_of(...)` moved all go red. Restored with
+  `git checkout`. The check fails for the reason it exists.
+- **Authorization holds, not just the label absence.** Read
+  `_authorize_removal` (`db.py:260`) and `household_roster` (`db.py:227`). Traced
+  a member typing `/transfer <someone>` → `transfer_ownership` returns `not_owner`
+  before any UPDATE (`test_handle_transfer_member_cannot` covers it). Traced a
+  cross-household target → `not_member` (target-membership SELECT scoped to the
+  actor's `household_id`); `test_transfer_to_someone_outside_the_household_is_refused`
+  covers it. The owner is protected by the `actor != owner` check, independent of
+  whether the label path can name them.
+- **Metering exclusion is real, not asserted by spelling.** `_is_transfer` is
+  added to the `is_parse` negation in `app.py:335` and the route in `app.py:357`;
+  `test_webhook_routes_transfer_to_handle_transfer_and_never_meters_it` asserts
+  the update reaches `handle_transfer` (not `handle_text`) and `claim_update` is
+  called with `metered=None`. Verified it passes.
+
+### Findings
+
+**Low — `already_owner` docstring claim is false after a transfer, yielding a
+misleading message (not silent wrongness).** `kanakko/db.py:370-373` and
+`kanakko/handlers.py` (`TRANSFER_DONE` block, `already_owner` → `TRANSFER_NOT_MEMBER`)
+both rest on "the owner carries no label, so `/transfer <label>` can never name
+them." That is true for a *creator*-owner, but a member who joined by household
+invite keeps their `used_by` label, and after ownership transfers *to* them they
+are an owner *with* a label. I confirmed live (temporary test): after
+`transfer_ownership(creator, ravi)`, `handle_transfer(ravi, "/transfer ravi")`
+returns `None` and replies **"That person isn't in your household."** — the
+`already_owner` verdict mapped to `TRANSFER_NOT_MEMBER`. Nothing moves (correct),
+but the message tells the new owner they aren't in their own household. Rare
+(owner self-transferring by their own label) and harmless to data. Suggested fix:
+give `already_owner` its own copy (e.g. "You already own this household."), and
+soften the two docstrings' "can never" to "the creator-owner has no label". Not
+blocking.
+
+### Verdict
+
+Correct, spec-aligned (§16 owner-leaving rule), and the money/timezone/read-path
+invariants are untouched. The one finding is a cosmetic message on a rare path,
+not a data or authorization defect. **✅ DONE.**
+
+---
+
 ## 2026-08-08 — `2338104` — feat: removal asks retain-or-delete, and deletion is real (Phase 9, §16)
 
 **Status: ✅ DONE**

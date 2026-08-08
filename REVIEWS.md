@@ -12,6 +12,58 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `2d2300a` — log the three scheduled jobs through the event seam (Phase 8, §17)
+
+**Status: ✅ DONE**
+
+Scope: `fan_out` (the shared shape all three jobs run through) now emits one
+`job.<name>` event per run — `source="cron"`, `considered`/`delivered`/`skipped`/
+`failed`/`duration_ms`, `status="ok"` on a clean run and `status="error"` on a
+run with failures (in addition to the `DeliveryFailures` raise, never instead of
+it). `evening/noon/monthly.py` pass `job=`. Tests extended in `test_evening.py`
+and `test_noon.py`; `TESTING.md` gains rows 5a.17/5a.18 and drops the closing
+note that recorded this gap; the task is ticked.
+
+### What I checked
+
+- **Full suite green.** `uv run pytest -q` → **247 passed, 1 warning**.
+  `test_evening.py` + `test_noon.py` alone → **12 passed**.
+- **Reddening claim verified live.** Deleted the `status=ERROR` `log_event` line
+  and ran `test_one_blocked_recipient_does_not_silence_the_others` → **FAILED**;
+  restored → passes. The error-event assertion genuinely guards.
+- **Production wiring is complete, not just the counts.** The bug this fixes was
+  an empty `events.jsonl` in `kanakko-cron`. Traced the path:
+  `main()` → `configure_logging()` (binds `file_sink` when `LOG_DIR` set,
+  `kanakko/__init__.py:26-30`) → `run()` → `fan_out()` → `log_event`. Sink is
+  bound before the event fires, so the line actually reaches the volume.
+- **Spec fit (§17).** `source="cron"` is one of the three permitted origins
+  (`webhook | miniapp | cron`, DECISIONS §17); statuses are `ok`/`error` from
+  `eventlog`. One event per *run*, not per user — matches "the run's counts …
+  without putting the whole ledger's shape on the volume".
+- **Count semantics correct.** `skipped` is incremented when `deliver` returns
+  False (noon suppresses active users, `noon.py:62`) — a deliberate skip, never
+  `failed`; the noon test asserts `(considered, delivered, skipped, failed) ==
+  (3, 2, 1, 0)`. The blocked-recipient test asserts `considered=3, delivered=2,
+  failed=1`. Error path commits before logging+raising, so successful users'
+  `reminder_log` rows survive (§12 failure-isolation, still asserted).
+- **`log_event` never raises** and is a no-op when unbound (`eventlog.py:96-106`),
+  so a broken/absent sink can't fail a job — matches §17.
+- No money/timezone/soft-delete surface touched; no `float`, no new dependency,
+  no category literal. `TESTING.md` refs are consistent (`5a.15–5a.18`, no
+  orphaned pointer left by the deleted note).
+
+### Findings
+
+None blocking. Two notes, neither a finding:
+
+- `monthly.py` gets `job="monthly"` but no dedicated event assertion; the
+  `fan_out` code path is fully covered by the evening/noon tests, so this is not
+  a gap.
+- `duration_ms` uses `time.perf_counter()`/`ms_since` — a monotonic clock, right
+  choice for a duration.
+
+---
+
 ## 2026-08-07 — `08bd425` — `/start` deep-link onboarding: invites and household-of-one (Phase 9)
 
 **Status: ✅ DONE**

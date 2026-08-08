@@ -12,6 +12,49 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `2ed5ac4` — test: cover `/invite` webhook routing and metering exclusion (QA `8a8bbc8` finding 1)
+
+**Status: ✅ DONE**
+
+Test-only commit. Adds `test_webhook_routes_invite_to_handle_invite_and_never_meters_it`
+(`tests/test_webhook.py:744`) closing the sole open finding from the `8a8bbc8`
+review, and flips that review's status to RESOLVED in `REVIEWS.md`.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): only `REVIEWS.md` (+8/-1) and
+  `tests/test_webhook.py` (+35). No production code touched — the routing/metering
+  it guards already exists at `kanakko/app.py:322-340`.
+- **The test drives real code, not mocks of it.** It monkeypatches the seams
+  (`connect`, `is_authorized`, `get_or_create_user`, `within_daily_cap`,
+  `handle_invite`, `handle_text`, `claim_update`) but leaves the real `_is_invite`
+  / `_is_undo` classifiers and the real `/webhook` routing in place, so it
+  exercises `app.py:322-340` end to end.
+- **It asserts the effect, not a surface form.** `claims == [None]` after
+  `/invite ravi` and `claims == [None, 1]` after `spent 500 on food` capture the
+  actual `metered_user` value handed to `claim_update` — i.e. that the parse path
+  is metered with the user id and the invite path is not. That is the behaviour
+  §16 relies on for the daily cap, not a string match.
+- **`uv run pytest`** — `253 passed` (whole suite); `tests/test_webhook.py`
+  alone `32 passed`.
+- **Reddens on each claimed defect, verified independently by me:**
+  - Dropped the `elif _is_invite(action.text): handle_invite(...)` routing branch
+    (`app.py:339-340`) → `1 failed` (routing assertion).
+  - Dropped the `_is_invite(action.text)` term from `is_parse` (`app.py:322-323`)
+    → `1 failed` (metering assertion: `claims` becomes `[1]`, invite gets stamped
+    with the user id and would burn a cap unit).
+  Restored `app.py` after each; `git status` clean.
+- The `claim_update` mock (`lambda conn, uid, metered: claims.append(metered) or True`)
+  matches the real 3-arg signature `claim_update(conn, update_id, metered_user)`
+  and returns truthy so routing proceeds — the second positional it records is the
+  metered user, which is what the assertions read.
+
+No issues. The guard fails for the reason it exists, and both failure modes it
+names are the silent ones (an LLM call + garbage pending card on a miss-route; a
+cap unit burned per invite on a miss-meter).
+
+---
+
 ## 2026-08-08 — `8a8bbc8` — add `/invite`: owner issues a labelled household link (Phase 9, §16)
 
 **Status: ✅ RESOLVED** — finding 1 fixed in a follow-up commit:

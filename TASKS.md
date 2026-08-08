@@ -462,13 +462,21 @@ means transactions with no home. Each task leaves the tree green and deployable.
       lands first and deployable. Done: `handle_household` (routed after the gate,
       unmetered like `/undo` and `/invite`), `db.household_roster` (household-scoped
       — owner first, each member carrying their invite label). `tests/test_household.py`.
-- [ ] Member removal (§16): the owner may remove anyone, **any member may remove
+- [x] Member removal (§16): the owner may remove anyone, **any member may remove
       themselves** (owner-only removal traps a member in a ledger they cannot
       leave). One code path, the self case being actor == target. Removal acts on
       the `/household` roster above. **An owner removing themselves is refused —
       ownership must transfer first (the task after next); until then this guard
       keeps a household from going ownerless.** Retain-vs-delete of the departing
       member's entries is the next task; this task's removal retains by default.
+      Done: `/remove <label>` (owner removes that roster member) and bare `/remove`
+      (leave yourself); `db.remove_member(actor, target)` holds all authorization —
+      `not_owner`, `owner_must_transfer` — and re-homes the removed member into a
+      fresh household of one so their next confirm doesn't hit the NOT NULL
+      `household_id`; entries are retained (no `transactions` row touched). Also
+      scoped `household_roster`'s label join to `i.household_id = m.household_id`
+      (the `bc3b0e4` review's low finding), now reachable since a user can carry a
+      used household invite from each household they've been in. `tests/test_member_removal.py`.
 - [ ] Removal asks **retain or delete** that member's entries, and deletion is
       real (§16). This is *not* §6's soft delete and must not share its name. The
       warning must say the specific consequence: hard deletion makes past reports

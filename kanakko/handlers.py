@@ -30,6 +30,7 @@ from kanakko.db import (
     create_household_of_one,
     get_or_create_user,
     household_roster,
+    remove_member,
     save_pending,
     set_pending_category,
     undo_last,
@@ -445,6 +446,89 @@ def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
     log_event("household.viewed", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id, duration_ms=ms_since(start))
     return "ok"
+
+
+REMOVE_COMMAND = "/remove"
+
+# Bare `/remove` leaves the household yourself; `/remove <label>` is the owner
+# removing that member. So there is no "usage" error — the bare form is an action.
+REMOVE_NO_MATCH = (
+    "No member is labelled {label!r}. Check `/household` for the exact labels, or "
+    "send `/remove` on its own to leave the household yourself."
+)
+REMOVE_AMBIGUOUS = (
+    "More than one member is labelled {label!r}, so I won't guess which to remove. "
+    "Give them distinct invite labels first (`/invite`)."
+)
+REMOVE_NOT_OWNER = (
+    "Only the household owner can remove other members. To leave the household "
+    "yourself, send `/remove` on its own."
+)
+REMOVE_OWNER_MUST_TRANSFER = (
+    "You own this household, so you can't leave it — a household always needs an "
+    "owner. Ownership transfer is coming; until then, you stay."
+)
+REMOVE_NOT_MEMBER = "That person isn't in your household."
+
+
+def _is_remove(text: str) -> bool:
+    """True when `text` is the `/remove` command — bare or `/remove@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == REMOVE_COMMAND
+
+
+def handle_remove(conn: psycopg.Connection, msg: TextMessage) -> int | None:
+    """Remove a household member — the owner removing anyone, or a member leaving (§16).
+
+    `/remove <label>` removes the member carrying that invite label; a bare
+    `/remove` removes the sender themselves (the `actor == target` case §16 folds
+    into one path). The label is resolved against the sender's own `/household`
+    roster, so it can only ever name a member of their household; the owner has no
+    label (they created the household, not joined by invite), so `/remove <label>`
+    can never target the owner — an owner leaves only via the bare form, which
+    `remove_member` refuses until ownership is transferred (§16). A label matching
+    no member, or two members (labels aren't unique), is refused without removing
+    anyone. Removal *retains* the departing member's entries in the shared ledger;
+    deleting them is the next task (§16). Does not commit — the caller owns the
+    transaction. Returns the removed member's `user_id`, or `None` when nothing was
+    removed.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    label = _command_arg(msg.text)
+    if not label:
+        target_id = user_id  # bare /remove — leave the household yourself
+    else:
+        matches = [
+            member_id
+            for member_id, _is_owner, member_label in household_roster(conn, user_id)
+            if member_label and member_label.lower() == label.lower()
+        ]
+        if len(matches) != 1:
+            reply = (REMOVE_NO_MATCH if not matches else REMOVE_AMBIGUOUS).format(label=label)
+            send_message(msg.chat_id, reply)
+            log_event("member.removed", status="noop", update_id=msg.update_id,
+                      source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+            return None
+        target_id = matches[0]
+
+    outcome = remove_member(conn, user_id, target_id)
+    if outcome == "removed" and target_id == user_id:
+        reply = "You've left the household. You're tracking on your own again now."
+    elif outcome == "removed":
+        reply = (f"Removed {label} from your household. Their past entries stay in "
+                 "the shared ledger.")
+    else:
+        reply = {
+            "not_owner": REMOVE_NOT_OWNER,
+            "owner_must_transfer": REMOVE_OWNER_MUST_TRANSFER,
+            "not_member": REMOVE_NOT_MEMBER,
+        }[outcome]
+    send_message(msg.chat_id, reply)
+    log_event("member.removed", status="ok" if outcome == "removed" else "noop",
+              update_id=msg.update_id, source=msg.source, user_id=user_id,
+              duration_ms=ms_since(start), outcome=outcome)
+    return target_id if outcome == "removed" else None
 
 
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:

@@ -804,6 +804,34 @@ def test_webhook_routes_household_to_handle_household_and_never_meters_it(monkey
     assert claims == [None]  # unmetered — never counts against the daily cap
 
 
+def test_webhook_routes_remove_to_handle_remove_and_never_meters_it(monkeypatch):
+    """`/remove` is a household command, not a transaction, so it must never be metered.
+
+    Same two silent failures as `/invite` and `/household`: a routing miss would
+    feed "/remove ravi" to `handle_text` (an LLM call and a junk pending card), and
+    a metering miss would burn a daily-cap unit per removal — letting a capped owner
+    be unable to remove a member. Asserts it routes to `handle_remove` and the claim
+    is unmetered (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    removed, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_remove", lambda conn, msg: removed.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 300, "message": {"message_id": 1, "chat": {"id": 42}, "text": "/remove ravi"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(removed) == 1 and texted == []  # routed to removal, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
 def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
 

@@ -12,6 +12,92 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `2338104` — feat: removal asks retain-or-delete, and deletion is real (Phase 9, §16)
+
+**Status: ✅ DONE**
+
+`/remove` now presents the §16 retain/delete choice with a specific-consequence
+warning before acting, and deletion is a real `DELETE FROM transactions` (not
+§6's soft delete) plus its `transaction_events` audit rows. Authorization is
+checked twice — `check_removal` before the warning is shown, `remove_member`
+again on the button tap — so a forged `rm:delete:<id>` is refused exactly as the
+typed command is. No money arithmetic, timezone bucket, or LLM prompt is
+touched; the only base-table read is the DELETE's own purge subquery, which is
+correct.
+
+### What I checked
+
+- **Full diff** (`git show HEAD`): `TASKS.md`, `kanakko/app.py` (+4, `rm:`
+  route), `kanakko/db.py` (`_authorize_removal` split + `check_removal` +
+  `delete_entries`), `kanakko/handlers.py` (ask flow + `handle_remove_choice`),
+  `tests/test_member_removal.py`, `tests/test_read_paths.py`,
+  `tests/test_webhook.py`. No migration, no schema change.
+- **Full suite**: `uv run pytest` → **276 passed** (1 pre-existing Starlette
+  deprecation warning, unrelated). Targeted run of the three touched test files →
+  **53 passed**.
+- **FK completeness of the hard delete.** `grep "REFERENCES transactions"` across
+  `migrations/` shows exactly one dependent table, `transaction_events`
+  (003, no `ON DELETE CASCADE`). The commit purges those audit rows before the
+  `DELETE FROM transactions`, so the FK cannot orphan or block. The delete test
+  seeds a real `transaction_events` row to exercise that path — it would fail
+  with a FK violation if the purge were dropped.
+- **Delete scope.** `DELETE FROM transactions WHERE user_id = %s AND
+  household_id = %s` uses the `household_id` captured by `_authorize_removal`
+  *before* the member row is deleted, and is keyed to the target's own rows in
+  the household they leave. Entries by other members, and the target's entries in
+  households they previously left (retained), are untouched. Confirmed
+  `Decimal`/`NUMERIC` money path is not touched — no arithmetic, no `float`.
+- **Re-authorization defeats a forged button** (the security claim). Traced
+  `handle_remove_choice`: `actor = get_or_create_user(press.from_id)`, then
+  `remove_member(actor, target_from_button)` re-runs `_authorize_removal`. A
+  member forging `rm:delete:<another-member>` gets `not_owner`; the covering test
+  (`test_handle_remove_choice_reauthorizes_a_forged_button`) passes and asserts
+  the target stays in the roster. A redelivered/double tap is safe: after the
+  first removal the target is no longer in the actor's household, so the second
+  returns `not_member` — no double-delete, and a stale Keep-then-Delete (or vice
+  versa) cannot undo the first choice.
+- **The read-path guard exclusion — tried to defeat it.** The guard now skips a
+  literal that `startswith("DELETE")`. Ran the predicate against five inputs
+  (`kanakko/db.py`'s two DELETE literals, a real `SELECT … FROM transactions`, a
+  `FROM active_transactions … JOIN transactions` leak, and a lowercased
+  leading-whitespace DELETE): the two real reads still flag, all DELETEs skip.
+  The exclusion is behaviourally sound — a `DELETE` never produces a report
+  total, which is the only thing the guard protects — and it is scoped to
+  `startswith`, so it cannot silence a report `SELECT` (no report query begins
+  with the word DELETE). Guard still guards.
+- **Callback prefix collisions.** Prefixes are `cat:`, `confirm`, `cancel`,
+  `rm:` — disjoint; `rm:delete:7` routes only to `handle_remove_choice`. The
+  webhook-routing test asserts this and that an `rm:` tap opens its own
+  connection.
+
+### Findings
+
+**None blocking.** One low, non-blocking observation:
+
+- **Low / informational — settled card keyboard removal is unverified against
+  the Bot API.** `handlers.py:612` settles the warning card with
+  `edit_message_text(press.chat_id, press.message_id, settled)` and no
+  `reply_markup`, intending to drop the Keep/Delete buttons (the same mechanism
+  the queued confirm-card settling task `c45a4ad` relies on). Whether omitting
+  `reply_markup` on `editMessageText` actually clears the inline keyboard is a
+  Telegram Bot API detail I could **not verify** here (WebFetch was not
+  permitted). If it does not, the settled card keeps live buttons — but a re-tap
+  is harmless (the target is already gone → `not_member`, and no choice can be
+  reversed). Worst case is cosmetic, and it is consistent with the settling
+  approach the repo already committed to. If the team wants certainty, pass an
+  explicit empty `InlineKeyboardMarkup([])` and assert its removal in a test;
+  none of the current tests check the keyboard is gone. Not a data or
+  authorization risk either way.
+
+### Verdict
+
+Does what `TASKS.md` claimed and matches §16: asks retain-or-delete first, warns
+the specific "₹18,920 won't reconcile" consequence, deletes for real (base table,
+not the view), and keeps the deletion separate from §6's soft delete. The box is
+correctly ticked. **✅ DONE.**
+
+---
+
 ## 2026-08-08 — `bf27ed7` — feat: member removal (owner removes anyone, a member leaves — Phase 9, §16)
 
 **Status: ✅ DONE**

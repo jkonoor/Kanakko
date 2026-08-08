@@ -581,15 +581,38 @@ means transactions with no home. Each task leaves the tree green and deployable.
       `spent five hundred on lunch` still reaches the parser. Assert both — a check
       that only covers the greeting would pass on a filter that swallowed
       everything.
-- [ ] `[human]` Set up the BotFather surfaces — no code, and the bot currently has
-      none of them. `/setcommands` with `start`, `undo`, `household`, `invite`,
-      `help` so the "/" menu lists them (this is where a Telegram user looks first,
-      and there is nothing there today). Set the **description**, which is shown on
-      the empty chat screen *before* a new user presses Start — the first sentence
-      any tester reads, and the highest-leverage text in the product. Set the
-      **About** text on the profile. Do this alongside the Mini App menu button
-      already registered in Phase 4. Verify from a Telegram account that has never
-      opened the bot, because that is the only way to see the pre-Start screen.
+- [x] Make `/help` the index of everything the bot does, and give the failed parse
+      its correction back. Raised by the user 2026-08-08 after `/help` shipped:
+      it named only `/undo` and the dashboard, so **`/household`, `/invite`,
+      `/remove` and `/transfer` were undiscoverable** — `/household` named
+      `/invite` only in its *solo* reply (vanishing exactly when a second member
+      makes it useful), and `/remove`/`/transfer` described themselves only inside
+      their own error paths, which need the command to reach.
+      Three parts: `HELP_TEXT` split out as the manual and listing every command;
+      `REPHRASE_PROMPT` returned to a short correction that names the *amount* as
+      the problem (one string serving both jobs had cost the correction its point);
+      and a `/household` footer naming `/invite`, `/remove` and `/transfer` at the
+      one moment they mean anything, **gated on the viewer** so a member is never
+      offered a command that will refuse them.
+      Deliberately **no `web_app` button** on help or welcome, though Telegram
+      supports one in private chats: help exists to teach the permanent way in, and
+      a shortcut on a message nobody revisits teaches "type /help first".
+      The dashboard line names the menu button — `Dashboard` — exactly as it reads
+      on screen. That label lives in BotFather and **nothing in the repo could see
+      it**, so it is now recorded in `docs/DEPLOYMENT.md`; a rename there must
+      change the text here too, and no test will catch it.
+- [ ] `[human]` Set up the BotFather surfaces — no code, and the bot has none of
+      them beyond the menu button. **`docs/DEPLOYMENT.md` now carries the exact
+      command list to paste**, and it must stay in step with
+      `handlers.py::HELP_TEXT` or the "/" menu and `/help` disagree about what the
+      bot can do. Set the **description**, shown on the empty chat screen *before*
+      a new user presses Start — the first sentence any tester reads, and the
+      highest-leverage text in the product. Set the **About** text on the profile.
+      The Mini App menu button is already registered (Phase 4) and already labelled
+      `Dashboard`, so there is nothing to rename — just confirm the label still
+      matches what `HELP_TEXT` tells people to tap. Verify from a Telegram account
+      that has never opened the bot: the pre-Start screen cannot be seen any other
+      way, and that same account is what 6a.7-6a.10 in `docs/TESTING.md` need.
 
 ---
 

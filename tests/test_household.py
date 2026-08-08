@@ -108,3 +108,36 @@ def test_is_household_recognises_the_command():
     assert handlers._is_household("/household@kanakko_bot")  # group form
     assert not handlers._is_household("household")
     assert not handlers._is_household("/households")
+
+
+def test_household_footer_names_the_commands_and_hides_owner_only_ones(conn, monkeypatch):
+    """The multi-member reply is the only place `/remove` and `/transfer` are ever
+    named, and a member is never shown a command that would refuse them (§16).
+
+    Both described themselves only inside their own error paths, so before this
+    footer the two features were reachable only by already knowing they existed —
+    and `/invite` was named solely in the *solo* reply, disappearing exactly when a
+    household gained the second person who makes it useful.
+
+    Owner-only commands are gated on the viewer, not merely listed: telling a
+    member to `/invite` earns them a refusal they did nothing to deserve. The
+    member's `/remove` line is the self-removal form, which is genuinely theirs
+    (§16 — owner-only removal would trap them in a ledger they cannot leave).
+    """
+    migrate(conn)
+    owner, hid = _seed_owner(conn)
+    _seed_labelled_member(conn, hid, owner, MEMBER_TG, "ravi")
+    sent = _stub_send(monkeypatch)
+
+    handle_household(conn, _msg(OWNER_TG))
+    (_, owner_view) = sent[-1]
+    assert "/invite" in owner_view
+    assert "/remove <name>" in owner_view
+    assert "/transfer" in owner_view
+
+    handle_household(conn, _msg(MEMBER_TG))
+    (_, member_view) = sent[-1]
+    assert "/remove" in member_view and "leave this household" in member_view
+    assert "/invite" not in member_view, "a member cannot invite — don't offer it"
+    assert "/transfer" not in member_view, "a member cannot transfer — don't offer it"
+    conn.rollback()

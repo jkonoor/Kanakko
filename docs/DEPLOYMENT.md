@@ -189,3 +189,34 @@ Bot token, OpenRouter API key, and database credentials go in Dokploy's
 environment for the compose stack (`compose.saveEnvironment`) — never in the
 repository, never in the compose file committed here. The repo carries a
 `.env.example` with keys and empty values only.
+
+## BotFather — settings that live outside the repo
+
+These are configured against @BotFather (or the equivalent Bot API method) and
+exist nowhere in git. **Anything the bot's own text refers to is coupled to a
+value no test can see**, so the current values are written here; change one and
+this file changes with it.
+
+| Setting | Current value | Why it is written down |
+|---|---|---|
+| Menu button label | **`Dashboard`** | `HELP_TEXT` and `WELCOME` say "Tap Dashboard at the bottom-left of the chat". Naming the button exactly as it reads on screen saves the user decoding "the menu button" — and if the label is ever changed, that sentence goes stale silently, with nothing going red. |
+| Menu button URL | the Mini App `/app` URL | Registered in Phase 4; verified by the Mini App opening and its `initData` HMAC validating against real Telegram payloads. |
+| Command list (`/setcommands`) | see below | The "/" menu is where a Telegram user looks first. It must match `HELP_TEXT`'s list or the two disagree about what the bot can do. |
+| Description | shown *before* a user presses Start | The first sentence any new tester reads, on the empty chat screen. |
+| About | profile text | — |
+
+The command list must stay in step with `kanakko/handlers.py::HELP_TEXT`:
+
+```
+start - Start using Kanakko
+help - What I can do
+undo - Remove your last entry
+household - Who's in your household
+invite - Add someone to your household (owner only)
+remove - Remove a member, or leave
+transfer - Hand over household ownership
+```
+
+`/remove` and `/transfer` are listed deliberately. Leaving a destructive command
+out of the menu does not make it safer — it makes it unfindable — and `/remove`
+already asks Keep-or-Delete before it acts.

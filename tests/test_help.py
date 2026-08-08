@@ -78,7 +78,7 @@ def test_greeting_and_help_short_circuit_the_parser_but_an_expense_still_reaches
         sent.clear()
         response = client.post("/webhook", json=_text_update(update_id, text), headers=AUTH)
         assert response.status_code == 200
-        assert sent == [handlers.REPHRASE_PROMPT]  # the help text, not a complaint
+        assert sent == [handlers.HELP_TEXT]  # the manual, not the parse-failure nudge
         assert parsed == []  # never reached the parser — zero OpenRouter calls
 
     # A greeting is free: it never counts against the §16 daily cap.
@@ -93,3 +93,30 @@ def test_greeting_and_help_short_circuit_the_parser_but_an_expense_still_reaches
     assert parsed == ["spent five hundred on lunch"]
 
     conn.rollback()
+
+
+def test_help_lists_every_command_and_the_failed_parse_stays_a_correction():
+    """`/help` is the only place the household commands are named, and the
+    parse-failure reply must still say what went wrong (§ chat polish).
+
+    `/household` named `/invite` only in its solo reply, and `/remove` and
+    `/transfer` described themselves only inside their own error paths — which a
+    user cannot reach without already knowing the command exists. So the help text
+    is the index, and this asserts every command is in it: a command added later
+    without a line here is undiscoverable, and nothing else would go red.
+
+    The second half guards the regression that prompted the split. When one string
+    served both jobs, a real expense that failed to parse was answered with a
+    description of the bot and never told the user the *amount* was the problem.
+    """
+    for command in ("/undo", "/household", "/invite", "/remove", "/transfer"):
+        assert command in handlers.HELP_TEXT, f"{command} is undiscoverable"
+
+    # Names the menu button as it reads on screen (docs/DEPLOYMENT.md), so the
+    # user maps a word to something visible rather than decoding "menu button".
+    assert "Dashboard" in handlers.HELP_TEXT
+
+    # The correction is a nudge about the amount, not the manual.
+    assert "amount" in handlers.REPHRASE_PROMPT
+    assert handlers.REPHRASE_PROMPT != handlers.HELP_TEXT
+    assert "/undo" not in handlers.REPHRASE_PROMPT

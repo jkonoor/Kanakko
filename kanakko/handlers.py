@@ -141,11 +141,37 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
     return None
 
 
+# A failed parse and a lost user want different answers, so these are two strings.
+# Conflating them cost the correction its point: a user whose real expense failed
+# to parse was told what the bot does, never that the *amount* was the problem.
 REPHRASE_PROMPT = (
-    "I keep track of what you spend and earn — just tell me the amount, like "
-    '"spent 500 on groceries" or "got 20000 salary", and I\'ll log it after a '
-    "one-tap confirm. You can /undo your last entry any time, or tap the menu "
-    "button to open your dashboard."
+    "I couldn't find an amount in that. Try again with the amount — like "
+    '"spent 500 on groceries" or "got 20000 salary". Send /help to see '
+    "everything I can do."
+)
+
+# The manual. Every command the bot answers is listed here, because nothing else
+# lists them: `/household` mentioned `/invite` only in its solo reply, and
+# `/remove` and `/transfer` described themselves only in their own error paths —
+# so two whole features were reachable only by already knowing they existed.
+#
+# **"Dashboard" is the menu button's label, set in BotFather** (see
+# docs/DEPLOYMENT.md). Naming it exactly as it reads on screen means the user maps
+# a word to a thing they can see, instead of decoding "the menu button". That
+# coupling is invisible to the test suite, which is why the label is written down.
+#
+# Deliberately no `web_app` button here: help exists to *teach* the permanent way
+# in, and a shortcut on a message nobody revisits teaches "type /help first".
+HELP_TEXT = (
+    "I track what you spend and earn.\n\n"
+    'Just tell me: "spent 500 on groceries", "got 20000 salary" — I\'ll show a '
+    "card, and one tap confirms it.\n\n"
+    "/undo — remove your last entry\n"
+    "/household — who's in your household\n"
+    "/invite <name> — a single-use link to add someone (owner only)\n"
+    "/remove <name> — remove a member, or /remove on its own to leave\n"
+    "/transfer <name> — hand over ownership\n\n"
+    "Tap Dashboard at the bottom-left of the chat to see where your money went."
 )
 
 PARSER_DOWN_PROMPT = (
@@ -172,8 +198,9 @@ _START_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 WELCOME = (
     "Welcome to Kanakko — your personal finance tracker.\n\n"
     'Just tell me what you spent or earned — like "spent 500 on groceries" or '
-    '"got 20000 salary" — and I\'ll log it after a one-tap confirm. Use the menu '
-    "button any time to open your dashboard."
+    '"got 20000 salary" — and I\'ll log it after a one-tap confirm.\n\n'
+    "Tap Dashboard at the bottom-left of the chat to see where your money went, "
+    "and send /help any time for everything I can do."
 )
 
 # Three distinct refusals so a user knows which problem they have (§16 onboarding
@@ -389,12 +416,16 @@ def _is_greeting(text: str) -> bool:
 
 
 def handle_help(conn: psycopg.Connection, msg: TextMessage) -> None:
-    """Answer a lost user with how the bot works — the same text a failed parse
-    sends (§ chat polish), routed from `/help` and from an exact greeting, making
-    zero OpenRouter calls. Does not commit — the caller owns the transaction."""
+    """Answer a lost user with the full command list (§ chat polish), routed from
+    `/help` and from an exact greeting, making zero OpenRouter calls.
+
+    Sends `HELP_TEXT`, **not** the failed-parse correction: help is a manual and a
+    correction is a nudge, and one string doing both left the correction unable to
+    say what actually went wrong. Does not commit — the caller owns the transaction.
+    """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.from_id)
-    send_message(msg.chat_id, REPHRASE_PROMPT)
+    send_message(msg.chat_id, HELP_TEXT)
     log_event("help.sent", status="ok", update_id=msg.update_id, source=msg.source,
               user_id=user_id, duration_ms=ms_since(start))
 
@@ -487,7 +518,26 @@ def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
             if member_id == user_id:
                 name += " (you)"
             lines.append(f"• {name}")
-        reply = f"👥 Your household — {len(members)} members\n\n" + "\n".join(lines)
+        # The footer is the only place `/remove` and `/transfer` are ever named:
+        # both described themselves only in their own error paths, which you
+        # cannot reach without already knowing the command. Here they appear at
+        # the one moment they mean anything — looking at a household with someone
+        # else in it. Owner-only commands are shown only to the owner, so a member
+        # is never told to try something that will refuse them.
+        viewer_owns = any(m == user_id and owns for m, owns, _ in members)
+        footer = ["`/invite <name>` — add someone"] if viewer_owns else []
+        footer.append(
+            "`/remove <name>` — remove a member" if viewer_owns
+            else "`/remove` — leave this household"
+        )
+        if viewer_owns:
+            footer.append("`/transfer <name>` — hand over ownership")
+        reply = (
+            f"👥 Your household — {len(members)} members\n\n"
+            + "\n".join(lines)
+            + "\n\n"
+            + "\n".join(footer)
+        )
     send_message(msg.chat_id, reply)
     log_event("household.viewed", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id, duration_ms=ms_since(start))

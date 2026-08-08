@@ -498,6 +498,37 @@ means transactions with no home. Each task leaves the tree green and deployable.
       stays green with no test edits. Do this on its own, not folded into a
       feature task.
 
+### Chat polish
+
+- [ ] Settle the confirm card in place on Confirm, and stop a stale Cancel from
+      deleting a receipt. Raised by the user 2026-08-08 from real use: the only
+      lasting evidence that a transaction was saved is a toast that disappears.
+      `handle_confirm` never touches the card, so it keeps working **Confirm and
+      Cancel** buttons after the row is stored.
+      Two things follow, and both are fixed here:
+      **(a) Edit the card into a settled state** — amount, category, date, marked
+      saved, and **no `reply_markup`** — with `edit_message_text`, the mechanism
+      `handle_category` already uses to re-render a card. A card in the transcript
+      is permanent and far more prominent than a toast.
+      **(b) `handle_cancel` must delete the card only when it actually cancelled
+      something.** Today `delete_message` runs unconditionally (`handlers.py:228`),
+      so a Cancel tap on an already-confirmed card removes the receipt from the
+      chat while the transaction stays in the ledger — the transcript and the
+      ledger then disagree. Guard the delete on `cancel_pending` having returned a
+      row; the "Already gone" toast still answers the tap.
+      **Do not** make Cancel's own behaviour match Confirm's: cancel means "this
+      never happened" so the card goes, confirm means "this is your receipt" so it
+      stays. The asymmetry is the point (§4, §5). And do not reach for
+      `show_alert` to make the toast louder — it is a blocking modal, and the
+      one-tap flow is what §4 and §5 exist to protect.
+      The check that earns its place: after a confirm, the edited card carries no
+      keyboard, **and** a Cancel arriving afterwards leaves the message in place
+      and the ledger untouched. Assert both — a check that only reads the new card
+      text would pass with the stale-button trap still there.
+      `docs/TESTING.md` 1.2 already claims "the card stops offering Confirm" and is
+      currently wrong about the code; it becomes true with this change, so no edit
+      is needed there beyond adding a row for the stale-Cancel case.
+
 ---
 
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

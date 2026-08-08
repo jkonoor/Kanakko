@@ -12,6 +12,57 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `36b808e` — settle the confirm card on Confirm; stop a stale Cancel wiping a receipt (Phase 9)
+
+**Scope:** `handle_confirm` now edits the confirm card into a text-only "✅ Saved"
+receipt via new `confirm.settled_card(row)`; `handle_cancel` only calls
+`delete_message` when `cancel_pending` returned a row.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches `confirm.py` (+`settled_card`), `handlers.py`
+  (`handle_confirm` edit + `handle_cancel` guard), one new test, `docs/TESTING.md`,
+  `TASKS.md`. Nothing else.
+- **Row shape fit.** `settled_card` reads `row['type'|'amount'|'category'|
+  'occurred_on'|'note']`. `confirm_pending` (`db/pending.py:92-101`) returns exactly
+  `{txn_id, amount(Decimal), type, category, note, occurred_on(date)}` — every key
+  present, `occurred_on` is a `date` so `.isoformat()` is valid.
+- **No float on the money path.** `settled_card` routes `amount` through
+  `format_amount`; rendered a real `Decimal("250.00")` row and got
+  `'✅ Saved — Expense ₹250.00\nCategory: Food\nDate: 2026-08-08\nNote: lunch'` — a
+  Decimal, never a float (§9).
+- **Signatures/imports.** `edit_message_text(chat_id, message_id, text)` positional
+  args line up (`tg.py:73`, `reply_markup` defaults `None` → no keyboard);
+  `edit_message_text`/`delete_message` both imported in `handlers.py`.
+- `uv run pytest` — **290 passed**. `tests/test_webhook.py` — 36 passed.
+- **The new guard fails for its reason (both halves).** Reverted half (a) — removed
+  the `edit_message_text(...settled_card(row))` line: the new test failed
+  (`assert len(edits) == 1`). Reverted half (b) — restored the unconditional
+  `delete_message`: the new test failed with `assert [(12345, 909)] == []` — i.e.
+  the stale Cancel deleted the receipt. Both confirm the test would catch a
+  regression of either half. Restored the tree (clean, `git status` empty).
+- **Spec fit.** §4/§5 asymmetry honoured: confirm keeps the card as a permanent
+  receipt with no keyboard; cancel means "this never happened" so its live card
+  still goes, but only when a pending row actually existed. `TASKS.md` tick matches
+  the work; `docs/TESTING.md` 1.2 and new row 2.2a describe the real behaviour.
+
+### Findings
+
+None blocking.
+
+- **Minor / non-blocking (pre-existing pattern):** in `handle_confirm`
+  (`handlers.py:721`) the `edit_message_text` runs before `answer_callback_query`
+  and before the caller commits. If that edit raised a genuine (non-"not modified")
+  HTTP error, the callback would go unanswered and the webhook would 500 into a
+  Telegram redelivery loop. This mirrors `handle_category` (`handlers.py:800`, edit
+  before answer) and the realistic trigger — the card being gone when the user just
+  tapped a live button on it — is nearly impossible; `_is_not_modified` already
+  swallows the common 400. Noted, not required.
+
+---
+
 ## 2026-08-08 — `8f32caa` — split `db.py` into a `db/` package by responsibility (Phase 9)
 
 **Status: ✅ DONE**

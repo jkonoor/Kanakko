@@ -360,6 +360,50 @@ def remove_member(
     return "removed"
 
 
+def transfer_ownership(
+    conn: psycopg.Connection, actor_user_id: int, target_user_id: int
+) -> str:
+    """Hand ownership of `actor`'s household to `target` (§16).
+
+    A household always has an owner, so an owner cannot leave until they transfer
+    ownership first — this is the operation that unblocks that `/remove`. Only the
+    current owner may transfer, and only to another member of the same household.
+    `target` carries an invite label, so `/transfer <label>` can never name the
+    owner (they have none) — `already_owner` is the defensive verdict for a target
+    that resolves back to the owner, which the label path cannot produce. Does not
+    commit — the caller owns the transaction. Returns `"transferred"`,
+    `"not_owner"`, `"not_member"`, or `"already_owner"`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT hh.household_id, hh.owner"
+            " FROM household_members m"
+            " JOIN households hh ON hh.household_id = m.household_id"
+            " WHERE m.user_id = %s",
+            (actor_user_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return "not_member"
+        household_id, owner = row
+        if actor_user_id != owner:
+            return "not_owner"
+        if target_user_id == owner:
+            return "already_owner"
+        cur.execute(
+            "SELECT 1 FROM household_members"
+            " WHERE household_id = %s AND user_id = %s",
+            (household_id, target_user_id),
+        )
+        if cur.fetchone() is None:
+            return "not_member"
+        cur.execute(
+            "UPDATE households SET owner = %s WHERE household_id = %s",
+            (target_user_id, household_id),
+        )
+    return "transferred"
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:

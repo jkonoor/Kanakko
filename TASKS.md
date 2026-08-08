@@ -492,9 +492,15 @@ means transactions with no home. Each task leaves the tree green and deployable.
       `transaction_events` audit rows (the FK forbids orphaning them). The
       read-path guard now excludes `DELETE FROM transactions` — a write, never a
       report read.
-- [ ] Require ownership transfer before an owner can leave (§16) — a household
+- [x] Require ownership transfer before an owner can leave (§16) — a household
       always has an owner. The check: an owner's self-removal is refused while
       they still own it, and succeeds after transfer.
+      Done: `/transfer <label>` (owner only, unmetered like `/remove`) hands
+      ownership to a roster member; `db.transfer_ownership(actor, target)` holds
+      the authorization (`not_owner`, `not_member`, `already_owner`). The owner's
+      bare `/remove` stays refused (`owner_must_transfer`) until this moves
+      ownership, then succeeds. `tests/test_transfer.py`; webhook routing +
+      metering-exclusion mirror in `tests/test_webhook.py`.
 
 ### Reminders under households
 

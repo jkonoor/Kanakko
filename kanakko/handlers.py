@@ -22,7 +22,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from kanakko.auth import signup_mode
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
-from kanakko.confirm import category_prompt, confirm_card
+from kanakko.confirm import category_prompt, confirm_card, settled_card
 from kanakko.db import (
     cancel_pending,
     check_removal,
@@ -706,11 +706,19 @@ def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     is already stored) — either way we answer the callback query so Telegram
     clears the spinner. Does not commit — the caller owns the transaction.
     Returns the new `txn_id`, or `None` when there was nothing to confirm.
+
+    On a real confirm the card is edited into a settled receipt with no keyboard
+    (§4, §5): the only lasting evidence a transaction was saved is otherwise a
+    toast that fades, and dropping the Confirm/Cancel buttons is also what stops a
+    later stale Cancel from removing the receipt. A redelivered tap (`row is None`)
+    leaves the already-settled card untouched.
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, press.from_id)
     row = confirm_pending(conn, user_id, press.message_id,
                           source=press.source, update_id=press.update_id)
+    if row is not None:
+        edit_message_text(press.chat_id, press.message_id, settled_card(row))
     answer_callback_query(
         press.callback_query_id, "Saved ✅" if row else "Already saved"
     )
@@ -738,12 +746,16 @@ def handle_cancel(conn: psycopg.Connection, press: ButtonPress) -> int | None:
     start = time.perf_counter()
     user_id = get_or_create_user(conn, press.from_id)
     pending_id = cancel_pending(conn, user_id, press.message_id)
-    # Take the cancelled card out of the chat rather than leaving a dead card
-    # with live buttons. The toast still reports what happened, and the user's
-    # own message stays — only the bot's card goes. `delete_message` returns
-    # False for a card older than the Bot API's 48-hour window; that just leaves
-    # it in place, which is better than 500ing the tap into a redelivery loop.
-    delete_message(press.chat_id, press.message_id)
+    # Delete the card *only when this tap actually cancelled a pending row*. A
+    # Cancel on an already-confirmed card finds no pending row (Confirm cleared it
+    # and settled the card into a receipt), so deleting it would strip the receipt
+    # from the chat while the transaction stays in the ledger — the transcript and
+    # the ledger would then disagree. The toast still reports what happened, and
+    # the user's own message stays — only the bot's live card goes. `delete_message`
+    # returns False for a card older than the Bot API's 48-hour window; that just
+    # leaves it in place, better than 500ing the tap into a redelivery loop.
+    if pending_id is not None:
+        delete_message(press.chat_id, press.message_id)
     answer_callback_query(
         press.callback_query_id, "Discarded ❌" if pending_id else "Already gone"
     )

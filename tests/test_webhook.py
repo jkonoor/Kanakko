@@ -556,6 +556,7 @@ def test_handle_confirm_writes_the_ledger_row_and_acknowledges(conn, monkeypatch
     monkeypatch.setattr(
         handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
 
     txn_id = app_module.handle_confirm(
         conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
@@ -580,6 +581,7 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     monkeypatch.setattr(
         handlers, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
 
     first = app_module.handle_confirm(conn, press)
@@ -605,6 +607,7 @@ def test_handle_confirm_logs_ok_then_noop_on_a_redelivery(conn, monkeypatch):
     migrate(conn)
     _seed_pending(conn, chat_id=12345, card_message_id=909)
     monkeypatch.setattr(handlers, "answer_callback_query", lambda *a, **k: None)
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
     press = ButtonPress(
         chat_id=12345, message_id=909, callback_query_id="c", data=CONFIRM, update_id=7
     )
@@ -1017,6 +1020,60 @@ def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     assert isinstance(first, int)
     assert second is None  # nothing left to cancel
     assert acks == ["Discarded ❌", "Already gone"]  # spinner cleared both times
+    conn.rollback()
+
+
+def test_confirm_settles_the_card_and_a_stale_cancel_leaves_the_receipt(conn, monkeypatch):
+    """A confirmed card settles with no keyboard, and a later Cancel can't wipe it.
+
+    Two halves, both asserted (a card that only read the new text would pass with
+    the stale-Cancel trap still there):
+    (a) after Confirm the card is edited into a settled receipt carrying **no**
+        `reply_markup` — nothing left to re-tap;
+    (b) a Cancel arriving on that now-confirmed card finds no pending row, so it
+        must delete **nothing** and leave the ledger row in place — the transcript
+        and the ledger must not disagree (the stale-Cancel receipt bug).
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    edits, deletes = [], []
+    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
+    monkeypatch.setattr(
+        handlers,
+        "edit_message_text",
+        lambda chat_id, message_id, text, reply_markup=None: edits.append(
+            (message_id, text, reply_markup)
+        ),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "delete_message",
+        lambda chat_id, message_id: deletes.append((chat_id, message_id)) or True,
+    )
+
+    app_module.handle_confirm(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="c1", data=CONFIRM)
+    )
+    # (a) the card became a settled receipt with no buttons to re-tap
+    assert len(edits) == 1
+    edited_id, edited_text, edited_markup = edits[0]
+    assert edited_id == 909
+    assert edited_markup is None  # no Confirm/Cancel left on a saved card
+    assert "Saved" in edited_text
+
+    # (b) a stale Cancel on the confirmed card deletes nothing, ledger untouched
+    result = app_module.handle_cancel(
+        conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="c2", data=CANCEL)
+    )
+    assert result is None  # no pending row — Confirm already cleared it
+    assert deletes == []  # the receipt is NOT removed from the chat
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM active_transactions WHERE user_id = %s", (user_id,)
+        )
+        (count,) = cur.fetchone()
+    assert count == 1  # the confirmed transaction stays in the ledger
     conn.rollback()
 
 

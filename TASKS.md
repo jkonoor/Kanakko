@@ -523,7 +523,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ### Chat polish
 
-- [ ] Settle the confirm card in place on Confirm, and stop a stale Cancel from
+- [x] Settle the confirm card in place on Confirm, and stop a stale Cancel from
       deleting a receipt. Raised by the user 2026-08-08 from real use: the only
       lasting evidence that a transaction was saved is a toast that disappears.
       `handle_confirm` never touches the card, so it keeps working **Confirm and

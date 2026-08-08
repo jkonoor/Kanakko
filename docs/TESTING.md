@@ -51,7 +51,7 @@ The core path — §2, §3, §4. If this is broken, nothing else matters.
 | # | Step | Expected | Status | Notes |
 |---|---|---|---|---|
 | 1.1 | Send `spent 250 on lunch` | A confirm card appears within a few seconds: amount ₹250.00, type expense, category Food, today's date, the note | ⬜ | |
-| 1.2 | Tap **Confirm** | Toast says "Saved ✅"; the card stops offering Confirm | ⬜ | |
+| 1.2 | Tap **Confirm** | Toast says "Saved ✅"; the card settles into a "✅ Saved" receipt and stops offering Confirm/Cancel | ⬜ | |
 | 1.3 | Send `got 50000 salary` | Confirm card: ₹50,000.00, **income**, Salary | ⬜ | |
 | 1.4 | Confirm it | Saved | ⬜ | |
 | 1.5 | Send `paid 1200 to bigbasket yesterday` | Card shows **yesterday's** date, not today, and category Groceries | ⬜ | |
@@ -73,6 +73,7 @@ somewhere, and that is a stop-everything bug.
 |---|---|---|---|---|
 | 2.1 | Send `spent 111 on tea`, then tap **Cancel** | Toast "Discarded ❌", and **the card disappears from the chat entirely** | ⬜ | |
 | 2.2 | Scroll up — is the cancelled card gone? | Yes. No leftover card with dead buttons | ⬜ | |
+| 2.2a | Confirm an entry, then tap **Cancel** on that same (now settled) card | Toast "Already gone"; **the receipt stays in the chat** and the entry stays in the ledger — a stale Cancel never wipes a saved receipt | ⬜ | |
 | 2.3 | Confirm a new entry, then send `/undo` | Reply names exactly what was removed (type, amount, category) | ⬜ | |
 | 2.4 | Send `/undo` again immediately | "Nothing to undo." — it does **not** delete a second, older transaction | ⬜ | |
 | 2.5 | On a confirm card, tap a *different* category | Card re-renders with the new category; amount and date unchanged | ⬜ | |

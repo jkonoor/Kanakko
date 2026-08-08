@@ -52,6 +52,27 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), keyboard
 
 
+def settled_card(row: dict) -> str:
+    """Render a stored transaction as a settled receipt — text only, no keyboard (§4, §5).
+
+    `handle_confirm` edits the confirm card into this once the row is stored, so the
+    transcript keeps a permanent receipt instead of only a toast that fades. Takes
+    the row `confirm_pending` returns — a Decimal `amount` and a `occurred_on`
+    date, the ledger's own shape, not a `Transaction`. Amount goes through
+    `format_amount` so a settled card can no more show a float than a live one (§9).
+    Deliberately returns no keyboard: the entry is saved, so there is nothing left
+    to Confirm or Cancel, and a stale Cancel on this card must find no live button.
+    """
+    return "\n".join(
+        [
+            f"✅ Saved — {row['type'].capitalize()} {format_amount(row['amount'])}",
+            f"Category: {row['category']}",
+            f"Date: {row['occurred_on'].isoformat()}",
+            f"Note: {row['note']}",
+        ]
+    )
+
+
 def category_prompt(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
     """Render the category picker shown when the model returned no category (§3, §5).
 

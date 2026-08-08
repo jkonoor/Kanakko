@@ -224,6 +224,34 @@ def create_household_invite(
         return cur.rowcount == 1
 
 
+def household_roster(
+    conn: psycopg.Connection, user_id: int
+) -> list[tuple[int, bool, str | None]]:
+    """The members of `user_id`'s household — `(member_user_id, is_owner, label)` (§16).
+
+    Answers `/household`'s "who is in it, who owns it". Scoped on the household
+    resolved from `user_id`'s `household_members` row, so it can never span
+    households. Each member carries their household-invite `label` (`ravi`,
+    `priya`) — the attribution §16 keeps so the operator can tell who is active;
+    the owner joined by creating the household, not by an invite, so their label
+    is NULL. Owner first, then by join order. Empty when the user has no household
+    (should not happen for an authorized user, but the caller handles it).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT m.user_id, hh.owner = m.user_id AS is_owner, i.label"
+            " FROM household_members m"
+            " JOIN households hh ON hh.household_id = m.household_id"
+            " LEFT JOIN invites i"
+            "   ON i.used_by = m.user_id AND i.kind = 'household'"
+            " WHERE m.household_id ="
+            "   (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " ORDER BY is_owner DESC, m.joined_at",
+            (user_id,),
+        )
+        return [(uid, is_owner, label) for uid, is_owner, label in cur.fetchall()]
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:

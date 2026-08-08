@@ -455,10 +455,20 @@ means transactions with no home. Each task leaves the tree green and deployable.
       like `/undo`), `db.create_household_invite` (owner-only enforced in SQL —
       `WHERE owner = %s`), bot username from `tg.get_bot_username` (getMe, so the
       link can't name a different bot than the token). `tests/test_invite.py`.
-- [ ] Add `/household` (who is in it, who owns it) and member removal: the owner
-      may remove anyone, **any member may remove themselves** (§16 — owner-only
-      removal traps a member in a ledger they cannot leave). One code path, the
-      self case being actor == target.
+- [x] Add `/household` — who is in it, who owns it (§16). Split from member
+      removal below: `/household` is the read that removal acts *on*, and removal
+      is coupled to the next two tasks (it asks retain-or-delete of entries, and
+      an owner can't leave without transferring ownership first), so the display
+      lands first and deployable. Done: `handle_household` (routed after the gate,
+      unmetered like `/undo` and `/invite`), `db.household_roster` (household-scoped
+      — owner first, each member carrying their invite label). `tests/test_household.py`.
+- [ ] Member removal (§16): the owner may remove anyone, **any member may remove
+      themselves** (owner-only removal traps a member in a ledger they cannot
+      leave). One code path, the self case being actor == target. Removal acts on
+      the `/household` roster above. **An owner removing themselves is refused —
+      ownership must transfer first (the task after next); until then this guard
+      keeps a household from going ownerless.** Retain-vs-delete of the departing
+      member's entries is the next task; this task's removal retains by default.
 - [ ] Removal asks **retain or delete** that member's entries, and deletion is
       real (§16). This is *not* §6's soft delete and must not share its name. The
       warning must say the specific consequence: hard deletion makes past reports

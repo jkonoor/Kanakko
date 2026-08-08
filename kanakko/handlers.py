@@ -29,6 +29,7 @@ from kanakko.db import (
     create_household_invite,
     create_household_of_one,
     get_or_create_user,
+    household_roster,
     save_pending,
     set_pending_category,
     undo_last,
@@ -404,6 +405,46 @@ def handle_invite(conn: psycopg.Connection, msg: TextMessage) -> str | None:
     log_event("invite.issued", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id, duration_ms=ms_since(start))
     return code
+
+
+HOUSEHOLD_COMMAND = "/household"
+
+HOUSEHOLD_SOLO = (
+    "👥 Your household — just you so far. Use `/invite <name>` to add someone."
+)
+
+
+def _is_household(text: str) -> bool:
+    """True when `text` is the `/household` command — bare or `/household@bot`."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == HOUSEHOLD_COMMAND
+
+
+def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
+    """Show who is in the sender's household and who owns it (§16).
+
+    A read, never a mutation: lists every member with their invite label, marks
+    the owner and the viewer, and points a solo user at `/invite`. Member removal
+    is a separate operation (§16 — it asks retain-or-delete of the departing
+    member's entries). Does not commit. Returns the outcome slug for the log line.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    members = household_roster(conn, user_id)
+    if len(members) <= 1:
+        reply = HOUSEHOLD_SOLO
+    else:
+        lines = []
+        for member_id, is_owner, label in members:
+            name = "Owner" if is_owner else (label or "Member")
+            if member_id == user_id:
+                name += " (you)"
+            lines.append(f"• {name}")
+        reply = f"👥 Your household — {len(members)} members\n\n" + "\n".join(lines)
+    send_message(msg.chat_id, reply)
+    log_event("household.viewed", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return "ok"
 
 
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:

@@ -26,6 +26,7 @@ from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
     TextMessage,
+    _is_household,
     _is_invite,
     _is_start,
     _is_undo,
@@ -33,6 +34,7 @@ from kanakko.handlers import (
     handle_cancel,
     handle_category,
     handle_confirm,
+    handle_household,
     handle_invite,
     handle_start,
     handle_text,
@@ -320,7 +322,9 @@ async def webhook(request: Request) -> dict[str, bool]:
         # parse path, leaving callback/undo rows NULL so `count_updates_on_day`
         # counts exactly the messages that spend credits (§16), not the free taps.
         is_parse = isinstance(action, TextMessage) and not (
-            _is_undo(action.text) or _is_invite(action.text)
+            _is_undo(action.text)
+            or _is_invite(action.text)
+            or _is_household(action.text)
         )
         if is_parse and not within_daily_cap(conn, user_id):
             send_message(action.chat_id, CAP_REACHED)
@@ -338,6 +342,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_undo(conn, action)
                 elif _is_invite(action.text):
                     handle_invite(conn, action)
+                elif _is_household(action.text):
+                    handle_household(conn, action)
                 else:
                     handle_text(conn, action)
             elif action.data == CONFIRM:

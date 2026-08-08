@@ -11,7 +11,7 @@ fixture); the month-boundary and message helpers are pure.
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from conftest import household_of
+from conftest import household_of, join_household
 
 from kanakko.db import get_or_create_user, month_summary
 from kanakko.jobs import monthly
@@ -110,6 +110,34 @@ def test_run_logs_a_monthly_reminder_for_each_user(conn, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("SELECT user_id, kind FROM reminder_log ORDER BY user_id")
         assert cur.fetchall() == [(a, "monthly"), (b, "monthly")]
+    conn.rollback()
+
+
+def test_monthly_carries_the_household_figure_to_every_member(conn, monkeypatch):
+    """Both members of a household get the *household* month report (§16).
+
+    Two members share one household; only `a` logs the previous month's spend.
+    §16 makes the monthly report a household figure, so both members receive the
+    same figures — `b`, who logged nothing, still sees the household's month, not
+    an empty report. A personal-scoped `month_summary` would send `b` all-zeros;
+    this asserts against that by checking both recipients get the same non-empty
+    report text.
+    """
+    migrate(conn)
+    first, _ = previous_month_ist()  # the report's range, relative to now
+    a = get_or_create_user(conn, 712000)
+    b = get_or_create_user(conn, 712001)
+    join_household(conn, household_of(conn, a), b)
+    _insert(conn, a, Decimal("300.00"), "expense", first, "Food")
+    _insert(conn, a, Decimal("5000.00"), "income", first, "Salary")
+
+    sent = {}
+    monkeypatch.setattr(monthly, "send_message", lambda tg_id, text: sent.__setitem__(tg_id, text))
+    monthly.run(conn)
+
+    label = first.strftime("%B %Y")
+    expected = report_text(label, Decimal("5000.00"), Decimal("300.00"), [("Food", Decimal("300.00"))])
+    assert sent == {712000: expected, 712001: expected}  # b sees the household's month
     conn.rollback()
 
 

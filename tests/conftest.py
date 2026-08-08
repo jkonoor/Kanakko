@@ -36,6 +36,21 @@ def household_of(conn, user_id: int) -> int:
         return hid
 
 
+def join_household(conn, household_id: int, user_id: int) -> None:
+    """Add an existing user to an existing household (test-only, §16).
+
+    `household_of` makes a household of one; this puts a second member in the same
+    one, which the jobs' household-scoping checks need but onboarding would build
+    via an invite. The UNIQUE on `household_members.user_id` makes a double-add a
+    hard error, which is the intended one-household-per-user rule.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
+            (household_id, user_id),
+        )
+
+
 def pg_bin(name: str) -> str | None:
     """Debian keeps the server binaries off PATH, under /usr/lib/postgresql."""
     found = glob(f"/usr/lib/postgresql/*/bin/{name}") + glob("/usr/local/pgsql/bin/" + name)

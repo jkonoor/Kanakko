@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from conftest import household_of
+from conftest import household_of, join_household
 
 from kanakko import eventlog
 from kanakko.db import get_or_create_user, logged_since
@@ -155,6 +155,33 @@ def test_run_reads_last_evening_from_reminder_log(conn, monkeypatch):
 
     assert sent == 0
     assert sent_to == []  # suppressed: active since the real last summary
+    conn.rollback()
+
+
+def test_noon_suppression_is_per_person_not_household_wide(conn, monkeypatch):
+    """A housemate's activity must not suppress an idle member's nudge (§12, §16).
+
+    Two members share one household. `active` logs a transaction after the
+    boundary; `idle` logs nothing. §16 makes suppression *per person*, so `idle`
+    must still be nudged even though a housemate was active. This is the one rule a
+    household-wide `logged_since` (scoping only on `household_id`, dropping the
+    `user_id` predicate) silently breaks: it would see the household's activity and
+    suppress `idle` too. The check reddens if that regression lands.
+    """
+    migrate(conn)
+    boundary = previous_evening_ist()
+
+    active = get_or_create_user(conn, 930930)
+    idle = get_or_create_user(conn, 930931)
+    join_household(conn, household_of(conn, active), idle)  # same household
+    _insert(conn, active, boundary + timedelta(minutes=1))  # housemate is active
+
+    sent_to = []
+    monkeypatch.setattr(noon, "send_message", lambda tg_id, text: sent_to.append(tg_id))
+    sent = run(conn)
+
+    assert sent == 1
+    assert sent_to == [930931]  # idle member nudged; active housemate suppressed
     conn.rollback()
 
 

@@ -504,7 +504,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ### Reminders under households
 
-- [ ] Re-scope the jobs (§12, §16): evening and monthly carry **household**
+- [x] Re-scope the jobs (§12, §16): evening and monthly carry **household**
       figures to every member; the noon nudge is suppressed **per person**, so a
       member who logged nothing is still nudged even if a housemate was active.
       That per-person rule is the one most easily broken by a household-wide

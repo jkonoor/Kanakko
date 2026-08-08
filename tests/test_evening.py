@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
-from conftest import household_of
+from conftest import household_of, join_household
 
 from kanakko import eventlog
 from kanakko.db import day_summary, get_or_create_user
@@ -97,6 +97,33 @@ def test_run_logs_an_evening_reminder_for_each_user(conn, monkeypatch):
     assert events[0]["source"] == "cron"
     assert (events[0]["considered"], events[0]["delivered"], events[0]["skipped"]) == (2, 2, 0)
     assert isinstance(events[0]["duration_ms"], int)
+    conn.rollback()
+
+
+def test_evening_carries_the_household_figure_to_every_member(conn, monkeypatch):
+    """Both members of a household get the *household* day total, not a personal one (§16).
+
+    Two members share one household; only `a` logs anything (₹150.50 across two
+    entries). §16 makes the evening summary a household figure, so both members
+    must receive the same total — `b`, who logged nothing, still sees the
+    household's spend, not "no entries". A personal-scoped summary (reverting
+    `day_summary` to filter on `user_id`) would send `b` the empty-day message,
+    which this asserts against.
+    """
+    migrate(conn)
+    day = today_ist()
+    a = get_or_create_user(conn, 701000)
+    b = get_or_create_user(conn, 701001)
+    join_household(conn, household_of(conn, a), b)
+    _insert(conn, a, Decimal("120.50"), "expense", day)
+    _insert(conn, a, Decimal("30.00"), "expense", day)
+
+    sent = {}
+    monkeypatch.setattr(evening, "send_message", lambda tg_id, text: sent.__setitem__(tg_id, text))
+    evening.run(conn)
+
+    both = "🌙 Today: 2 entries, spent ₹150.50."
+    assert sent == {701000: both, 701001: both}  # b sees the household spend, not an empty day
     conn.rollback()
 
 

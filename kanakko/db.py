@@ -202,6 +202,28 @@ def consume_invite(
     return "ok"
 
 
+def create_household_invite(
+    conn: psycopg.Connection, owner_user_id: int, code: str, label: str
+) -> bool:
+    """Issue a single-use household invite for the household `owner_user_id` owns (§16).
+
+    Owner-only, enforced in SQL: the `SELECT … FROM households WHERE owner = %s`
+    yields the owner's own household or nothing, so a member who isn't the owner
+    inserts no row and gets `False` — the guard the check proves. The code is
+    `household` kind (implies signup, §16), labelled so the operator can tell who
+    is active. Returns `True` if issued, `False` if the user owns no household.
+    Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by)"
+            " SELECT %s, 'household', household_id, %s, %s"
+            " FROM households WHERE owner = %s",
+            (code, label, owner_user_id, owner_user_id),
+        )
+        return cur.rowcount == 1
+
+
 def save_pending(
     conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
 ) -> int:

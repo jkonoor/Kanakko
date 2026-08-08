@@ -449,9 +449,12 @@ means transactions with no home. Each task leaves the tree green and deployable.
       Done: `handle_start` (routed **before** the gate, since consuming an invite
       is how an unknown user becomes authorized), `db.consume_invite` +
       `db.create_household_of_one`. `tests/test_start.py`.
-- [ ] Add `/invite` (owner only) — issues a labelled single-use household code and
+- [x] Add `/invite` (owner only) — issues a labelled single-use household code and
       returns the `t.me/<bot>?start=<code>` link. Label so the operator can tell
-      who is active (§16).
+      who is active (§16). Done: `handle_invite` (routed after the gate, unmetered
+      like `/undo`), `db.create_household_invite` (owner-only enforced in SQL —
+      `WHERE owner = %s`), bot username from `tg.get_bot_username` (getMe, so the
+      link can't name a different bot than the token). `tests/test_invite.py`.
 - [ ] Add `/household` (who is in it, who owns it) and member removal: the owner
       may remove anyone, **any member may remove themselves** (§16 — owner-only
       removal traps a member in a ledger they cannot leave). One code path, the

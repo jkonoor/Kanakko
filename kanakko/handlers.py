@@ -11,6 +11,7 @@ anything on a path that failed.
 
 import logging
 import re
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -25,6 +26,7 @@ from kanakko.db import (
     cancel_pending,
     confirm_pending,
     consume_invite,
+    create_household_invite,
     create_household_of_one,
     get_or_create_user,
     save_pending,
@@ -39,6 +41,7 @@ from kanakko.tg import (
     answer_callback_query,
     delete_message,
     edit_message_text,
+    get_bot_username,
     send_message,
 )
 from kanakko.trace import open_trace
@@ -178,8 +181,9 @@ def _is_start(text: str) -> bool:
     return bool(words) and words[0].split("@", 1)[0].lower() == START_COMMAND
 
 
-def _start_payload(text: str) -> str:
-    """The deep-link payload after `/start`, or `""` for a bare `/start`."""
+def _command_arg(text: str) -> str:
+    """The argument after a command word — a `/start` payload, a `/invite` label —
+    or `""` when the command was sent bare."""
     parts = text.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
 
@@ -200,7 +204,7 @@ def handle_start(conn: psycopg.Connection, msg: TextMessage) -> str:
     slug for the log line.
     """
     start = time.perf_counter()
-    payload = _start_payload(msg.text)
+    payload = _command_arg(msg.text)
     if payload:
         if _START_PAYLOAD_RE.match(payload):
             outcome = consume_invite(conn, payload, msg.from_id)
@@ -345,6 +349,61 @@ def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
               source=msg.source, user_id=user_id, duration_ms=ms_since(start),
               txn_id=removed["txn_id"], amount=removed["amount"])
     return removed
+
+
+INVITE_COMMAND = "/invite"
+
+INVITE_USAGE = (
+    "Add a label so you can tell who's who — e.g. `/invite ravi`. Each invite is "
+    "a single-use link to join your household."
+)
+
+INVITE_NOT_OWNER = (
+    "Only the household owner can invite people. Ask whoever set up your household "
+    "to send an invite."
+)
+
+
+def _is_invite(text: str) -> bool:
+    """True when `text` is the `/invite` command — bare or `/invite@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == INVITE_COMMAND
+
+
+def handle_invite(conn: psycopg.Connection, msg: TextMessage) -> str | None:
+    """Issue a labelled single-use household invite link — owner only (§16).
+
+    `/invite <label>` mints a `household` invite for the household this user owns
+    and replies with its `https://t.me/<bot>?start=<code>` deep link; the label
+    (`ravi`, `priya`) is how the operator tells who is active (§16). Owner-only is
+    enforced in `create_household_invite`: a member who isn't the owner gets a
+    refusal and no row. A bare `/invite` with no label is a usage hint, not a row.
+    The code is a random base64url token (valid `/start` payload — A-Z a-z 0-9 _ -,
+    §16), so a collision is astronomically unlikely; if one ever did occur the
+    UNIQUE on `invites.code` raises, the update's claim rolls back, and Telegram's
+    redelivery mints a fresh code. Does not commit — the caller owns the
+    transaction. Returns the issued code, or `None` when nothing was issued.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    label = _command_arg(msg.text)
+    if not label:
+        send_message(msg.chat_id, INVITE_USAGE)
+        log_event("invite.issued", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    code = "h-" + secrets.token_urlsafe(9)
+    if not create_household_invite(conn, user_id, code, label):
+        send_message(msg.chat_id, INVITE_NOT_OWNER)
+        log_event("invite.issued", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    link = f"https://t.me/{get_bot_username()}?start={code}"
+    send_message(msg.chat_id,
+                 f"Invite for {label} — a single-use link to join your household:\n{link}")
+    log_event("invite.issued", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return code
 
 
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:

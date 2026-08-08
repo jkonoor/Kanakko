@@ -27,6 +27,8 @@ from kanakko.handlers import (
     CAP_REACHED,
     REMOVE_PREFIX,
     TextMessage,
+    _is_greeting,
+    _is_help,
     _is_household,
     _is_invite,
     _is_remove,
@@ -37,6 +39,7 @@ from kanakko.handlers import (
     handle_cancel,
     handle_category,
     handle_confirm,
+    handle_help,
     handle_household,
     handle_invite,
     handle_remove,
@@ -329,6 +332,8 @@ async def webhook(request: Request) -> dict[str, bool]:
         # counts exactly the messages that spend credits (§16), not the free taps.
         is_parse = isinstance(action, TextMessage) and not (
             _is_undo(action.text)
+            or _is_help(action.text)
+            or _is_greeting(action.text)
             or _is_invite(action.text)
             or _is_household(action.text)
             or _is_remove(action.text)
@@ -348,6 +353,8 @@ async def webhook(request: Request) -> dict[str, bool]:
             if isinstance(action, TextMessage):
                 if _is_undo(action.text):
                     handle_undo(conn, action)
+                elif _is_help(action.text) or _is_greeting(action.text):
+                    handle_help(conn, action)
                 elif _is_invite(action.text):
                     handle_invite(conn, action)
                 elif _is_household(action.text):

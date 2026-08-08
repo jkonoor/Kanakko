@@ -109,7 +109,7 @@ def test_webhook_returns_200_for_a_text_update(monkeypatch):
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: None)
     response = client.post(
         "/webhook",
-        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+        json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "spent 500 on food"}},
         headers=AUTH,
     )
     assert response.status_code == 200
@@ -656,7 +656,8 @@ def test_webhook_logs_exactly_one_error_line_when_a_handler_raises(monkeypatch):
         with pytest.raises(RuntimeError):
             client.post(
                 "/webhook",
-                json={"message": {"message_id": 1, "chat": {"id": 42}, "text": "hi"}},
+                json={"message": {"message_id": 1, "chat": {"id": 42},
+                                  "text": "spent 500 on food"}},
                 headers=AUTH,
             )
     finally:

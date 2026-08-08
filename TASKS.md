@@ -552,7 +552,7 @@ means transactions with no home. Each task leaves the tree green and deployable.
       currently wrong about the code; it becomes true with this change, so no edit
       is needed there beyond adding a row for the stale-Cancel case.
 
-- [ ] Answer a non-transaction message helpfully, and without paying for it.
+- [x] Answer a non-transaction message helpfully, and without paying for it.
       Raised by the user 2026-08-08: typing "How do I use this?" today returns
       *"I couldn't find an amount in that"* — a natural question answered with a
       complaint, **after two OpenRouter calls** (`parse_message` retries once on a

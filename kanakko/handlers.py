@@ -12,6 +12,7 @@ anything on a path that failed.
 import logging
 import re
 import secrets
+import string
 import time
 from dataclasses import dataclass
 
@@ -141,8 +142,10 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
 
 
 REPHRASE_PROMPT = (
-    'I couldn\'t find an amount in that. Try again with the amount — '
-    'like "spent 500 on groceries" or "got 20000 salary".'
+    "I keep track of what you spend and earn — just tell me the amount, like "
+    '"spent 500 on groceries" or "got 20000 salary", and I\'ll log it after a '
+    "one-tap confirm. You can /undo your last entry any time, or tap the menu "
+    "button to open your dashboard."
 )
 
 PARSER_DOWN_PROMPT = (
@@ -354,6 +357,46 @@ def handle_undo(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
               source=msg.source, user_id=user_id, duration_ms=ms_since(start),
               txn_id=removed["txn_id"], amount=removed["amount"])
     return removed
+
+
+HELP_COMMAND = "/help"
+
+# The greetings a lost user actually types, matched on an EXACT normalised equality
+# — never a substring or heuristic. Any looser test ("no digits", "ends in ?") would
+# eventually swallow a real expense: "spent five hundred on lunch" has no digits and
+# "500 lunch" has no verb, and a silently refused entry costs the trust the ledger
+# runs on. A stray LLM call costs a fraction of a rupee, so the parse path stays the
+# default and only these exact strings short-circuit it. "spent 500 on hi" is not an
+# exact match, so it can never misfire.
+_GREETINGS = frozenset({
+    "hi", "hello", "hey", "help", "thanks", "thank you",
+    "what can you do", "how do i use this",
+})
+
+
+def _is_help(text: str) -> bool:
+    """True when `text` is the `/help` command — bare or `/help@bot` in a group."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == HELP_COMMAND
+
+
+def _is_greeting(text: str) -> bool:
+    """True when the normalised `text` (lowercased, edge whitespace and punctuation
+    trimmed) is exactly a known greeting — the zero-LLM-cost short-circuit (§ chat
+    polish). Exact match only, so a real entry can never be mistaken for one."""
+    normalised = text.strip().lower().strip(string.punctuation + string.whitespace)
+    return normalised in _GREETINGS
+
+
+def handle_help(conn: psycopg.Connection, msg: TextMessage) -> None:
+    """Answer a lost user with how the bot works — the same text a failed parse
+    sends (§ chat polish), routed from `/help` and from an exact greeting, making
+    zero OpenRouter calls. Does not commit — the caller owns the transaction."""
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    send_message(msg.chat_id, REPHRASE_PROMPT)
+    log_event("help.sent", status="ok", update_id=msg.update_id, source=msg.source,
+              user_id=user_id, duration_ms=ms_since(start))
 
 
 INVITE_COMMAND = "/invite"

@@ -57,6 +57,8 @@ The core path — §2, §3, §4. If this is broken, nothing else matters.
 | 1.5 | Send `paid 1200 to bigbasket yesterday` | Card shows **yesterday's** date, not today, and category Groceries | ⬜ | |
 | 1.6 | Send `spent 99.50 on coffee` | Card shows **₹99.50** — paise preserved exactly, not ₹99 or ₹100 | ⬜ | |
 | 1.7 | Send `hello how are you` | A rephrase prompt. **No card, no amount invented.** | ⬜ | |
+| 1.7a | Send `hi` (or `/help`) | The help text — how to log an expense. Answered instantly, **no parser call**; it does not count against your daily message cap | ⬜ | |
+| 1.7b | Send `spent five hundred on lunch` | Still reaches the parser (a card or category buttons) — an exact-greeting short-circuit must never swallow a real entry with no digits | ⬜ | |
 | 1.8 | Send `bought something for 300` | Category buttons instead of a confirm card (the model couldn't tell) | ⬜ | |
 | 1.9 | Tap a category on that card | Card re-renders as a full confirm card with your category and gains Confirm/Cancel | ⬜ | |
 

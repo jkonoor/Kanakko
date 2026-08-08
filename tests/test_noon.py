@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from conftest import household_of
 
+from kanakko import eventlog
 from kanakko.db import get_or_create_user, logged_since
 from kanakko.jobs import noon
 from kanakko.jobs.noon import previous_evening_ist, run
@@ -111,10 +112,22 @@ def test_run_nudges_only_idle_users(conn, monkeypatch):
     sent_to = []
     monkeypatch.setattr(noon, "send_message", lambda tg_id, text: sent_to.append(tg_id))
 
-    sent = run(conn)
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        sent = run(conn)
+    finally:
+        eventlog.unbind_sink()
 
     assert sent == 2
     assert set(sent_to) == {900901, 900902}  # the two idle users, not the active one
+
+    # §17: the suppressed (active) user is a deliberate skip, not a failure — it
+    # counts as `skipped`, never `failed`. One `ok` event carries the run's shape.
+    assert len(events) == 1
+    assert events[0]["event"] == "job.noon"
+    assert events[0]["status"] == "ok"
+    assert (events[0]["considered"], events[0]["delivered"], events[0]["skipped"], events[0]["failed"]) == (3, 2, 1, 0)
     conn.rollback()
 
 

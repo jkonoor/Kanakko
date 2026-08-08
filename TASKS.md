@@ -336,7 +336,7 @@ row, because there is no `txn_id` to hang one on.
       so the defaults live in compose (`${TRACE_MODE:-on}`) or in code, the way
       `OPENROUTER_MODEL` already does. Note the §2 trap: compose's `:-` makes the
       variable *present but empty*, so read it with `or`, not `get(key, default)`.
-- [ ] Log the three scheduled jobs through the seam (§17). Found 2026-08-08 while
+- [x] Log the three scheduled jobs through the seam (§17). Found 2026-08-08 while
       writing the manual test rows: the jobs call `configure_logging` — which is
       what binds the sink — but **never call `log_event`**, so a `kanakko-cron`
       container writes an empty `events.jsonl`. §17's Storage section mounts the

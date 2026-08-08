@@ -65,7 +65,7 @@ def run(conn) -> int:
         log_reminder(conn, user_id, "evening")
         return True
 
-    return fan_out(conn, all_users(conn), deliver)
+    return fan_out(conn, all_users(conn), deliver, job="evening")
 
 
 def main() -> None:

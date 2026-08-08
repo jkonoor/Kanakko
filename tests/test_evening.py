@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 from conftest import household_of
 
+from kanakko import eventlog
 from kanakko.db import day_summary, get_or_create_user
 from kanakko.jobs import DeliveryFailures, evening
 from kanakko.jobs.evening import summary_text, today_ist
@@ -77,12 +78,25 @@ def test_run_logs_an_evening_reminder_for_each_user(conn, monkeypatch):
     b = get_or_create_user(conn, 700801)
     monkeypatch.setattr(evening, "send_message", lambda tg_id, text: None)
 
-    sent = evening.run(conn)
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        sent = evening.run(conn)
+    finally:
+        eventlog.unbind_sink()
 
     assert sent == 2
     with conn.cursor() as cur:
         cur.execute("SELECT user_id, kind FROM reminder_log ORDER BY user_id")
         assert cur.fetchall() == [(a, "evening"), (b, "evening")]
+
+    # §17: one `ok` event per run (not per user), carrying the run's shape.
+    assert len(events) == 1
+    assert events[0]["event"] == "job.evening"
+    assert events[0]["status"] == "ok"
+    assert events[0]["source"] == "cron"
+    assert (events[0]["considered"], events[0]["delivered"], events[0]["skipped"]) == (2, 2, 0)
+    assert isinstance(events[0]["duration_ms"], int)
     conn.rollback()
 
 
@@ -133,12 +147,28 @@ def test_one_blocked_recipient_does_not_silence_the_others(conn, monkeypatch):
 
     monkeypatch.setattr(evening, "send_message", flaky_send)
 
-    with pytest.raises(DeliveryFailures) as caught:
-        evening.run(conn)
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        with pytest.raises(DeliveryFailures) as caught:
+            evening.run(conn)
+    finally:
+        eventlog.unbind_sink()
 
     assert delivered == [700900, 700902]  # the blocked user did not stop the rest
     assert caught.value.sent == 2
     assert [tg for tg, _ in caught.value.failures] == [700901]
+
+    # §17: the failure-isolation property already held silently; the log line is
+    # what makes it observable. One `status="error"` event, with both halves of
+    # the story — the two that succeeded and the one that failed.
+    assert len(events) == 1
+    assert events[0]["event"] == "job.evening"
+    assert events[0]["status"] == "error"
+    assert events[0]["source"] == "cron"
+    assert events[0]["considered"] == 3
+    assert events[0]["delivered"] == 2
+    assert events[0]["failed"] == 1
 
     with conn.cursor() as cur:
         cur.execute("SELECT user_id FROM reminder_log ORDER BY user_id")

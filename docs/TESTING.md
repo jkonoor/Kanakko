@@ -184,22 +184,18 @@ below refer back to it. Note its `update_id` from the log.
 | 5a.14 | *(operator)* Set `TRACE_MODE=off`, send a message | No new folder appears, and the bot still works normally | ⬜ | |
 | 5a.15 | *(operator)* Restart `kanakko-web`, then check `events.jsonl` | **Still there, with the old lines.** This is the volume mount — without it every deploy wipes the evidence | ⬜ | |
 | 5a.16 | *(operator)* In `kanakko-cron`, write a file into `$LOG_DIR` and read it back from `kanakko-web` | The **same** volume is mounted on both — §17 requires it, and the jobs are the reason | ⬜ | |
+| 5a.17 | *(operator)* Run `python -m kanakko.jobs.evening` in `kanakko-cron`, then `jq 'select(.event\|startswith("job."))' $LOG_DIR/events.jsonl` | **One** line per run — `event":"job.evening"`, `"status":"ok"`, `"source":"cron"`, with `considered`, `delivered`, `skipped`, `failed` and `duration_ms`. One event per *run*, not per user | ⬜ | |
+| 5a.18 | *(operator)* Force a delivery failure (a blocked recipient), re-run the job | A `"status":"error"` line **and** the job exits non-zero (`echo $?` ≠ 0) — the log line is *in addition* to the raise, never instead of it. Earlier users' `reminder_log` rows are still present | ⬜ | |
 
 **5a.5 and 5a.9 are the two that matter.** A token in the log is a leak that
 survives on disk until rotation, and an orphan ledger row means the audit write is
 no longer inside the money transaction — the exact regression the arrangement in
 `db.py` exists to make impossible.
 
-**5a.15 and 5a.16 cannot pass until the volume is mounted** on both applications
-(the `[human]` task in Phase 8). Until then, mark them ⛔ rather than ❌ — nothing
-is broken, the infrastructure just isn't there yet.
-
-**No row here checks a scheduled job's events, because there are none.** The three
-jobs bind the sink through `configure_logging` but never call `log_event`, so a
-`kanakko-cron` container writes an empty `events.jsonl` — §17's storage section
-mounts the volume on both *because* "the jobs log too", and `transaction_events`
-even permits `source='cron'`, but nothing writes either. Phase 8 had no task for
-it. Add rows here when it lands, rather than testing for lines that cannot appear.
+**5a.15–5a.18 cannot pass until the volume is mounted** on both applications
+(the `[human]` task in Phase 8) — the job rows need the `kanakko-cron` container
+writing to the shared volume. Until then, mark them ⛔ rather than ❌ — nothing is
+broken, the infrastructure just isn't there yet.
 
 ---
 

@@ -12,6 +12,68 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-08 — `5f0cd45` — household-scoping tests for the three jobs (Phase 9, §16)
+
+**Status: ✅ DONE**
+
+**Scope.** Test-only commit. Adds three tests pinning that the scheduled jobs are
+household-scoped where the spec says so and per-person where it says so:
+evening/monthly carry the household figure to every member, the noon nudge is
+suppressed per person. Also adds a `join_household` conftest helper and ticks the
+"Re-scope the jobs (§12, §16)" box in `TASKS.md`. The commit claims **no
+production code changed** — confirmed by `git show HEAD`: only `TASKS.md`,
+`tests/conftest.py`, and the three `tests/test_*.py` files are touched.
+
+**What I checked (and what it returned).**
+
+- `git show HEAD --stat` / `git show HEAD` — 5 files, +101/−4, all tests + docs.
+  No `.py` under `kanakko/` in the diff.
+- Read the production the tests claim to pin — `kanakko/db.py` `day_summary`
+  (645), `month_summary` (675), `logged_since` (845); `kanakko/jobs/{noon,
+  evening,monthly}.py`. `day_summary`/`month_summary` scope on
+  `household_id = (SELECT household_id FROM household_members WHERE user_id = %s)`;
+  `logged_since` scopes on **both** `user_id = %s` and the household subquery.
+  This is exactly the "household figure / per-person suppression" split §16
+  requires — matches `docs/DECISIONS.md` §16 table (lines 424–425): *"Noon nudge
+  — suppressed per person, not household-wide"* and *"Evening/monthly summary —
+  household figures, sent to every member."*
+- `uv run pytest tests/test_noon.py tests/test_evening.py tests/test_monthly.py -q`
+  → **21 passed**. Full suite `uv run pytest -q` → **289 passed** (matches the
+  claimed 286→289).
+- **Verified each new test reddens for the reason it names**, by temporarily
+  reverting the guarded behaviour and restoring it (`git diff --stat` clean
+  afterward):
+  - Dropped the `user_id` predicate from `logged_since` (household-wide
+    suppression) → `test_noon_suppression_is_per_person_not_household_wide`
+    **FAILED**. Restored → passes.
+  - Re-scoped `day_summary` and `month_summary` to `WHERE user_id = %s`
+    (personal figures) → both
+    `test_evening_carries_the_household_figure_to_every_member` and
+    `test_monthly_carries_the_household_figure_to_every_member` **FAILED**.
+    Restored → pass.
+
+  Each guard fails for the exact regression its docstring describes — these are
+  real checks, not surface-form assertions.
+
+**Findings.** None.
+
+Notes, non-blocking:
+
+- Amounts flow as `Decimal` throughout the new tests (`Decimal("120.50")` etc.)
+  and assert on the rendered strings via the real `summary_text`/`report_text`
+  and `format_amount`; no float creeps in. Timezone boundaries reuse the existing
+  `today_ist`/`previous_month_ist`/`previous_evening_ist` helpers, unchanged.
+- `join_household` (conftest.py:39) is test-only, inserts straight into
+  `household_members`, and relies on the table's `UNIQUE(user_id)` as the
+  one-household-per-user guard — appropriate for a fixture; it deliberately does
+  not reproduce onboarding's invite flow.
+- The `TASKS.md` tick is legitimate: the task's named deliverable was the
+  household-level checks (the DB re-scope landed earlier), and all three exist,
+  pass, and fail-when-broken.
+
+
+---
+
 ## 2026-08-08 — `84801f6` — feat: ownership transfer before an owner can leave (Phase 9, §16)
 
 **Status: ✅ DONE**

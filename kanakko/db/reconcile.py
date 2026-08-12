@@ -3,8 +3,14 @@
 Nothing is connected to a bank, so the ledger drifts. §18's fix is a nudge
 ("what does your bank say?") plus, when the answer disagrees, a **visible**
 adjustment row against the `external` account — never a silent rewrite of a
-balance. `create_adjustment` is that write; the weekly nudge and the reply that
-supplies `reported_balance` are a separate, UX-facing task on top of this one.
+balance. `create_adjustment` is that write. `accounts_for_reconcile` is the
+weekly cron's read (every household's own reconcilable accounts, cross-household
+like `db.due_rules_today`); `create_reconcile_ask`/`pending_awaiting_reconcile`/
+`clear_reconcile_ask` are the "awaiting a reply" state the nudge and its answer
+share — the same `pending_transactions` row 017's `awaiting_amount` used for
+"Change amount", not a new table (migration 019 made `parsed` nullable for
+exactly this: a reconcile ask holds no `Transaction`, only which account it asks
+about).
 """
 
 from datetime import date
@@ -13,6 +19,110 @@ from decimal import Decimal
 import psycopg
 
 from kanakko.db.audit import _record_event
+
+
+def accounts_for_reconcile(conn: psycopg.Connection) -> list[dict]:
+    """Every live, non-`external` account across every household, with its owner (§18).
+
+    Cross-household like `db.recurring.due_rules_today` — the weekly cron reaches
+    every household in one run, not one caller's. `external` is structural
+    bookkeeping and never something a nudge is sent for (the same exclusion
+    `create_adjustment` enforces on the write side). Joined to the owner's
+    Telegram id, the send target — §18 names the account's owning member, not
+    every household member, as who is asked.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.account_id, a.household_id, a.name, a.kind, a.owner, u.telegram_user_id"
+            " FROM accounts a"
+            " JOIN users u ON u.user_id = a.owner"
+            " WHERE a.kind <> 'external' AND a.deleted_at IS NULL"
+            " ORDER BY a.household_id, a.account_id",
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "account_id": account_id,
+            "household_id": household_id,
+            "name": name,
+            "kind": kind,
+            "owner": owner,
+            "telegram_user_id": telegram_user_id,
+        }
+        for account_id, household_id, name, kind, owner, telegram_user_id in rows
+    ]
+
+
+def create_reconcile_ask(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int, account_id: int
+) -> int:
+    """Mark the nudge just sent as awaiting a reply, keyed by its own message id (§18).
+
+    A `pending_transactions` row with no `parsed` `Transaction` — migration 019's
+    CHECK requires exactly one of `parsed` or `awaiting_reconcile_account_id`, and
+    a reconcile ask is never a transaction. `pending_awaiting_reconcile` is the
+    read this write feeds: `app.py`'s webhook checks it for every `TextMessage`,
+    the same way it already does for `pending_awaiting_amount`. Returns the new
+    `pending_id`. Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pending_transactions"
+            " (user_id, telegram_message_id, awaiting_reconcile_account_id)"
+            " VALUES (%s, %s, %s) RETURNING pending_id",
+            (user_id, telegram_message_id, account_id),
+        )
+        (pending_id,) = cur.fetchone()
+    return pending_id
+
+
+def pending_awaiting_reconcile(conn: psycopg.Connection, user_id: int) -> dict | None:
+    """The user's most recent outstanding reconcile ask, or `None` (§18).
+
+    `pending_awaiting_amount`'s counterpart for the reconcile flow — checked
+    before routing a `TextMessage`, so the reply lands on `reconcile_flow`
+    instead of a fresh parse. Most-recent-first, same tie-break as every other
+    pending lookup, in case more than one nudge is unusually outstanding at once.
+    Returns `{telegram_message_id, account_id}`, or `None` when nothing is
+    waiting.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT telegram_message_id, awaiting_reconcile_account_id"
+            " FROM pending_transactions"
+            " WHERE user_id = %s AND awaiting_reconcile_account_id IS NOT NULL"
+            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    telegram_message_id, account_id = row
+    return {"telegram_message_id": telegram_message_id, "account_id": account_id}
+
+
+def clear_reconcile_ask(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int
+) -> int | None:
+    """Discard the user's outstanding reconcile ask for `telegram_message_id` (§18).
+
+    `reconcile_flow.handle_reconcile_reply`'s write, once a reply has been read as
+    an amount — a parse failure leaves the row awaiting, the same "just retry"
+    contract `set_pending_amount` gives "Change amount". Scoped by `user_id` like
+    every other pending write (§1). Returns the cleared `pending_id`, or `None`
+    when there was nothing to clear (a stale or already-answered nudge). Does not
+    commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s"
+            "   AND awaiting_reconcile_account_id IS NOT NULL"
+            " RETURNING pending_id",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
 
 
 def create_adjustment(

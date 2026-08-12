@@ -1488,7 +1488,7 @@ per task:
       ledger row and audit row the assertions look for don't exist, proving a
       balance-only check would have passed on the broken version. `uv run
       pytest` → 463 passed (6 new), `ruff check` clean.
-- [ ] The reconcile nudge (§18) — the weekly cron send and the bot-side reply
+- [x] The reconcile nudge (§18) — the weekly cron send and the bot-side reply
       (split 2/2). Weekly per account (a new schedule, not daily like the other
       jobs): "I think your Bank has ₹42,300 — what does your bank say?", then
       capture the free-text reply and call `db.reconcile.create_adjustment` with
@@ -1496,6 +1496,40 @@ per task:
       shape `pending_transactions.awaiting_amount` (017) gave "Change amount",
       not a new table — and a decision on where the nudge fits among the
       existing evening/noon/monthly/recurring cron sends.
+      Done: migration `019` makes `pending_transactions.parsed` nullable and adds
+      `awaiting_reconcile_account_id` — a reconcile ask holds no `Transaction` at
+      all, so it rides the same table 017 used for "Change amount" rather than a
+      new one, with a CHECK (`(parsed IS NOT NULL) <> (awaiting_reconcile_account_id
+      IS NOT NULL)`) keeping the two kinds of pending row from ever blurring.
+      `kanakko.db.reconcile` gains the cron's read (`accounts_for_reconcile` —
+      cross-household like `due_rules_today`, `external` excluded) and the
+      awaiting-reply triple (`create_reconcile_ask`/`pending_awaiting_reconcile`/
+      `clear_reconcile_ask`), the same shape `db.pending`'s `awaiting_amount`
+      functions have. `kanakko.jobs.reconcile` is the send: its own per-account
+      fan-out loop (a household can own several accounts, the same reason
+      `jobs.recurring` doesn't use `jobs.fan_out`), phrased per kind — "what does
+      your bank say" for `spending`/`locked`, "what does your card statement say
+      [you owe]" for `credit` — and quoting `db.account_balances`'s own figure,
+      read once per household and reused across its accounts rather than a third
+      copy of the balance formula (the maintainability finding on `2fd6537`'s
+      review). Weekly Sunday 10:00 IST in the crontab — a judgment call, §12/§18
+      name no time, the same way recurring's 08:00 was.
+      `kanakko.reconcile_flow.handle_reconcile_reply` is the other half:
+      `app.py`'s webhook checks `pending_awaiting_reconcile` for every
+      `TextMessage` exactly like it already does for `pending_awaiting_amount`
+      (checked second — the two "next message is a reply" states can't both
+      claim one message), routing here instead of a fresh parse. An unparseable
+      reply leaves the ask outstanding so the user can just retry (`set_pending_
+      amount`'s contract); a parseable one clears it and hands the figure to
+      `create_adjustment` — a match writes nothing and replies "no changes
+      needed", a mismatch writes the visible adjustment and names its size.
+      Never metered, never capped — no LLM call, the same free-tap treatment an
+      amount reply gets. Two guards verified red-without-fix, green-with-fix:
+      migration 019's CHECK (dropped it, watched both the "neither set" and
+      "both set" inserts stop raising `CheckViolation`) and the webhook routing
+      branch (removed it, watched the reply fall through to `handle_text`
+      instead of `handle_reconcile_reply`). `uv run pytest` → 473 passed (10
+      new), `ruff check` clean.
 
 ### After the code
 

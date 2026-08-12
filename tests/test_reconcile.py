@@ -15,7 +15,14 @@ from decimal import Decimal
 
 from conftest import household_of
 
-from kanakko.db import account_balances, create_adjustment
+from kanakko.db import (
+    account_balances,
+    accounts_for_reconcile,
+    clear_reconcile_ask,
+    create_adjustment,
+    create_reconcile_ask,
+    pending_awaiting_reconcile,
+)
 from kanakko.migrate import migrate
 
 OCCURRED = date(2026, 8, 13)
@@ -228,4 +235,59 @@ def test_the_external_account_itself_cannot_be_reconciled(conn):
         conn, uid, external, Decimal("999.00"), OCCURRED, source="webhook", update_id=1
     )
     assert result is None
+    conn.rollback()
+
+
+def test_accounts_for_reconcile_lists_every_household_and_excludes_external(conn):
+    """The weekly cron's read: cross-household, `external` never included (§18)."""
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (8608) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        card = _account(cur, hh, uid, kind="credit", name="Card", opening="-500")
+
+    accounts = {a["account_id"]: a for a in accounts_for_reconcile(conn)}
+    with conn.cursor() as cur:
+        cur.execute("SELECT account_id FROM accounts WHERE household_id = %s", (hh,))
+        all_ids = {row[0] for row in cur.fetchall()}
+        cur.execute(
+            "SELECT account_id FROM accounts WHERE household_id = %s AND kind = 'external'", (hh,)
+        )
+        (external,) = cur.fetchone()
+
+    assert external not in accounts  # structural, never nudged
+    assert card in accounts
+    assert accounts[card]["telegram_user_id"] == 8608
+    assert accounts[card]["kind"] == "credit"
+    assert all_ids - {external} <= accounts.keys()  # every reconcilable account is present
+    conn.rollback()
+
+
+def test_reconcile_ask_round_trip(conn):
+    """`create_reconcile_ask` → `pending_awaiting_reconcile` → `clear_reconcile_ask` (§18).
+
+    The read must find nothing before the ask is created, find it after, and find
+    nothing again once it's cleared — the same lifecycle `pending_awaiting_amount`
+    has for "Change amount".
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (8609) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        bank = _account(cur, hh, uid, kind="spending", name="Bank",
+                        opening="1000", is_default=True)
+
+    assert pending_awaiting_reconcile(conn, uid) is None
+
+    pending_id = create_reconcile_ask(conn, uid, 9001, bank)
+    assert pending_id is not None
+    assert pending_awaiting_reconcile(conn, uid) == {
+        "telegram_message_id": 9001, "account_id": bank,
+    }
+
+    assert clear_reconcile_ask(conn, uid, 9001) == pending_id
+    assert pending_awaiting_reconcile(conn, uid) is None
+    assert clear_reconcile_ask(conn, uid, 9001) is None  # already gone
     conn.rollback()

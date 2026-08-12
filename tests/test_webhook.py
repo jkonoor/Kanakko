@@ -108,6 +108,7 @@ def test_webhook_returns_200_for_a_text_update(monkeypatch):
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: None)
     response = client.post(
         "/webhook",
@@ -776,6 +777,7 @@ def test_webhook_logs_exactly_one_error_line_when_a_handler_raises(monkeypatch):
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
 
     def boom(conn, msg):
         raise RuntimeError("handler down")
@@ -888,6 +890,7 @@ def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     undone, texted = [], []
     monkeypatch.setattr(app_module, "handle_undo", lambda conn, msg: undone.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -922,6 +925,7 @@ def test_webhook_routes_invite_to_handle_invite_and_never_meters_it(monkeypatch)
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     invited, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_invite", lambda conn, msg: invited.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -956,6 +960,7 @@ def test_webhook_routes_household_to_handle_household_and_never_meters_it(monkey
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     viewed, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_household", lambda conn, msg: viewed.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -985,6 +990,7 @@ def test_webhook_routes_remove_to_handle_remove_and_never_meters_it(monkeypatch)
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     removed, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_remove", lambda conn, msg: removed.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -1014,6 +1020,7 @@ def test_webhook_routes_transfer_to_handle_transfer_and_never_meters_it(monkeypa
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     transferred, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_transfer", lambda conn, msg: transferred.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -1044,6 +1051,7 @@ def test_webhook_routes_account_to_handle_account_and_never_meters_it(monkeypatc
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     accounted, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_account", lambda conn, msg: accounted.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -1075,6 +1083,7 @@ def test_webhook_routes_recurring_to_handle_recurring_and_never_meters_it(monkey
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     recurred, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_recurring", lambda conn, msg: recurred.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -1105,6 +1114,7 @@ def test_webhook_routes_refund_to_handle_refund_and_never_meters_it(monkeypatch)
     monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(app_module, "pending_awaiting_reconcile", lambda conn, uid: None)
     refunded, texted, claims = [], [], []
     monkeypatch.setattr(app_module, "handle_refund", lambda conn, msg: refunded.append(msg))
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
@@ -1619,6 +1629,42 @@ def test_webhook_routes_an_awaited_amount_reply_and_never_meters_it(monkeypatch)
     client.post("/webhook", json=body, headers=AUTH)
 
     assert len(replied) == 1 and replied[0][1] == 909
+    assert texted == []  # not fed to the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
+def test_webhook_routes_an_awaited_reconcile_reply_and_never_meters_it(monkeypatch):
+    """A user with an outstanding reconcile nudge gets the next reply routed to
+    `handle_reconcile_reply`, not `handle_text` or `handle_amount_reply` — and
+    it must never be metered (no LLM call, same shape as an amount reply)."""
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    monkeypatch.setattr(
+        app_module, "pending_awaiting_reconcile",
+        lambda conn, uid: {"telegram_message_id": 909, "account_id": 7},
+    )
+    replied, amount_replied, texted, claims = [], [], [], []
+    monkeypatch.setattr(
+        app_module, "handle_reconcile_reply",
+        lambda conn, msg, mid, acct: replied.append((msg, mid, acct)),
+    )
+    monkeypatch.setattr(
+        app_module, "handle_amount_reply", lambda conn, msg, mid: amount_replied.append((msg, mid))
+    )
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 401, "message": {"message_id": 1, "chat": {"id": 42}, "text": "42300"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(replied) == 1 and replied[0][1:] == (909, 7)
+    assert amount_replied == []  # not read as a "Change amount" reply
     assert texted == []  # not fed to the parser
     assert claims == [None]  # unmetered — never counts against the daily cap
 

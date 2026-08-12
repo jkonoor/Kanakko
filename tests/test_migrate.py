@@ -1025,3 +1025,47 @@ def test_due_rules_today_skips_a_rule_whose_account_was_later_soft_deleted(conn)
 
     assert due_rules_today(conn, 7) == []
     conn.rollback()
+
+
+def test_pending_transactions_row_is_a_parsed_transaction_xor_a_reconcile_ask(conn):
+    """019's CHECK: a pending row is one kind of thing, never both, never neither.
+
+    `parsed` became nullable so a reconcile ask (no `Transaction` at all) can live
+    on the same table `awaiting_amount` (017) already used for "Change amount" —
+    but that only stays sound if the two kinds of row can never blur. Dropping the
+    CHECK would let a row carry both fields, or neither, and every reader that
+    keys on one column being set (`pending_awaiting_reconcile`, `confirm_pending`)
+    would silently read the wrong kind of row.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9900) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        acc = default_account_of(conn, hh)
+
+        # Neither `parsed` nor `awaiting_reconcile_account_id` set.
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            cur.execute(
+                "INSERT INTO pending_transactions (user_id, telegram_message_id)"
+                " VALUES (%s, 1)",
+                (uid,),
+            )
+
+        # Both set.
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            cur.execute(
+                "INSERT INTO pending_transactions"
+                " (user_id, telegram_message_id, parsed, awaiting_reconcile_account_id)"
+                " VALUES (%s, 2, '{}', %s)",
+                (uid, acc),
+            )
+
+        # Exactly one of the two — a reconcile ask — is accepted.
+        cur.execute(
+            "INSERT INTO pending_transactions"
+            " (user_id, telegram_message_id, awaiting_reconcile_account_id)"
+            " VALUES (%s, 3, %s)",
+            (uid, acc),
+        )
+    conn.rollback()

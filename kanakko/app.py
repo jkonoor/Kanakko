@@ -40,7 +40,13 @@ from kanakko.confirm_flow import (
     handle_change_amount_request,
     handle_confirm,
 )
-from kanakko.db import claim_update, connect, get_or_create_user, pending_awaiting_amount
+from kanakko.db import (
+    claim_update,
+    connect,
+    get_or_create_user,
+    pending_awaiting_amount,
+    pending_awaiting_reconcile,
+)
 from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
@@ -58,6 +64,7 @@ from kanakko.handlers import (
     handle_text,
     handle_undo,
 )
+from kanakko.reconcile_flow import handle_reconcile_reply
 from kanakko.tg import send_message
 from kanakko.webapp import SHELL_HTML
 from kanakko.webapp.recurring import router as webapp_recurring_router
@@ -171,6 +178,15 @@ async def webhook(request: Request) -> dict[str, bool]:
         awaiting_message_id = (
             pending_awaiting_amount(conn, user_id) if isinstance(action, TextMessage) else None
         )
+        # §18: the weekly reconcile nudge marks itself awaiting a reply the same
+        # way — checked only when no amount-change reply is already claiming this
+        # message, since the two "next text message is a reply" states cannot both
+        # be answered by the one message that arrives.
+        awaiting_reconcile = (
+            pending_awaiting_reconcile(conn, user_id)
+            if isinstance(action, TextMessage) and awaiting_message_id is None
+            else None
+        )
         # §16 cost control: only the text-parse path is an LLM call (§2), so a
         # runaway user is an unbounded bill on the owner's OpenRouter credits.
         # /undo and the Confirm/Cancel/category taps cost nothing — they are never
@@ -180,18 +196,23 @@ async def webhook(request: Request) -> dict[str, bool]:
         # counts exactly the messages that spend credits (§16), not the free taps.
         # An amount reply is the same kind of free tap — no LLM call — so it is
         # excluded here too.
-        is_parse = isinstance(action, TextMessage) and awaiting_message_id is None and not (
-            _is_undo(action.text)
-            or _is_help(action.text)
-            or _is_greeting(action.text)
-            or _is_invite(action.text)
-            or _is_invite_signup(action.text)
-            or _is_household(action.text)
-            or _is_remove(action.text)
-            or _is_transfer(action.text)
-            or _is_account(action.text)
-            or _is_recurring(action.text)
-            or _is_refund(action.text)
+        is_parse = (
+            isinstance(action, TextMessage)
+            and awaiting_message_id is None
+            and awaiting_reconcile is None
+            and not (
+                _is_undo(action.text)
+                or _is_help(action.text)
+                or _is_greeting(action.text)
+                or _is_invite(action.text)
+                or _is_invite_signup(action.text)
+                or _is_household(action.text)
+                or _is_remove(action.text)
+                or _is_transfer(action.text)
+                or _is_account(action.text)
+                or _is_recurring(action.text)
+                or _is_refund(action.text)
+            )
         )
         if is_parse and not within_daily_cap(conn, user_id):
             send_message(action.chat_id, CAP_REACHED)
@@ -207,6 +228,12 @@ async def webhook(request: Request) -> dict[str, bool]:
             if isinstance(action, TextMessage):
                 if awaiting_message_id is not None:
                     handle_amount_reply(conn, action, awaiting_message_id)
+                elif awaiting_reconcile is not None:
+                    handle_reconcile_reply(
+                        conn, action,
+                        awaiting_reconcile["telegram_message_id"],
+                        awaiting_reconcile["account_id"],
+                    )
                 elif _is_undo(action.text):
                     handle_undo(conn, action)
                 elif _is_help(action.text) or _is_greeting(action.text):

@@ -21,3 +21,6 @@
 0 12 * * *  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.noon    > /proc/1/fd/1 2>&1
 0 21 * * *  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.evening > /proc/1/fd/1 2>&1
 0 9 1 * *   root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.monthly > /proc/1/fd/1 2>&1
+# reconcile is weekly, not daily (§18) — Sunday 10:00 IST is a judgment call,
+# same as recurring's 08:00: §12/§18 name no time.
+0 10 * * 0  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.reconcile > /proc/1/fd/1 2>&1

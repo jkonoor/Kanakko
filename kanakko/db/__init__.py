@@ -45,7 +45,13 @@ from kanakko.db.pending import (
     set_pending_category,
     undo_last,
 )
-from kanakko.db.reconcile import create_adjustment
+from kanakko.db.reconcile import (
+    accounts_for_reconcile,
+    clear_reconcile_ask,
+    create_adjustment,
+    create_reconcile_ask,
+    pending_awaiting_reconcile,
+)
 from kanakko.db.recurring import (
     create_recurring_rule,
     delete_recurring_rule,
@@ -93,6 +99,10 @@ __all__ = [
     "create_refund",
     "refund_candidates",
     "create_adjustment",
+    "accounts_for_reconcile",
+    "create_reconcile_ask",
+    "pending_awaiting_reconcile",
+    "clear_reconcile_ask",
     "create_recurring_rule",
     "list_recurring_rules",
     "set_recurring_rule_active",

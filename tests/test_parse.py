@@ -75,6 +75,41 @@ def test_amount_is_a_string_not_a_number():
     assert parse_schema()["properties"]["amount"]["type"] == "string"
 
 
+def test_account_enum_is_absent_without_accounts():
+    # §18: no accounts (or none passed) must leave the schema exactly as it was
+    # before accounts existed — same prompt cost, same behaviour, for a caller
+    # (or a user with no household yet) that has nothing to offer.
+    assert "account" not in parse_schema()["properties"]
+    assert "account" not in parse_schema(accounts=[])["properties"]
+    assert "account" not in parse_schema()["required"]
+
+
+def test_account_enum_is_built_per_request_from_the_given_accounts():
+    # §18's departure from §11: the account list is per household, assembled at
+    # request time — never a module-level literal like categories.py.
+    schema = parse_schema(accounts=["Bank", "Card"])
+    account = schema["properties"]["account"]
+    assert {"type": "string", "enum": ["Bank", "Card"]} in account["anyOf"]
+    assert {"type": "null"} in account["anyOf"]  # §18: null → the default account
+    assert "account" in schema["required"]  # strict mode keeps every key required
+
+
+def test_build_request_threads_accounts_into_the_schema():
+    body = build_request("swiped 500 on card", accounts=["Bank", "Card"])
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["account"]["anyOf"][0]["enum"] == ["Bank", "Card"]
+
+
+def test_a_household_with_one_account_behaves_like_no_accounts_at_all():
+    # The check the task names explicitly: a single-account household must not
+    # change the prompt's shape from today's (pre-accounts) behaviour beyond the
+    # one extra enum value — same properties, same required keys otherwise.
+    bare = parse_schema()
+    one = parse_schema(accounts=["Bank"])
+    assert one["properties"].keys() - bare["properties"].keys() == {"account"}
+    assert one["required"] == bare["required"] + ["account"]
+
+
 def test_model_default_survives_empty_env(monkeypatch):
     # Compose sets OPENROUTER_MODEL="" when the operator leaves it unset, so a
     # naive get("OPENROUTER_MODEL", default) would send "". §2 default must win.
@@ -130,7 +165,7 @@ def _feed(monkeypatch, *responses):
     recording each invocation so the retry count can be asserted."""
     calls = []
 
-    def fake_call(message):
+    def fake_call(message, accounts=None):
         calls.append(message)
         r = responses[len(calls) - 1]
         if isinstance(r, Exception):
@@ -196,6 +231,41 @@ def test_non_json_content_is_retried(monkeypatch):
     txn = parse_message("x")
     assert txn.category == "Food"
     assert len(calls) == 2
+
+
+def test_account_outside_the_offered_set_is_refused_not_retried(monkeypatch):
+    # §18: the model must not invent an account any more than a category (§11).
+    # The closed set is per request, so this is checked via validation context —
+    # unlike category, there is no module-level constant to fall back on.
+    bad = {**_GOOD, "account": "Nonexistent"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2  # exactly one retry, same as any other schema failure
+
+
+def test_account_within_the_offered_set_validates(monkeypatch):
+    calls = _feed(monkeypatch, {**_GOOD, "account": "Card"})
+    txn = parse_message("swiped 500 on card", accounts=["Bank", "Card"])
+    assert txn.account == "Card"
+    assert len(calls) == 1
+
+
+def test_null_account_validates_without_retry(monkeypatch):
+    # §18: null means "the default account" — a valid answer, not a failure.
+    calls = _feed(monkeypatch, {**_GOOD, "account": None})
+    txn = parse_message("paid 500", accounts=["Bank", "Card"])
+    assert txn.account is None
+    assert len(calls) == 1
+
+
+def test_an_account_name_is_not_checked_when_no_accounts_were_offered(monkeypatch):
+    # Callers that never pass `accounts` (today's tests, or a user with no
+    # household yet) get no validation surface — nothing to check against.
+    calls = _feed(monkeypatch, {**_GOOD, "account": "Anything"})
+    txn = parse_message("x")
+    assert txn.account == "Anything"
+    assert len(calls) == 1
 
 
 def test_http_error_is_not_retried(monkeypatch):

@@ -188,7 +188,7 @@ def test_handle_text_keys_the_pending_row_on_the_sent_card(conn, monkeypatch):
             "note": "spent 500 on food",
         }
     )
-    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+    monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: txn)
     sent = {}
 
     def fake_send(chat_id, text, reply_markup=None):
@@ -236,7 +236,7 @@ def test_handle_text_resolves_the_user_by_from_id_not_chat_id(conn, monkeypatch)
             "note": "spent 500 on food",
         }
     )
-    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+    monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: txn)
     sent = {}
 
     def fake_send(chat_id, text, reply_markup=None):
@@ -277,7 +277,7 @@ def test_handle_text_rejects_an_unparseable_message_with_a_rephrase(conn, monkey
     """
     migrate(conn)
 
-    def raise_validation(text):
+    def raise_validation(text, accounts=None):
         # A real amount-less parse: parse_amount rejects the empty amount, which
         # surfaces as the ValidationError parse_message re-raises after its retry.
         Transaction.model_validate(
@@ -346,7 +346,7 @@ def test_handle_text_tells_the_user_when_a_4xx_parse_fails_permanently(conn, mon
     """
     migrate(conn)
     monkeypatch.setattr(
-        handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
+        handlers, "parse_message", lambda text, accounts=None: (_ for _ in ()).throw(_http_error(402))
     )
     sent = {}
 
@@ -382,7 +382,7 @@ def test_handle_text_lets_a_5xx_parse_failure_propagate(conn, monkeypatch):
     """
     migrate(conn)
     monkeypatch.setattr(
-        handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(503))
+        handlers, "parse_message", lambda text, accounts=None: (_ for _ in ()).throw(_http_error(503))
     )
     sent = []
     monkeypatch.setattr(handlers, "send_message", lambda *a, **k: sent.append(a))
@@ -408,7 +408,7 @@ def test_handle_text_logs_upstream_failure_at_warning_without_the_api_key(
     migrate(conn)
     body = "Insufficient credits. Add more at openrouter.ai/credits"
     monkeypatch.setattr(
-        handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402, body))
+        handlers, "parse_message", lambda text, accounts=None: (_ for _ in ()).throw(_http_error(402, body))
     )
     monkeypatch.setattr(
         handlers, "send_message", lambda *a, **k: {"result": {"message_id": 1}}
@@ -454,12 +454,12 @@ def test_handle_text_logs_the_parse_success_but_not_the_failure(conn, monkeypatc
     events = []
     eventlog.bind_sink(events.append)
     try:
-        monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+        monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: txn)
         app_module.handle_text(
             conn, TextMessage(chat_id=12345, message_id=1, text="spent 500", update_id=9)
         )
         monkeypatch.setattr(
-            handlers, "parse_message", lambda text: (_ for _ in ()).throw(_http_error(402))
+            handlers, "parse_message", lambda text, accounts=None: (_ for _ in ()).throw(_http_error(402))
         )
         app_module.handle_text(
             conn, TextMessage(chat_id=12345, message_id=2, text="spent 500", update_id=10)
@@ -497,7 +497,7 @@ def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypa
             "note": "spent 500 somewhere",
         }
     )
-    monkeypatch.setattr(handlers, "parse_message", lambda text: txn)
+    monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: txn)
     sent = {}
 
     def fake_send(chat_id, text, reply_markup=None):
@@ -525,6 +525,44 @@ def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypa
         card_message_id, parsed = cur.fetchone()
     assert card_message_id == 909  # keyed on the sent picker's id
     assert parsed["category"] is None  # stored null, for the category press to fill in
+    conn.rollback()
+
+
+def test_handle_text_threads_the_household_accounts_into_parse_message(conn, monkeypatch):
+    """§18: the parse schema's account enum is built per request from the sender's
+    own household, not asserted in name only — this checks `handle_text` actually
+    looks the accounts up and passes them through, not just that `list_accounts`
+    itself works (covered in `tests/test_accounts.py`).
+    """
+    migrate(conn)
+    user_id = get_or_create_user(conn, 12345)
+    household_of(conn, user_id)  # mints the default "Bank" account (§18)
+
+    txn = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "500.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-06",
+            "note": "spent 500 on food",
+        }
+    )
+    seen = {}
+
+    def fake_parse(text, accounts=None):
+        seen["accounts"] = accounts
+        return txn
+
+    monkeypatch.setattr(handlers, "parse_message", fake_parse)
+    monkeypatch.setattr(
+        handlers, "send_message",
+        lambda *a, **k: {"ok": True, "result": {"message_id": 909}},
+    )
+
+    app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="spent 500 on food")
+    )
+    assert seen["accounts"] == ["Bank"]  # the household's real account, not a literal
     conn.rollback()
 
 

@@ -96,6 +96,28 @@ def set_account_opening_balance(
     return {"account_id": account_id, "kind": kind, "name": name}
 
 
+def list_accounts(conn: psycopg.Connection, user_id: int) -> list[str]:
+    """Account names offered as the parse schema's `account` enum (§18).
+
+    Built per request from the accounts table, never a literal — the household's
+    accounts are the user's own nouns, and the model must not invent one, the
+    same rule §11 applies to categories. `external` is structural (opening
+    balances, adjustments), never something a natural-language message names, so
+    it is excluded. Household-scoped like `account_balances`; a user with no
+    household yet (open-mode signup before `/start`) yields an empty list, which
+    is what keeps `parse_schema` unchanged for that edge case.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT name FROM accounts"
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            "   AND kind <> 'external' AND deleted_at IS NULL"
+            " ORDER BY is_default DESC, account_id",
+            (user_id,),
+        )
+        return [name for (name,) in cur.fetchall()]
+
+
 def account_balances(conn: psycopg.Connection, user_id: int) -> list[dict]:
     """Derived balance of every live account in `user_id`'s household (§6, §16, §18).
 

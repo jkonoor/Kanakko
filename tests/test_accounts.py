@@ -14,7 +14,12 @@ from decimal import Decimal
 from conftest import household_of
 
 from kanakko.categories import EXPENSE_CATEGORIES, INCOME_CATEGORIES
-from kanakko.db import account_balances, create_household_of_one, set_account_opening_balance
+from kanakko.db import (
+    account_balances,
+    create_household_of_one,
+    list_accounts,
+    set_account_opening_balance,
+)
 from kanakko.migrate import migrate
 from kanakko.money import parse_amount
 
@@ -175,4 +180,37 @@ def test_set_account_opening_balance_negates_credit_and_updates_on_a_repeat(conn
     balances = {a["account_id"]: a for a in account_balances(conn, uid)}
     assert balances[card["account_id"]]["balance"] == Decimal("4500.00")
     assert len([a for a in balances.values() if a["kind"] == "credit"]) == 1
+    conn.rollback()
+
+
+def test_list_accounts_excludes_external_and_orders_default_first(conn):
+    """`list_accounts` feeds the parse schema's `account` enum (§18).
+
+    `external` is structural bookkeeping, never something a message names, so it
+    must not appear alongside the real accounts a household onboarded. Dropping
+    the `kind <> 'external'` filter would offer it to the model as a valid swipe
+    target, which reddens the membership assert below.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7401) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+    set_account_opening_balance(conn, uid, "locked", parse_amount("20000"))
+
+    names = list_accounts(conn, uid)
+    assert names[0] == "Bank"  # the default account, ordered first
+    assert set(names) == {"Bank", "Savings"}  # no "External"
+    conn.rollback()
+
+
+def test_list_accounts_is_empty_with_no_household(conn):
+    """A user with no household yet (open-mode signup before `/start`) offers no
+    accounts, which is what keeps `parse_schema` unchanged for that edge case
+    rather than crashing on a missing household."""
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7402) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    assert list_accounts(conn, uid) == []
     conn.rollback()

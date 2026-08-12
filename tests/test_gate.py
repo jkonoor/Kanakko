@@ -67,7 +67,7 @@ def test_unknown_user_in_invite_mode_is_refused_and_stores_nothing(conn, monkeyp
     monkeypatch.setattr(app_module, "connect", _reuse_conn(conn))
 
     parse_calls = []
-    monkeypatch.setattr(handlers, "parse_message", lambda text: parse_calls.append(text))
+    monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: parse_calls.append(text))
     sent = []
     monkeypatch.setattr(app_module, "send_message", lambda chat_id, text: sent.append((chat_id, text)))
 

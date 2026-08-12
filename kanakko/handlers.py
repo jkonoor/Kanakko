@@ -34,6 +34,7 @@ from kanakko.db import (
     create_signup_invite,
     get_or_create_user,
     household_roster,
+    list_accounts,
     remove_member,
     save_pending,
     set_account_opening_balance,
@@ -312,16 +313,19 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.from_id)
+    # §18: the parse schema's account enum, built per request from the caller's
+    # own household — never a literal, the same rule §11 applies to categories.
+    accounts = list_accounts(conn, user_id)
     # Trace mode (§17): the raw text, the prompt built from it, and the outcome —
     # written to a per-update folder so a hard parse bug is diagnosable. On by
     # default, a no-op when disabled or unconfigured, and it never raises.
     tr = open_trace(msg.update_id)
     tr.write("input", {"text": msg.text, "user_id": user_id,
                        "update_id": msg.update_id, "source": msg.source})
-    tr.write("request", build_request(msg.text))
+    tr.write("request", build_request(msg.text, accounts=accounts))
     parse_start = time.perf_counter()
     try:
-        txn = parse_message(msg.text)
+        txn = parse_message(msg.text, accounts)
     except ValidationError as exc:
         tr.write("parse", {"error": str(exc)}, outcome="invalid")
         send_message(msg.chat_id, REPHRASE_PROMPT)

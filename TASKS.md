@@ -814,11 +814,31 @@ per task:
       cover the transfer row (account names shown, no dropdown, no sign/tint) —
       verified red against the pre-fix rendering, green restored. `uv run pytest`
       → 323 passed.
-- [ ] Make the parse schema's account enum per-request: `build_request` takes the
+- [x] Make the parse schema's account enum per-request: `build_request` takes the
       household's accounts and emits them as the `account` enum. §18 says this
       departs from §11 deliberately — the list still comes from the accounts
       table and never from a literal. A household with one account must produce
       the same prompt cost and the same behaviour as today.
+      Done: `db.list_accounts(conn, user_id)` (`kanakko/db/accounts.py`) —
+      household-scoped account names, `external` excluded (structural, never a
+      natural-language target), default first; empty for a user with no
+      household yet, which is what keeps the schema unchanged for that edge
+      case. `parse_schema(accounts=None)` adds a nullable `account` `anyOf`
+      enum (§18: null → the default account, same nullable pattern as
+      `category`) only when `accounts` is truthy — omitted or empty leaves the
+      schema exactly as it was, verified by
+      `test_a_household_with_one_account_behaves_like_no_accounts_at_all` and
+      `test_account_enum_is_absent_without_accounts`. `build_request`/`call`
+      thread `accounts` straight through. `Transaction` gains `account: str |
+      None = None`; since the closed set is per household rather than a module
+      constant, it is checked via Pydantic validation context
+      (`parse_message(message, accounts)` passes `context={"accounts":
+      accounts}`) instead of a class-level set like `category`'s. `handlers.
+      handle_text` calls `list_accounts` and threads the result into both the
+      trace's `build_request` call and `parse_message`. Four guards verified
+      red-without-fix, green-with-fix: the `external` exclusion, the
+      out-of-set account validator, and the `handle_text` wiring. `uv run
+      pytest` → 334 passed (11 new).
 - [ ] Show the account on the confirm card with one tap to change it — the §3/§5
       pattern, never a question. **The daily path must not gain a tap:** "spent
       500 on tea" with one account still confirms in one tap, and that is the

@@ -4,7 +4,11 @@ One LLM call per inbound message. The model returns a structured transaction via
 `response_format: {type: "json_schema", ...}`, and `require_parameters: true` in
 the provider preferences forces OpenRouter to route only to providers that honour
 the schema parameters. The schema's `category` enum is generated from
-`categories.py`, so the model can never invent a category.
+`categories.py`, so the model can never invent a category. The `account` enum
+(§18) is the one departure from that pattern — it is per household, so it is
+built per request from the caller's own accounts rather than a module-level
+constant, and validated the same way through Pydantic context instead of a
+class-level set.
 
 `amount` is a **string** in the schema, not a number: JSON numbers decode to
 `float` and float loses paise (DECISIONS §9). Keeping it a string means
@@ -24,7 +28,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
 
 from kanakko.categories import ALL_CATEGORIES, schema_enum
 from kanakko.money import parse_amount
@@ -52,9 +56,16 @@ _SYSTEM_PROMPT = (
 )
 
 
-def parse_schema() -> dict:
-    """The JSON schema handed to the model for one transaction (§2, §3)."""
-    return {
+def parse_schema(accounts: list[str] | None = None) -> dict:
+    """The JSON schema handed to the model for one transaction (§2, §3).
+
+    `accounts` is the caller's household's account names, built per request from
+    the accounts table (§18) — never a literal, the same rule §11 applies to
+    categories. Omitted (or a household with nothing to offer, e.g. a user with
+    no household yet) leaves the schema exactly as it was before accounts
+    existed: no `account` property, no behaviour change, no added prompt cost.
+    """
+    schema = {
         "type": "object",
         "properties": {
             "type": {"type": "string", "enum": ["expense", "income"]},
@@ -84,6 +95,14 @@ def parse_schema() -> dict:
         "required": ["type", "amount", "category", "date", "note"],
         "additionalProperties": False,
     }
+    if accounts:
+        # §18: nullable like category — null means "the default account", so the
+        # model is never forced to guess when the message names no account.
+        schema["properties"]["account"] = {
+            "anyOf": [{"type": "string", "enum": list(accounts)}, {"type": "null"}]
+        }
+        schema["required"].append("account")
+    return schema
 
 
 def today() -> str:
@@ -102,13 +121,17 @@ def resolve_model(model: str | None = None) -> str:
 
 
 def build_request(
-    message: str, model: str | None = None, today_str: str | None = None
+    message: str,
+    model: str | None = None,
+    today_str: str | None = None,
+    accounts: list[str] | None = None,
 ) -> dict:
     """The OpenRouter request body for parsing `message`.
 
     §10: today's `Asia/Kolkata` date is injected into the system prompt so the
     model can resolve "yesterday"/"last Friday" instead of guessing. `today_str`
     is injectable for deterministic tests; production reads the wall clock.
+    `accounts` is threaded straight into `parse_schema` (§18).
     """
     system = (
         f"{_SYSTEM_PROMPT} Today's date is {today_str or today()} "
@@ -126,7 +149,7 @@ def build_request(
             "json_schema": {
                 "name": "transaction",
                 "strict": True,
-                "schema": parse_schema(),
+                "schema": parse_schema(accounts),
             },
         },
         "provider": {"require_parameters": True},
@@ -151,6 +174,11 @@ class Transaction(BaseModel):
     category: str | None  # §3: null when the model cannot tell → show buttons
     date: date
     note: str
+    # §18: null means "the default account" — nullable for the same reason as
+    # category. No closed set at class level, unlike category: the account list
+    # is per household, not a module-level constant, so it can only be checked
+    # against the caller's own accounts, passed in as validation context.
+    account: str | None = None
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -172,12 +200,26 @@ class Transaction(BaseModel):
             raise ValueError(f"unknown category: {value!r}")
         return value
 
+    @field_validator("account")
+    @classmethod
+    def _account_is_known(cls, value: str | None, info: ValidationInfo) -> str | None:
+        # §18: the model must not invent an account any more than a category
+        # (§11) — but the closed set is per household, so it travels as
+        # validation context rather than a class-level constant. No context (or
+        # no accounts in it) skips the check: today's tests and callers that
+        # never pass `accounts` keep working unchanged.
+        accounts = (info.context or {}).get("accounts") if info.context else None
+        if accounts and value is not None and value not in accounts:
+            raise ValueError(f"unknown account: {value!r}")
+        return value
 
-def call(message: str) -> dict:
+
+def call(message: str, accounts: list[str] | None = None) -> dict:
     """Send `message` to OpenRouter and return the model's parsed JSON.
 
     Raises `RuntimeError` if `OPENROUTER_API_KEY` is unset. Network and HTTP
-    errors propagate as `httpx` exceptions.
+    errors propagate as `httpx` exceptions. `accounts` is threaded straight into
+    `build_request` (§18).
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -186,7 +228,7 @@ def call(message: str) -> dict:
     response = httpx.post(
         OPENROUTER_URL,
         headers={"Authorization": f"Bearer {api_key}"},
-        json=build_request(message),
+        json=build_request(message, accounts=accounts),
         timeout=30.0,
     )
     response.raise_for_status()
@@ -194,16 +236,22 @@ def call(message: str) -> dict:
     return json.loads(content)
 
 
-def parse_message(message: str) -> Transaction:
+def parse_message(message: str, accounts: list[str] | None = None) -> Transaction:
     """Parse `message` into a validated `Transaction`, retrying once (§2).
 
     OpenRouter does not guarantee schema compliance, so the model's JSON is
     validated with Pydantic. On a schema failure — a `ValidationError` or
     non-JSON content — the call is retried exactly once; a second failure
     propagates. Network/HTTP errors and a missing key are not schema failures and
-    are not retried.
+    are not retried. `accounts` (§18) is the caller's household's account names —
+    threaded into the request schema and passed to Pydantic as context so a
+    returned account name is checked against that same closed set.
     """
     try:
-        return Transaction.model_validate(call(message))
+        return Transaction.model_validate(
+            call(message, accounts), context={"accounts": accounts}
+        )
     except (ValidationError, json.JSONDecodeError):
-        return Transaction.model_validate(call(message))
+        return Transaction.model_validate(
+            call(message, accounts), context={"accounts": accounts}
+        )

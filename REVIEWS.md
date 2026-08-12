@@ -12,6 +12,89 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `aaaeb21` — multi-word locked names, opening-balance visibility, `/account credit` usage hint (Phase 10)
+
+**Scope:** resolves the three findings against `285b835` — F1 (multi-word
+`locked` names unreachable via `/account <name>`), F2 (a freshly-onboarded pool
+reports "put in ₹0.00"), F3 (`/account credit` with no amount misread as a
+query). Touches `db.locked_account_totals` (now also returns `opening_balance`),
+`handle_account`'s routing, a new `_looks_like_amount` heuristic, and the query
+message.
+
+**Status: ⚠️ CHANGES REQUESTED** — F1/F2/F3 as originally scoped are correctly
+fixed and each new guard fails for the right reason. But F1's fix does not close
+the whole class it named: a plausible subclass of auto-created `locked` names
+still misroutes to the very "unknown kind" message F1 set out to eliminate
+(**F4**).
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **371 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the diff's +4 tests on top of 367.
+- `uv run pytest tests/test_account_command.py -q` → **13 passed**.
+- **Verified all four new/changed guards go red without the fix.** Reverted only
+  the source (`git checkout HEAD~1 -- kanakko/handlers.py kanakko/db/accounts.py`)
+  while keeping the new tests, then reran the file →
+  **4 failed, 9 passed**: `test_bare_name_reports_...` (F2, no "started with"
+  line), `test_multi_word_locked_account_name_is_reachable_as_a_query` (F1),
+  `test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind` (F1 heuristic),
+  `test_credit_or_locked_with_no_amount_is_a_usage_hint_not_a_query` (F3). The
+  F3 failure showed the old code answering `/account credit` with
+  `"I don't have a locked account named \"credit\"..."` instead of the usage
+  hint — the exact regression F3 named. Restored source afterward.
+- Read `docs/DECISIONS.md` §18. Confirmed F2 is spec-safe: `contributed`
+  (sum of `transfer` rows landing on the account via `to_account_id`) and
+  `paid_out` are unchanged, and `opening_balance` is stored in its own column by
+  `set_account_opening_balance` (not as a `transfer` row), so surfacing it as a
+  separate "started with" fact neither double-counts against `contributed` nor
+  folds a position into an event. This is the exact option the `285b835` review
+  offered. For a `locked` account `signed = amount` (no negation), so
+  "started with ₹X" reads with the right sign. `if match["opening_balance"]`
+  suppresses the clause on a `Decimal('0.00')` opening balance (falsy) — correct.
+- Read `locked_account_totals` (`accounts.py:171`): still `NUMERIC → Decimal`,
+  reads `active_transactions` (§6), household-scoped via `household_members`
+  (§16), `kind = 'locked'`, `deleted_at IS NULL`. The `opening_balance` addition
+  changes nothing about the two gross sums.
+- **Probed the routing directly** (`/tmp/probe_route.py`, throwaway) with the
+  live `_looks_like_amount`: `'Kids Fund' → query`, `'Goa Trip 2026' → query`,
+  `'cash 500' → ACCOUNT_BAD_KIND`, **but `'Goa 2026' → ACCOUNT_BAD_KIND` and
+  `'Car 2025' → ACCOUNT_BAD_KIND`** — see F4.
+
+### Findings
+
+**F4 — medium — F1's heuristic leaves year/amount-suffixed `locked` names
+unreachable, misrouted to `ACCOUNT_BAD_KIND`.** `handlers.py:992-998`: when the
+first word isn't `credit`/`locked`, a two-word arg whose *second* word parses as
+an amount is treated as a botched onboarding call and refused with
+`ACCOUNT_BAD_KIND`, never reaching the query. `_looks_like_amount('2026')` is
+`True` (confirmed), so a `locked` pool auto-created (`new_locked_account`, free
+text — see `d2c2e80`) with a common name like **"Goa 2026", "Car 2025", "Trip
+2024"** cannot be queried: `/account Goa 2026` →
+`"I only set up credit … and locked … this way"`, the *exact* symptom F1 was
+raised to remove, for a narrower but very plausible class of names. Three-word
+names ("Goa Trip 2026") are unaffected because the tail no longer parses as an
+amount. The guard `_looks_like_amount` stays green in the test suite while this
+real behaviour breaks — a guard that protects a surface case ("cash 500") at the
+cost of the behaviour it was meant to preserve.
+*Fix (strictly better, and drops the heuristic's ambiguity):* attempt the query
+first — if the whole `arg` matches a live `locked` account, return it; only when
+there is **no** match do you fall to `ACCOUNT_BAD_KIND` for the
+`len(parts) == 2 and _looks_like_amount(parts[1])` case, else `ACCOUNT_NOT_LOCKED`.
+Then "Goa 2026" (exists) resolves as a query and "cash 500" (no such account)
+stays a bad-kind refusal; the only residual ambiguity is the vanishing case of
+someone onboarding "cash 500" who also happens to own a `locked` account
+literally named "cash 500".
+
+### Not findings (checked, fine)
+
+- F2's "started with" line: sign, zero-suppression, and no double-count against
+  `contributed` all verified above.
+- Case-insensitive match on the full `arg` (`t["name"].lower() == name.lower()`)
+  is preserved and correct for the multi-word path.
+- No `float` introduced; opening balance flows `NUMERIC → Decimal → format_amount`.
+
+---
+
 ## 2026-08-12 — `285b835` — per-account contribution/payout totals for locked accounts (Phase 10)
 
 **Resolved 2026-08-12:** F1 and F2 fixed, F3 fixed as a side effect of F1's own

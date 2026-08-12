@@ -96,6 +96,22 @@ def test_locked_amount_is_stored_as_a_positive_asset(conn, monkeypatch):
     conn.rollback()
 
 
+def test_no_household_is_refused_not_a_crash(conn, monkeypatch):
+    """Open signup mode admits a user before `/start` mints a household
+    (`create_household_of_one`), so their first message can be `/account
+    credit 5000` with no `household_members` row yet. Unpacking the INSERT's
+    `RETURNING` unconditionally raises `TypeError: cannot unpack non-iterable
+    NoneType object` — reddens without the `row is None` guard.
+    """
+    migrate(conn)
+    get_or_create_user(conn, USER_TG)  # no create_household_of_one
+    sent = _stub_send(monkeypatch)
+    result = handle_account(conn, _account("/account credit 5000"))
+    assert result is None
+    assert sent == [(USER_TG, handlers.ACCOUNT_NO_HOUSEHOLD)]
+    conn.rollback()
+
+
 def test_repeat_call_updates_the_same_account_not_a_duplicate(conn, monkeypatch):
     migrate(conn)
     user_id = _seed(conn)

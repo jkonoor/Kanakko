@@ -48,7 +48,7 @@ def create_default_accounts(
 
 def set_account_opening_balance(
     conn: psycopg.Connection, user_id: int, kind: str, amount: Decimal
-) -> dict:
+) -> dict | None:
     """Create or update the caller's household's `kind` account with `amount` (§18).
 
     The onboarding ask: `amount` is always what the user reports positively — "how
@@ -59,8 +59,11 @@ def set_account_opening_balance(
     duplicate, so a typo is correctable. `kind` is trusted — the caller
     (`handlers.handle_account`) has already restricted it to `credit`/`locked`,
     the two kinds this command may create; `spending` and `external` are structural
-    and never made this way. Returns `{account_id, kind, name}`. Does not commit —
-    the caller owns the transaction.
+    and never made this way. Returns `{account_id, kind, name}`, or `None` when
+    `user_id` has no household yet — open signup mode admits a user before
+    `/start` mints one (`create_household_of_one`), so a first message of
+    `/account credit 5000` must be a refusal, not a crash on an empty
+    `RETURNING`. Does not commit — the caller owns the transaction.
     """
     name = ACCOUNT_ONBOARDING_KINDS[kind]
     signed = -amount if kind == "credit" else amount
@@ -86,7 +89,10 @@ def set_account_opening_balance(
                 " RETURNING account_id",
                 (user_id, kind, name, signed, user_id),
             )
-            (account_id,) = cur.fetchone()
+            row = cur.fetchone()
+            if row is None:
+                return None
+            (account_id,) = row
     return {"account_id": account_id, "kind": kind, "name": name}
 
 

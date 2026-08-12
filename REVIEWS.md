@@ -24,8 +24,25 @@ each new transaction's `account_id` from the household default. Webhook routes
 `/account` to `handle_account` and excludes it from metering. WELCOME/HELP_TEXT
 updated. Adds `tests/test_account_command.py` (6) + accounts/db/webhook tests.
 
-**Status: ⚠️ CHANGES REQUESTED** — one reachable unhandled crash (open-mode
-edge). Money logic, sign convention, routing, and metering are correct.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+reachable unhandled crash (open-mode edge), fixed. Money logic, sign
+convention, routing, and metering are correct.
+
+> **RESOLVED.** `set_account_opening_balance` (`kanakko/db/accounts.py`) now
+> checks the INSERT's `RETURNING` row before unpacking it and returns `None`
+> when it's empty — the no-household case — instead of raising `TypeError:
+> cannot unpack non-iterable NoneType object`. `handle_account`
+> (`kanakko/handlers.py`) treats that `None` as a refusal: it sends
+> `ACCOUNT_NO_HOUSEHOLD` ("Send /start first — ...") and logs a `noop`, the
+> same pattern `handle_transfer`/`handle_remove` already use for their own
+> refusal branches, rather than letting the exception reach the webhook and
+> 500. Added `test_no_household_is_refused_not_a_crash`
+> (`tests/test_account_command.py`), which seeds a user with no
+> `create_household_of_one` call and sends `/account credit 5000`. Verified the
+> guard fails for the reason it exists: reverting the `row is None` check back
+> to the bare `(account_id,) = cur.fetchone()` reddens exactly that test
+> (`1 failed`); restoring it greens the full suite. `uv run pytest -q` →
+> **320 passed**.
 
 ### What I checked (commands and results)
 

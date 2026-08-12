@@ -877,6 +877,8 @@ ACCOUNT_BAD_KIND = (
 
 ACCOUNT_BAD_AMOUNT = "That doesn't look like an amount — try `/account credit 5000`."
 
+ACCOUNT_NO_HOUSEHOLD = "Send /start first — I need your household set up before I can add an account."
+
 
 def _is_account(text: str) -> bool:
     """True when `text` is the `/account` command — bare or `/account@bot`."""
@@ -897,7 +899,8 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     and an abandoned onboarding still leaves a working bot. Running it twice
     corrects a typo rather than minting a duplicate account. Does not commit —
     the caller owns the transaction. Returns the account row on success, or
-    `None` on a usage/validation refusal.
+    `None` on a usage/validation refusal — including a sender with no
+    household yet (open signup mode, before their first `/start`).
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.from_id)
@@ -925,6 +928,11 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
         return None
 
     account = set_account_opening_balance(conn, user_id, kind, amount)
+    if account is None:
+        send_message(msg.chat_id, ACCOUNT_NO_HOUSEHOLD)
+        log_event("account.set_up", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
     verb = "owe" if kind == "credit" else "have"
     send_message(
         msg.chat_id,

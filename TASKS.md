@@ -1122,12 +1122,55 @@ per task:
       path a null category already takes — so an old `Refund` row is editable
       to a real category in one tap if a member wants to reclassify it, but
       nothing forces that.
-- [ ] Recurring rules for auto-debits: amount, category, account, day of month,
-      active. **On the day the cron sends the ordinary confirm card** — Confirm /
-      Change amount / Skip — never a silent insert (§18: a chit instalment
-      changes monthly, so a fixed auto-entry is wrong nearly every time). Reuse
-      the §4 confirm path rather than building a second write path. Pause and
-      delete live in the dashboard, consistent with the edit task above.
+- [x] Recurring rules for auto-debits: amount, category, account, day of month,
+      active — schema and the household-scoped CRUD (split 1/2). **Split the
+      same way 014 split refunds**: the cron that finds a rule due today and
+      sends the ordinary confirm card (Confirm / Change amount / Skip, reusing
+      §4's machinery rather than a second write path) and the dashboard's
+      pause/delete controls are UX wiring on top of what this migration and
+      write path already make correct — a genuinely separate task, not a
+      deferrable stub, since it needs `jobs/` scheduling and the bot-facing
+      Confirm/Change-amount/Skip flow that would make this one commit two
+      unrelated things.
+      Done: migration `015_recurring_rules.sql` — `recurring_rules`
+      (household_id, account_id, category — no CHECK, `categories.py` is the
+      one place category strings are declared, CLAUDE.md — amount
+      `NUMERIC(12,2) CHECK (amount > 0)`, `day_of_month SMALLINT CHECK
+      (day_of_month BETWEEN 1 AND 31)`, active default true, created_by,
+      created_at), plus two indexes (the cron's future day-of-month lookup,
+      the dashboard's future household list). No `transactions` column yet —
+      nothing references a `rule_id`, so a rule can be hard-deleted with
+      nothing to orphan; the cron task decides how a written transaction ties
+      back to the rule that produced it.
+      `kanakko.db.recurring` is the write path: `create_recurring_rule`
+      (household-scoped account resolution — refuses a foreign household's
+      account, the structural `external` account, and a soft-deleted one, the
+      same `EXISTS` shape `edit_transaction_field` uses), `list_recurring_rules`
+      (household-scoped, both paused and active, joined to the account name),
+      `set_recurring_rule_active` (pause/resume) and `delete_recurring_rule`
+      (a real `DELETE`, not §6's soft delete — a rule is a standing
+      instruction, not a ledger row) — all household-scoped like
+      `accounts.py`/`refunds.py`, not creator-scoped, since §16's shared
+      ledger means any member may manage a rule another member set up. No
+      caller yet, same as `create_refund` when 014 landed — tests call the
+      module directly. Five guards verified red-without-fix, green-with-fix:
+      the day_of_month range CHECK, the amount CHECK, the foreign/external/
+      soft-deleted account refusal in `create_recurring_rule`, and the
+      household-scoping on `set_recurring_rule_active`. `uv run pytest` →
+      418 passed (3 new).
+- [ ] Recurring rules for auto-debits — the cron send and the dashboard's
+      pause/delete (split 2/2). On the rule's `day_of_month`, the cron sends
+      the ordinary confirm card ("SIP ₹5,000 today?") with Confirm / Change
+      amount / Skip — never a silent insert (§18: a chit instalment changes
+      every month, so a fixed auto-entry is wrong nearly every time). Reuse
+      the §4 confirm path (`kanakko.db.pending`/`kanakko.confirm`) rather than
+      building a second write path; decide how the resulting transaction ties
+      back to the `rule_id` it came from (a nullable column, a new migration).
+      Pause and delete surface in the dashboard, calling
+      `kanakko.db.recurring.set_recurring_rule_active`/`delete_recurring_rule`,
+      consistent with the edit task above (task 974). Creation's own surface
+      (a bot command in the `/account`/`/invite` shape, or a dashboard form)
+      is undecided and belongs to this task, not the schema split above.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

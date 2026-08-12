@@ -17,7 +17,16 @@ import pytest
 from conftest import default_account_of, household_of, join_household
 
 from kanakko.categories import EXPENSE_CATEGORIES, INCOME_CATEGORIES
-from kanakko.db import account_balances, create_refund, day_summary, month_summary
+from kanakko.db import (
+    account_balances,
+    create_recurring_rule,
+    create_refund,
+    day_summary,
+    delete_recurring_rule,
+    list_recurring_rules,
+    month_summary,
+    set_recurring_rule_active,
+)
 from kanakko.migrate import MIGRATIONS, migrate
 from kanakko.money import parse_amount
 
@@ -825,4 +834,130 @@ def test_refund_reduces_category_and_account_but_never_income(conn):
 
     balances = {row["account_id"]: row["balance"] for row in account_balances(conn, uid)}
     assert balances[acc] == Decimal("-700.00"), "refund did not return money to its account"
+    conn.rollback()
+
+
+def test_recurring_rule_account_must_belong_to_the_caller_household(conn):
+    """`create_recurring_rule` refuses an account outside the caller's household,
+    the structural `external` account, and a soft-deleted one (§18).
+
+    Mirrors `edit_transaction_field`'s account guard: an id that resolves to
+    nothing valid must not silently mint a rule against the wrong pool.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9810) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9820) RETURNING user_id")
+        (other,) = cur.fetchone()
+    hh = household_of(conn, uid)
+    hh_other = household_of(conn, other)
+    acc = default_account_of(conn, hh)
+
+    ok = create_recurring_rule(conn, uid, acc, EXPENSE_CATEGORIES[0], parse_amount("5000"), 5)
+    assert ok is not None
+    assert ok["day_of_month"] == 5
+    assert ok["active"] is True
+
+    other_acc = default_account_of(conn, hh_other)
+    assert create_recurring_rule(
+        conn, uid, other_acc, EXPENSE_CATEGORIES[0], parse_amount("100"), 1
+    ) is None, "an account from a foreign household must not resolve"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT account_id FROM accounts WHERE household_id = %s AND kind = 'external'", (hh,)
+        )
+        (external,) = cur.fetchone()
+    assert create_recurring_rule(
+        conn, uid, external, EXPENSE_CATEGORIES[0], parse_amount("100"), 1
+    ) is None, "the structural external account must not accept a rule"
+
+    with conn.cursor() as cur:
+        cur.execute("UPDATE accounts SET deleted_at = now() WHERE account_id = %s", (acc,))
+    assert create_recurring_rule(
+        conn, uid, acc, EXPENSE_CATEGORIES[0], parse_amount("100"), 1
+    ) is None, "a soft-deleted account must not accept a rule"
+    conn.rollback()
+
+
+def test_recurring_rules_are_scoped_and_can_be_paused_and_deleted(conn):
+    """List, pause/resume and delete are all household-scoped, not creator-scoped (§16, §18).
+
+    Any member may act on a rule set up by another — the same reach
+    `create_refund` has. `member` is a second user in `uid`'s own household,
+    acting on a rule `uid` created; `stranger` is in a different household
+    entirely and every operation must refuse them.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9830) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9840) RETURNING user_id")
+        (member,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9850) RETURNING user_id")
+        (stranger,) = cur.fetchone()
+    hh = household_of(conn, uid)
+    join_household(conn, hh, member)
+    household_of(conn, stranger)
+    acc = default_account_of(conn, hh)
+
+    rule = create_recurring_rule(conn, uid, acc, EXPENSE_CATEGORIES[0], parse_amount("5000"), 5)
+
+    rules = list_recurring_rules(conn, member)
+    assert [r["rule_id"] for r in rules] == [rule["rule_id"]]
+    assert rules[0]["active"] is True
+    assert rules[0]["account_name"] == "Bank"
+
+    assert list_recurring_rules(conn, stranger) == [], "a foreign household's rules must not leak in"
+
+    assert set_recurring_rule_active(conn, stranger, rule["rule_id"], False) is None
+    assert delete_recurring_rule(conn, stranger, rule["rule_id"]) is None
+
+    # A housemate — not the creator — can pause it.
+    paused = set_recurring_rule_active(conn, member, rule["rule_id"], False)
+    assert paused == {"rule_id": rule["rule_id"], "active": False}
+    assert list_recurring_rules(conn, uid)[0]["active"] is False
+
+    resumed = set_recurring_rule_active(conn, uid, rule["rule_id"], True)
+    assert resumed["active"] is True
+
+    deleted = delete_recurring_rule(conn, member, rule["rule_id"])
+    assert deleted == {"rule_id": rule["rule_id"]}
+    assert list_recurring_rules(conn, uid) == []
+    conn.rollback()
+
+
+def test_recurring_rule_amount_and_day_of_month_are_checked(conn):
+    """§18's fields round-trip through real CHECK constraints, not app-side trust.
+
+    `amount` reuses `transactions`' `> 0` rule (a recurring rule is always a
+    positive debit) and `day_of_month` is bounded to a real calendar day — an
+    unchecked column would accept "day 45" and defer the bug to whichever cron
+    later reads it.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9860) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    hh = household_of(conn, uid)
+    acc = default_account_of(conn, hh)
+
+    with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO recurring_rules"
+                " (household_id, account_id, category, amount, day_of_month, created_by)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                (hh, acc, EXPENSE_CATEGORIES[0], Decimal("-5"), 5, uid),
+            )
+
+    with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO recurring_rules"
+                " (household_id, account_id, category, amount, day_of_month, created_by)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                (hh, acc, EXPENSE_CATEGORIES[0], Decimal("500"), 32, uid),
+            )
     conn.rollback()

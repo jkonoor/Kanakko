@@ -42,6 +42,12 @@ from kanakko.db.pending import (
     set_pending_category,
     undo_last,
 )
+from kanakko.db.recurring import (
+    create_recurring_rule,
+    delete_recurring_rule,
+    list_recurring_rules,
+    set_recurring_rule_active,
+)
 from kanakko.db.refunds import create_refund, refund_candidates
 from kanakko.db.reminders import last_reminder_at, log_reminder, logged_since
 from kanakko.db.reports import (
@@ -81,6 +87,10 @@ __all__ = [
     "create_signup_invite",
     "create_refund",
     "refund_candidates",
+    "create_recurring_rule",
+    "list_recurring_rules",
+    "set_recurring_rule_active",
+    "delete_recurring_rule",
     "save_pending",
     "confirm_pending",
     "set_pending_category",

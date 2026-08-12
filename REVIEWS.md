@@ -12,6 +12,62 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `d14980a` split handlers.py: `/account` → `kanakko/commands/account.py` (Phase 10, slice 2/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slice 1/6. Moves `/account` — the `ACCOUNT_*`
+constants, `_is_account`, `_looks_like_amount`, `_find_locked_account`,
+`_handle_account_query`, and `handle_account` — out of `handlers.py` into a new
+`kanakko/commands/account.py`, rewires `app.py`'s imports, drops the now-stale
+`locked_account_totals`/`set_account_opening_balance` db imports from
+`handlers.py`, and retargets `tests/test_account_command.py`'s monkeypatch and
+`ACCOUNT_*` reads at the new module. `handle_account_choice` (confirm-card core)
+stays in `handlers.py`. No behaviour, money, timezone, or SQL path is touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the removed
+  block in `handlers.py` and the added body in `account.py` are the same
+  constants, predicates, query handler, and `handle_account` — identical logic,
+  including the query-lookup-before-bad-kind ordering that resolved F4 against
+  `aaaeb21`. The new file adds only its module docstring and imports.
+- **No dangling references.** `grep locked_account_totals|set_account_opening_balance`
+  over `handlers.py` → no matches, so dropping those two db imports is safe and
+  `handle_account_choice` (which stays) doesn't use them. `grep` for
+  `_is_account`/`handle_account` shows the only production callers are
+  `app.py:195/227/228`, both now importing from `kanakko.commands.account`.
+- **No import cycle.** `account.py` imports `TextMessage`/`_command_arg` from
+  `handlers.py`; `handlers.py` imports nothing from `commands.account`.
+  `uv run python -c "import kanakko.commands.account"` succeeds.
+- **`test_webhook.py:1047`'s `app_module.handle_account` patch still valid** —
+  `app.py` binds `handle_account` into its own namespace via the new import, so
+  the webhook-routing test patches the right name.
+- **The retargeted monkeypatch is meaningful, not cosmetic.** Verified the
+  binding mechanism: `kanakko.commands.account.send_message is
+  kanakko.handlers.send_message` are distinct module-level bindings — patching
+  `handlers.send_message` leaves `account.send_message` pointing at the real
+  `tg.send_message`, which raises `RuntimeError: TELEGRAM_BOT_TOKEN is not set`.
+  So the commit's red-without-fix claim (14 failures when patching the old
+  module) holds, and the test genuinely intercepts the real send path.
+
+### Commands run
+
+- `uv run pytest tests/test_account_command.py -q` → **14 passed**.
+- `uv run pytest -q` → **457 passed**, 1 unrelated Starlette deprecation
+  warning. Matches the commit message.
+- `uv run ruff check kanakko/commands/account.py kanakko/handlers.py kanakko/app.py`
+  → **All checks passed** (confirms the dropped db imports left nothing unused).
+- `uv run python -c "import kanakko.handlers as h, kanakko.commands.account as a; ..."`
+  → confirmed distinct `send_message` bindings.
+
+No findings. The money/spec decisions (`Decimal`/`NUMERIC`,
+`active_transactions`, `AT TIME ZONE`, category source) are not in scope for a
+mechanical move, and none were disturbed. `TASKS.md` box for slice 2/6 is
+correctly ticked.
+
+---
+
 ## 2026-08-13 — `74e6c1b` split handlers.py: design pass + `/transfer` → `kanakko/commands/` (Phase 10, slice 1/6)
 
 **Status: ✅ DONE**

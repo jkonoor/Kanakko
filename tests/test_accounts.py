@@ -22,6 +22,17 @@ from kanakko.money import parse_amount
 def _account(cur, hh, uid, *, kind, name, opening="0", is_default=False):
     # opening_balance is signed and may be negative (a credit account's debt) or
     # zero, both of which parse_amount refuses — so it takes a plain Decimal.
+    # `household_of` already mints a live default (`create_household_of_one`,
+    # §18), and the partial unique index allows only one — so a caller asking
+    # for the default renames/re-opens that one instead of inserting a second.
+    if is_default:
+        cur.execute(
+            "UPDATE accounts SET name = %s, opening_balance = %s"
+            " WHERE household_id = %s AND is_default AND deleted_at IS NULL"
+            " RETURNING account_id",
+            (name, Decimal(opening), hh),
+        )
+        return cur.fetchone()[0]
     cur.execute(
         "INSERT INTO accounts (household_id, owner, kind, name, opening_balance, is_default)"
         " VALUES (%s, %s, %s, %s, %s, %s) RETURNING account_id",
@@ -108,7 +119,9 @@ def test_balances_are_household_scoped(conn):
         )
 
     mine_names = {a["name"] for a in account_balances(conn, mine)}
-    assert mine_names == {"Mine"}
+    # `household_of` mints both structural accounts (§18) — Mine (renamed default)
+    # and the untouched `external` counterparty. Theirs's household must not leak in.
+    assert mine_names == {"Mine", "External"}
     assert account_balances(conn, mine)[0]["balance"] == Decimal("60.00")
 
 

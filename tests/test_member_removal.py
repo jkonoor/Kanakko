@@ -10,7 +10,7 @@ removed member into a fresh household of one so their bot keeps working.
 
 from decimal import Decimal
 
-from conftest import household_of
+from conftest import default_account_of, household_of
 
 from kanakko import handlers
 from kanakko.db import (
@@ -93,12 +93,13 @@ def _household_of(conn, user_id):
 
 
 def _insert_txn(conn, user_id, amount):
+    hh = household_of(conn, user_id)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, household_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, 'expense', NULL, NULL, '2026-08-08')",
-            (user_id, household_of(conn, user_id), amount),
+            " (user_id, household_id, amount, type, category, note, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, 'expense', NULL, NULL, '2026-08-08', %s)",
+            (user_id, hh, amount, default_account_of(conn, hh)),
         )
 
 

@@ -759,7 +759,7 @@ per task:
       `account_id` (verified red without the wiring); `/account`'s usage, bad-kind
       and bad-amount refusals; the webhook routes `/account` to `handle_account` and
       never meters it (verified red without the routing branch).
-- [ ] Enforce `account_id` NOT NULL — the write-wiring half split off from the
+- [x] Enforce `account_id` NOT NULL — the write-wiring half split off from the
       "Add `account_id` to `transactions`" task above, deferred like 007→008.
       Prereq (the task above): every household-creation path
       (`create_household_of_one`, member re-homing) mints a default account and
@@ -773,6 +773,23 @@ per task:
       type is transfer) or a transfer stamps its `from_account_id`. Decide and say
       which in the migration comment — an arbitrary pick made silently is a number
       that looks right and answers the wrong question.
+      Done: `migrations/012_transactions_account_not_null.sql` adds a CHECK
+      (`account_id IS NOT NULL OR type = 'transfer'`) rather than a blanket
+      `SET NOT NULL` — a transfer keeps `account_id` NULL and names its two ends via
+      `from_account_id`/`to_account_id` (011) instead. The prereq already held: both
+      household-creation paths route through `create_household_of_one`, which always
+      mints the default `spending` account, and `confirm_pending` was already
+      stamping every new row from it. The real work was the test fixtures: the
+      shared `household_of()` test helper (`tests/conftest.py`) predated Phase 10 and
+      hand-rolled a household with no accounts, so ~20 raw-SQL transaction-insert call
+      sites across 6 test files would have started failing the new CHECK. Fixed at
+      the root: `household_of()` now delegates to `create_household_of_one` (so every
+      test household gets its default account, same as production), and a new
+      `default_account_of()` test helper looks it up for the handful of raw inserts
+      that need to stamp `account_id` explicitly. `test_migrate.py` also gained one
+      test (`test_transactions_account_id_is_required_except_for_transfers`) —
+      verified red without the CHECK, green with it restored. `uv run pytest` →
+      321 passed.
 - [ ] Show transfers in the dashboard's recent list. `recent_transactions` returns
       every live row regardless of type, so a transfer will surface there the
       moment one can be written — and `_category_select` will render it an empty

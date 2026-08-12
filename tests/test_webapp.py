@@ -13,7 +13,7 @@ from decimal import Decimal
 from urllib.parse import urlencode
 
 import pytest
-from conftest import household_of
+from conftest import default_account_of, household_of
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
@@ -342,12 +342,13 @@ def test_current_week_ist_buckets_in_kolkata():
 
 def _insert_txn(conn, user_id, amount, type_, category, occurred_on, note=""):
     """Insert a transaction homed in the user's household (§16), returning its id."""
+    hh = household_of(conn, user_id)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, household_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (user_id, household_of(conn, user_id), Decimal(amount), type_, category, note, occurred_on),
+            " (user_id, household_id, amount, type, category, note, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (user_id, hh, Decimal(amount), type_, category, note, occurred_on, default_account_of(conn, hh)),
         )
         (txn_id,) = cur.fetchone()
     return txn_id

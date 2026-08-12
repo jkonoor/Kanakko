@@ -1353,10 +1353,24 @@ per task:
       send path ran, same failure class slices 1-2 found), not a clean assertion
       mismatch. `handlers.py` is now 1116 lines; `uv run pytest` → 457 passed,
       `ruff check` clean.
-- [ ] `handlers.py` split, slice 4/6: `kanakko/commands/invite.py`
+- [x] `handlers.py` split, slice 4/6: `kanakko/commands/invite.py`
       (`handle_invite` + `handle_invite_signup`, both `/invite*` commands share
       the same shape). Retarget `tests/test_invite.py` and
-      `tests/test_invite_signup.py`.
+      `tests/test_invite_signup.py`. Both handlers, their `_is_invite`/
+      `_is_invite_signup` guards, and their `INVITE_*` constants moved verbatim.
+      Dropped now-stale `secrets`/`is_admin`/`get_bot_username`/
+      `create_household_invite`/`create_signup_invite` imports from
+      `handlers.py`. `test_invite.py` retargeted its `handlers.send_message`/
+      `get_bot_username` patch and `INVITE_*`/`_is_invite` reads at the new
+      `invite_command` module, same pattern as slices 1-3. `test_invite_signup.py`
+      needed patches on **both** modules — its end-to-end test also drives
+      `handle_start`, which stays in `handlers.py` and sends through that
+      module's own `send_message` binding — a single-module patch would leave
+      that call live. Verified red-without-fix: patched `handlers.send_message`
+      instead of `invite_command.send_message` in `test_invite.py` and reran —
+      4 failed on `InFailedSqlTransaction` (real send path, same failure class
+      slices 1-3 found), not a clean assertion mismatch. `handlers.py` is now
+      994 lines; `uv run pytest` → 457 passed, `ruff check` clean.
 - [ ] `handlers.py` split, slice 5/6: `kanakko/commands/recurring.py`
       (`handle_recurring` + `_match_category_and_account`). Retarget
       `tests/test_recurring_command.py`.

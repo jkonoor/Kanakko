@@ -12,8 +12,10 @@ that covers both halves at once.
 import pytest
 
 from kanakko import handlers
+from kanakko.commands import invite as invite_command
+from kanakko.commands.invite import handle_invite_signup
 from kanakko.db import consume_invite, create_household_of_one, get_or_create_user
-from kanakko.handlers import TextMessage, handle_invite_signup, handle_start
+from kanakko.handlers import TextMessage, handle_start
 from kanakko.migrate import migrate
 
 ADMIN_TG = 555
@@ -30,10 +32,15 @@ def admin_env(monkeypatch):
 
 
 def _stub_telegram(monkeypatch):
+    """Patches both modules: `handle_start` (still in `handlers`) is exercised
+    alongside `handle_invite_signup` (moved to `invite_command`) by the
+    end-to-end consume test below."""
     sent = []
+    monkeypatch.setattr(invite_command, "send_message",
+                        lambda chat_id, text: sent.append((chat_id, text)))
+    monkeypatch.setattr(invite_command, "get_bot_username", lambda: BOT)
     monkeypatch.setattr(handlers, "send_message",
                         lambda chat_id, text: sent.append((chat_id, text)))
-    monkeypatch.setattr(handlers, "get_bot_username", lambda: BOT)
     return sent
 
 
@@ -84,7 +91,7 @@ def test_a_non_admin_household_owner_is_refused(conn, monkeypatch, admin_env):
 
     assert code is None
     assert _invite_rows(conn) == []
-    assert sent == [(NOT_ADMIN_TG, handlers.INVITE_SIGNUP_NOT_ADMIN)]
+    assert sent == [(NOT_ADMIN_TG, invite_command.INVITE_SIGNUP_NOT_ADMIN)]
     conn.rollback()
 
 
@@ -97,7 +104,7 @@ def test_unset_admin_env_admits_nobody(conn, monkeypatch):
 
     assert handle_invite_signup(conn, _msg("/invite_signup ravi")) is None
     assert _invite_rows(conn) == []
-    assert sent == [(ADMIN_TG, handlers.INVITE_SIGNUP_NOT_ADMIN)]
+    assert sent == [(ADMIN_TG, invite_command.INVITE_SIGNUP_NOT_ADMIN)]
     conn.rollback()
 
 
@@ -108,7 +115,7 @@ def test_bare_command_asks_for_a_label(conn, monkeypatch, admin_env):
 
     assert handle_invite_signup(conn, _msg("/invite_signup")) is None
     assert _invite_rows(conn) == []
-    assert sent == [(ADMIN_TG, handlers.INVITE_SIGNUP_USAGE)]
+    assert sent == [(ADMIN_TG, invite_command.INVITE_SIGNUP_USAGE)]
     conn.rollback()
 
 
@@ -144,10 +151,10 @@ def test_the_issued_link_lands_the_tester_in_their_own_household(
 
 
 def test_is_invite_signup_recognises_the_command():
-    assert handlers._is_invite_signup("/invite_signup ravi")
-    assert handlers._is_invite_signup("/invite_signup@kanakko_bot ravi")
-    assert not handlers._is_invite_signup("/invite ravi")  # never the sibling command
-    assert not handlers._is_invite("/invite_signup ravi")  # nor the reverse
+    assert invite_command._is_invite_signup("/invite_signup ravi")
+    assert invite_command._is_invite_signup("/invite_signup@kanakko_bot ravi")
+    assert not invite_command._is_invite_signup("/invite ravi")  # never the sibling command
+    assert not invite_command._is_invite("/invite_signup ravi")  # nor the reverse
 
 
 def test_admin_ids_parses_a_list_and_survives_junk(monkeypatch):

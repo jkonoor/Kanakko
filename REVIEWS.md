@@ -12,6 +12,72 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `6a398e6` Phase 10 manual-test section (§9) for accounts, transfers, reconciliation
+
+**Scope:** docs-only. Adds `## 9` (rows 9.1–9.18) to `docs/TESTING.md`, a Summary
+table row, and folds 9.6/9.13 into the "stops a release" money-path callout; ticks
+the "Add a Phase 10 section to `docs/TESTING.md`" task in `TASKS.md`.
+
+**Status:** ⚠️ CHANGES REQUESTED — one arithmetic error on the section's own
+load-bearing money check (9.6).
+
+### What I checked
+
+- `git show HEAD` / `--stat`: two files, `TASKS.md` (+6) and `docs/TESTING.md`
+  (+39). No code touched.
+- Cross-read each of the 18 rows against the implementing code to confirm the
+  *expected* value the tester is told to accept is the behaviour the code
+  actually produces (a manual test that asserts a wrong expected value is the
+  "guard that doesn't guard" failure, one rung up):
+  - 9.11 `/account <name>` → `kanakko/commands/account.py:101-105` emits
+    `"{name} — put in {contributed}, got back {paid_out}"`; the FD created by
+    `put 5000 in FD` has opening_balance 0 so no "started with" tail — matches
+    the doc's `"put in ₹5,000.00, got back ₹5,500.00"`.
+  - 9.13 over-refund refusal → real guard, migration 014's trigger, caught as
+    `psycopg.errors.RaiseException` in `kanakko/commands/refund.py:131-136` and
+    turned into `REFUND_OVER_LIMIT`. The remaining-₹300 arithmetic in the row
+    (500 spent − 200 refunded) is right.
+  - 9.15 "each account except `external`" → `accounts_for_reconcile`
+    (`kanakko/db/reconcile.py:34-41`) filters `a.kind <> 'external'`. Correct.
+  - 9.16/9.17 adjustment vs. "no changes needed" →
+    `kanakko/reconcile_flow.py:66-75`: a matching figure makes `create_adjustment`
+    return `None` → `RECONCILE_MATCHED` (no row); a mismatch writes the visible
+    adjustment. Both match the rows.
+  - 9.18 bare (non-Reply) answer in a two-account household falls through →
+    `jobs/reconcile.py:32-49` + `pending_awaiting_reconcile` only route a bare
+    reply when exactly one ask is outstanding. Correct.
+- `uv run pytest -q` → **477 passed, 1 warning in 20.20s**. (The doc's own note
+  "no `pytest` surface to run" is accurate — nothing here is code — but the
+  suite is green, so no adjacent breakage.)
+
+### Findings
+
+**1. (MEDIUM, money path) 9.6's "Exactly ₹2,000" is off by the tea money — the
+section's primary money check would misfire.** `docs/TESTING.md:339` (row 9.6).
+The rows are a single sequential flow with no reset. 9.1 confirms `spent 40 on
+tea` — a ₹40 Food expense on the default Bank `spending` account, which counts
+toward "this month's spending". 9.4 then confirms the ₹2,000 dinner swipe. So by
+9.6 the dashboard's monthly spending is **₹2,040** (₹40 tea + ₹2,000 swipe; ₹2,080
+if 9.3's second tea is also confirmed), not "Exactly ₹2,000". A tester following
+the script literally sees ₹2,040, and 9.6 is explicitly one of the checks that
+"stops a release" — so a correct implementation reads as a money-path FAIL, or
+the tester learns to discount the word "Exactly" and rubber-stamps the row that
+matters most. The real double-count guard is a *delta*, not an absolute: the
+swipe (9.4) must add ₹2,000 and the bill payment (9.5) must add ₹0.
+*Suggested fix:* phrase 9.6 as a delta or scope it away from the tea — e.g.
+"this month's spending rises by **exactly ₹2,000** across 9.4–9.5 (the swipe),
+and the bill payment adds nothing — not a second ₹2,000", or note the ₹40 tea
+explicitly in the expected total. The point being protected (swipe counts once,
+bill payment never) is right; only the absolute figure is inconsistent with the
+script's own earlier steps.
+
+No other row had an expected value that contradicts the code or the flow; the
+relative checks (9.8/9.10 "unchanged", 9.14 "reduced by the refunded amount only")
+are correct as written. The `TASKS.md` tick is legitimate — the section is a real
+18-row deliverable with the Summary and callout wiring the note claims, not a stub.
+
+---
+
 ## 2026-08-13 — `b13a599` cover reply-id extraction and steer nudges into it (b71effc review follow-up)
 
 **Status: ✅ DONE**

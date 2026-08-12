@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `e54bd61` — show transfers in the dashboard's recent list
+
+**Scope:** `recent_transactions` (`kanakko/db/reports.py`) now `LEFT JOIN`s
+`accounts` twice to return the from/to account names (NULL for non-transfers);
+`recent_list` (`kanakko/webapp/render.py`) renders a `transfer` as "Bank → SIP"
+instead of an empty category `<select>`, and drops the −/+ sign and income tint
+(§18); the hero panel's flow stat is renamed "Balance" → "Net". Two new tests
+plus fixture updates to the six existing `recent_list` rows.
+
+**Status: ✅ DONE** — the change matches §18, the two new tests fail for the
+reason they exist (verified red by reverting the branch), the full suite passes,
+and the user-typed account names are HTML-escaped. No blocking findings.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — read the whole diff; scope is display-only (SQL SELECT +
+  Python rendering + a hero-stat rename), no write path, no money-total change.
+- **Spec fit (§18, DECISIONS lines 748–809).** A transfer "is excluded from
+  every spending and income total" and "is neither spending nor income", so
+  dropping its sign/tint and the category dropdown (a transfer structurally has
+  no category) is correct. §18 also gives "Balance" a distinct stock meaning
+  (`opening_balance + inflows − outflows`, line 807), so renaming the period's
+  income−expenses *flow* stat away from "Balance" removes a real name clash.
+- **Reads through the view.** The query is `FROM active_transactions t LEFT JOIN
+  accounts …`. `active_transactions` is `SELECT * FROM transactions WHERE
+  deleted_at IS NULL` and migration 011 recreated it after adding
+  `from_account_id`/`to_account_id`, so those columns are visible. Soft-delete
+  filter preserved. Confirmed the view/columns in `migrations/011_transfer_type.sql`.
+- **Money.** `amount` still comes back as `NUMERIC`→`Decimal`; the "Net" stat is
+  `period.income - period.expenses`, exact `Decimal` subtraction. No `float`.
+- **`uv run pytest -q`** → **323 passed**, 1 warning (pre-existing httpx
+  deprecation). Matches the commit's claim.
+- **Exercised `recent_list` directly** with a mixed batch (transfer, expense,
+  income, transfer with a NULL from-account): transfer renders "Bank → SIP",
+  produces no `cat-select`, no sign on ₹5,000.00; NULL endpoint renders "? → SIP";
+  expense keeps its "−" and income keeps `amt in`. `cat-select` count = 2 (only
+  the non-transfer rows).
+- **Red-without-fix, verified.** Reverted the `if type_ == "transfer"` branch to
+  the old unconditional `_category_select` + sign logic and ran
+  `pytest -k transfer` → both new tests **FAILED**
+  (`test_recent_list_transfer_shows_accounts_not_a_category_dropdown`,
+  `…_has_no_income_or_expense_sign`). Restored; `git status` clean.
+- **XSS.** `from_account`/`to_account` are user-named account strings; both go
+  through `html.escape(... or "?")`. The note escaping test was updated in place
+  and still asserts the escaped bytes.
+
+### Findings
+
+None blocking.
+
+**Non-blocking note (not introduced by this commit, out of scope):**
+`kanakko/jobs/monthly.py:58` still labels the income−expenses figure in the
+Telegram monthly summary "Balance:". That is the same name §18 now reserves for
+account stock — the exact clash this commit fixed on the dashboard. It's a text
+message far from any `account_balances` figure, so the ambiguity is lower, and
+no task covers it. Flagging only so it isn't forgotten if §18 balances later
+reach that surface.
+
+---
+
 ## 2026-08-12 — `b7b4287` — migration 012: enforce `account_id` NOT NULL, except transfers
 
 **Scope:** Adds `migrations/012_transactions_account_not_null.sql` — a CHECK

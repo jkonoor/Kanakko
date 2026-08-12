@@ -866,11 +866,23 @@ per task:
       > 1` display gate, `confirm_pending` honouring the chosen account instead
       of always the default, and `handle_account_choice` rejecting an
       out-of-household account name. `uv run pytest` → 343 passed (8 new).
-- [ ] Teach the parse prompt the account vocabulary: "swiped", "on card", "paid
+- [x] Teach the parse prompt the account vocabulary: "swiped", "on card", "paid
       cash", "UPI" (→ the bank account, **never its own account** — §18: UPI is a
       rail, not a pool), "put 5000 in SIP", "FD 1 lakh", "paid chit". Wrong-pool
       is a new error class, so the confirm card showing the account is what makes
       it recoverable.
+      Done: `_ACCOUNT_GUIDANCE` (`kanakko/parse.py`) appended to the system prompt
+      in `build_request`, gated on the same `accounts and len(accounts) > 1` check
+      `parse_schema`'s `account` enum already uses — a single-account household's
+      prompt is byte-for-byte unchanged, no added cost. Teaches the vocabulary by
+      account *kind* ("swiped"/"on card" → credit, "UPI"/"paid cash" → the
+      everyday spending account, "SIP"/"FD"/"chit" → the locked account) rather
+      than naming a literal account — the enum is still the household's own
+      names. Explicitly tells the model UPI is a rail, never an account of its
+      own. A wrong guess isn't a failure: the confirm card shows the account with
+      one tap to fix it. `test_account_vocabulary_guidance_appears_only_with_a_real_account_choice`
+      (`tests/test_parse.py`) verified red without the gate wired in, green with
+      it restored. `uv run pytest` → 344 passed (1 new).
 
 ### The things accounts make possible
 

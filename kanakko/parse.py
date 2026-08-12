@@ -55,6 +55,24 @@ _SYSTEM_PROMPT = (
     "date as YYYY-MM-DD. `note` preserves the user's original wording."
 )
 
+# §18: only appended when the schema actually offers an `account` enum (a real
+# choice — the same `len(accounts) > 1` gate `parse_schema` uses), so a
+# single-account household's prompt is byte-for-byte unchanged. Teaches the
+# vocabulary that maps onto each account *kind* rather than naming a literal
+# account: the household's own account names are the enum, this just tells the
+# model which phrases point at which kind of pool. A wrong guess is not a
+# failure — the confirm card shows the account with one tap to fix it (§18) —
+# so this is guidance, not a constraint the model must get exactly right.
+_ACCOUNT_GUIDANCE = (
+    " `account` is which of the household's accounts the money moved through, "
+    "or null if the message doesn't say. \"swiped\", \"on card\", \"credit "
+    "card\" mean the credit-card account. \"UPI\", \"GPay\", \"PhonePe\", "
+    "\"net banking\" and \"paid cash\" all mean the everyday spending account "
+    "— UPI is a payment rail, not a pool of money, so never invent or pick an "
+    "account named after it. \"put 5000 in SIP\", \"FD 1 lakh\", \"paid chit\" "
+    "mean the locked/savings account."
+)
+
 
 def parse_schema(accounts: list[str] | None = None) -> dict:
     """The JSON schema handed to the model for one transaction (§2, §3).
@@ -138,13 +156,17 @@ def build_request(
     §10: today's `Asia/Kolkata` date is injected into the system prompt so the
     model can resolve "yesterday"/"last Friday" instead of guessing. `today_str`
     is injectable for deterministic tests; production reads the wall clock.
-    `accounts` is threaded straight into `parse_schema` (§18).
+    `accounts` is threaded straight into `parse_schema` (§18); the account
+    vocabulary guidance is appended under the same gate as that schema's
+    `account` enum, so a single-account household's prompt is unchanged.
     """
     system = (
         f"{_SYSTEM_PROMPT} Today's date is {today_str or today()} "
         "(Asia/Kolkata). Resolve any relative date in the message "
         "(\"yesterday\", \"last Friday\") against it."
     )
+    if accounts and len(accounts) > 1:
+        system += _ACCOUNT_GUIDANCE
     return {
         "model": resolve_model(model),
         "messages": [

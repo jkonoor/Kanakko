@@ -101,6 +101,26 @@ def test_build_request_threads_accounts_into_the_schema():
     assert schema["properties"]["account"]["anyOf"][0]["enum"] == ["Bank", "Card"]
 
 
+def test_account_vocabulary_guidance_appears_only_with_a_real_account_choice():
+    # §18: "swiped"/"on card" -> credit, "UPI"/"paid cash" -> the bank account
+    # (never its own account — UPI is a rail, not a pool), "SIP"/"FD"/"chit" ->
+    # the locked account. Only worth teaching once there's a real account to
+    # route to — same gate as the enum itself, so a single-account household's
+    # prompt is unchanged (no added cost).
+    system = build_request("swiped 500 on card", accounts=["Bank", "Card"])[
+        "messages"
+    ][0]["content"]
+    assert "swiped" in system
+    assert "UPI" in system
+    assert "SIP" in system
+
+    one_account = build_request("swiped 500 on card", accounts=["Bank"])
+    assert "swiped" not in one_account["messages"][0]["content"]
+
+    no_accounts = build_request("swiped 500 on card")
+    assert "swiped" not in no_accounts["messages"][0]["content"]
+
+
 def test_a_household_with_one_account_behaves_like_no_accounts_at_all():
     # The check the task names explicitly: a single-account household has no
     # real choice to make (null already means "the default account"), so its

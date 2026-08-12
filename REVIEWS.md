@@ -12,6 +12,86 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `7c6172e` — recurring rules: "Change amount" on the cron's confirm card (Phase 10, split 3b/3)
+
+**Status: ✅ DONE**
+
+Scope: migration `017` adds `pending_transactions.awaiting_amount BOOLEAN NOT
+NULL DEFAULT false`; `confirm.confirm_card` gains a `change_amount_button` param
+and a `CHANGE_AMOUNT` callback constant (`SKIP_LABEL` moved from
+`jobs/recurring.py` into `confirm.py`); `db.pending` gains
+`request_amount_change` / `pending_awaiting_amount` / `set_pending_amount`;
+`handlers` gains `handle_change_amount_request` / `handle_amount_reply`; the
+webhook checks `pending_awaiting_amount` up front for every `TextMessage` and
+routes an awaited reply to `handle_amount_reply`, unmetered; `jobs.recurring`
+now passes `change_amount_button=True`. 17 new tests.
+
+### What I checked (and what it returned)
+
+- **Full suite.** `uv run pytest -q` → **446 passed** (1 pre-existing Starlette
+  deprecation warning), matching the commit message.
+- **Guard #1 real (money/state scope).** Reverted the `AND awaiting_amount`
+  clause in `set_pending_amount`'s SELECT, ran
+  `test_set_pending_amount_refuses_a_row_that_is_not_awaiting_one` → **FAILED**
+  (a row never marked awaiting got silently rewritten). Restored → passes. The
+  guard fails for the reason it exists: a stray text after the card settled
+  elsewhere cannot rewrite an amount.
+- **Guard #2 real (§16 cost control).** Removed `awaiting_message_id is None`
+  from the `is_parse` predicate in `app.py`, ran
+  `test_webhook_routes_an_awaited_amount_reply_and_never_meters_it` → **FAILED**
+  (`claims == [1]` instead of `[None]` — the free amount-reply tap would have
+  been metered and counted against the daily cap). Restored → passes.
+- **Money path (§9).** `set_pending_amount` re-validates the typed reply through
+  `money.parse_amount` in `handle_amount_reply` (Decimal), stores it as
+  `str(amount)` inside `Transaction.model_validate` → `model_dump(mode="json")`,
+  so `parsed["amount"]` is `"7500.00"` (string, asserted by
+  `test_set_pending_amount_updates_the_amount_and_clears_awaiting`). No float
+  reaches the row; only `amount` changes, category/account/note survive.
+- **Transaction shape.** `set_pending_amount` uses the same
+  `with conn.transaction(), conn.cursor()` SELECT-then-UPDATE pattern as its
+  siblings `set_pending_category` / `set_pending_account`; caller owns the outer
+  commit. Consistent.
+- **Routing ordering.** The `pending_awaiting_amount` query runs *after* the
+  `is_authorized` gate and *after* `get_or_create_user`, so an unrecognised user
+  is still refused before any pending lookup (§16 unchanged). `/start` still
+  short-circuits before the gate.
+- **Internal consistency of the re-render.** `awaiting_amount` can only be set by
+  `request_amount_change`, reachable only via a `CHANGE_AMOUNT` tap, which only
+  `jobs.recurring`'s card renders — so an awaiting card is always a recurring
+  card, and re-rendering it with `cancel_label=SKIP_LABEL, change_amount_button=True`
+  is correct. The pending row's `recurring_rule_id` survives the UPDATE (only
+  `parsed`/`awaiting_amount` are written).
+- **Spec fit.** `docs/DECISIONS.md` §18 (line 836) names exactly "Confirm /
+  Change amount / Skip"; the cron card now renders all three
+  (`test_run_sends_a_confirm_card_and_links_the_pending_row_to_the_rule` asserts
+  Skip + Change amount present, Cancel absent). Migration 017 puts the state on
+  the pending row, "not a new table", as the task directed.
+
+### Findings
+
+No blocking issues.
+
+**Low / informational — an abandoned "Change amount" tap intercepts all later
+text until Skip/Confirm** (`kanakko/app.py:174`, `kanakko/db/pending.py:311`).
+Once a user taps "Change amount", the card's row stays `awaiting_amount = true`
+until the user replies with a valid amount, or taps Skip/Confirm on the card
+(both delete the row). Nothing else clears it — there is no TTL. While it is set,
+`pending_awaiting_amount` diverts *every* subsequent `TextMessage` (including a
+real new expense like `coffee 200`, `/undo`, `/help`) into `handle_amount_reply`,
+where it fails `parse_amount` and returns the retry prompt rather than being
+logged. This is a genuinely new failure mode (before this commit a typed expense
+always parsed), but it is **not silent** — the user gets
+`CHANGE_AMOUNT_RETRY_PROMPT` every time — and it is **one tap to recover** (the
+card with its Skip button is still in the chat). It is also consistent with the
+task's explicit design ("the next text message is a replacement amount") and the
+§18 no-conversation-state-machine stance, so it is recorded for awareness, not as
+a change request. If it ever bites in real use, the cheap fix is to clear
+`awaiting_amount` (or expire the row) when a reply can't be parsed after N tries,
+or to scope the interception to replies that actually look like a bare amount —
+but the exact-match caution in the greeting task argues against the latter.
+
+---
+
 ## 2026-08-13 — `5f893bd` — recurring rules: cron send, Confirm/Skip half (Phase 10, split 3a/3)
 
 **Status: ✅ DONE**

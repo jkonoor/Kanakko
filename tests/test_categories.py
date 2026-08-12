@@ -14,7 +14,9 @@ from kanakko.categories import (
 )
 
 # DECISIONS §11, transcribed by hand from the spec — the point of the guard is
-# that these are NOT imported from the module under test.
+# that these are NOT imported from the module under test. §18 amends §11 by
+# removing `Refund` from the income list (a refund is negative spending, not
+# income — it now has its own `transaction` type, not a category).
 SPEC_EXPENSE = [
     "Food",
     "Groceries",
@@ -25,7 +27,7 @@ SPEC_EXPENSE = [
     "Entertainment",
     "Other",
 ]
-SPEC_INCOME = ["Salary", "Freelance", "Refund", "Other"]
+SPEC_INCOME = ["Salary", "Freelance", "Other"]
 
 
 def test_categories_match_the_spec_verbatim():
@@ -35,7 +37,7 @@ def test_categories_match_the_spec_verbatim():
 
 def test_schema_enum_is_the_deduped_union():
     # "Other" is in both lists but must appear once, or the model sees a dupe.
-    assert schema_enum() == SPEC_EXPENSE + ["Salary", "Freelance", "Refund"]
+    assert schema_enum() == SPEC_EXPENSE + ["Salary", "Freelance"]
     assert schema_enum().count("Other") == 1
 
 

@@ -1105,9 +1105,23 @@ per task:
       catch is load-bearing, not decorative: temporarily removed it, watched
       `test_refund_route_over_limit_is_409_and_writes_nothing` turn into an
       unhandled 500, restored it.
-- [ ] Remove `Refund` from `INCOME_CATEGORIES` (§11, §18) — it inflates income
+- [x] Remove `Refund` from `INCOME_CATEGORIES` (§11, §18) — it inflates income
       and the previous task replaces it. Existing rows carrying it need a
       decision recorded in the commit, not a silent rewrite.
+      Done: dropped from the tuple in `categories.py`; `test_categories.py`'s
+      hand-transcribed `SPEC_INCOME` now notes §18 amends §11 and the change
+      was verified red-without-fix (temporarily restored `Refund`, watched all
+      three spec/enum/keyboard assertions fail, restored the fix).
+      **Decision on existing rows:** left as-is, no data rewrite. The category
+      column has no DB CHECK (`001_init.sql:19`, deliberately — "the DB would
+      be a second place to edit them"), so old `income`/`Refund` rows stay
+      exactly as entered; rewriting them would silently revise a historical
+      fact nobody asked to correct. The dashboard's category `<select>`
+      (`webapp/recent.py::_category_select`) already degrades an
+      out-of-set value to a disabled "Uncategorised" placeholder — the same
+      path a null category already takes — so an old `Refund` row is editable
+      to a real category in one tap if a member wants to reclassify it, but
+      nothing forces that.
 - [ ] Recurring rules for auto-debits: amount, category, account, day of month,
       active. **On the day the cron sends the ordinary confirm card** — Confirm /
       Change amount / Skip — never a silent insert (§18: a chit instalment

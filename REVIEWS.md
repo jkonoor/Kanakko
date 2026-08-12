@@ -12,6 +12,74 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `2b14bc4` — migration 010: `account_id` on every transaction, backfilled (Phase 10)
+
+**Scope:** Adds `transactions.account_id` (nullable, FK → `accounts`), mints one
+default `spending`/'Cash' account per existing household, backfills every row
+into its household's default, and recreates `active_transactions` so the new
+column surfaces. `SET NOT NULL` is deliberately deferred to a new task. A pure
+relocation — no report number should move.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches `migrations/010_transactions_account.sql`
+  (new, 50 lines), `tests/test_migrate.py` (+ before/after check), `TASKS.md`
+  (tick + split note). Nothing else.
+- `uv run pytest tests/test_migrate.py -q` → **12 passed**.
+- `uv run pytest -q` → **306 passed**, 1 warning — matches the commit's claim.
+- Read `migrations/009_accounts.sql`, `DECISIONS.md` §18 (711–885), and
+  `kanakko/db/reports.py:48` to confirm `month_summary` reads
+  `active_transactions` (line 68), never `transactions` — so the new column is
+  invisible to totals by construction.
+- **Verified the money-path guard actually reddens.** Temporarily patched the
+  migration's backfill `UPDATE` to match no rows
+  (`AND t.account_id IS NULL AND false`), ran
+  `test_account_backfill_leaves_every_report_number_unchanged` → **FAILED** (the
+  `account_id IS NULL == 0` row-level assertion). Reverted; `git diff` clean.
+  The guard fails for the reason it exists.
+- **Verified the NOT NULL deferral is justified, not an excuse.** Read
+  `kanakko/db/pending.py:83` — `confirm_pending`'s INSERT omits `account_id`.
+  Read `kanakko/db/households.py:12` — `create_household_of_one` mints no default
+  account. So enforcing NOT NULL now *would* break the first confirm of any
+  household created after the migration. The deferral reasoning is true.
+- Confirmed the split-and-tick matches the established repo convention:
+  `TASKS.md:414` ticked the `household_id` task the same way (007 nullable +
+  backfill ticked, NOT NULL split to a later task). This is precedent, not a
+  silently half-done tick — the split, the reason, and the new NOT NULL task
+  (`TASKS.md:718`) are all written down.
+
+### Correctness notes
+
+- Money path clean: no `float` anywhere; `account_id` is `BIGINT`, opening
+  balances stay `NUMERIC(12,2)` from 009. Reads still route through
+  `active_transactions` (view recreated with `CREATE OR REPLACE`, soft-delete
+  filter unchanged).
+- Backfill cannot cross households — the `UPDATE` joins on
+  `a.household_id = t.household_id`, and the 009 partial unique index guarantees
+  exactly one live default per household, so the placement is deterministic.
+- One default per household (not per user) is correct here: it matches both the
+  009 `accounts_one_default_per_household` index and the task's own wording
+  ("every existing row belongs to its household's default account"). §18's "every
+  user gets a default" is the onboarding task, still unchecked.
+- Statement order is right: mint accounts → `ADD COLUMN` → backfill → recreate
+  view. Idempotency guards (`NOT EXISTS`, `account_id IS NULL`) are belt-and-
+  suspenders on top of `schema_migrations` tracking; harmless.
+
+### Non-blocking observations (do not fix now)
+
+- The before/after `month_summary` equality is a weak assertion on its own — it
+  passes trivially because `account_id` never enters `month_summary`. The author
+  says so in the docstring, and the row-level check (every row homed, none NULL,
+  all to the one default) carries the real weight. Fine as written.
+- The test uses a single household, so a hypothetical cross-household
+  misplacement wouldn't be caught by the `DISTINCT account_id == [default]`
+  assertion. Structurally prevented by the `UPDATE`'s join, so not worth a second
+  household — noted only for completeness.
+
+---
+
 ## 2026-08-08 — `27fc55f` — /help + exact-greeting short-circuit, answer a lost user without an LLM call (Phase 9)
 
 **Scope:** A non-transaction message ("How do I use this?") used to be answered

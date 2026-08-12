@@ -12,6 +12,89 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `70b6cc4` — `/account` onboarding ask + default account per household (Phase 10)
+
+**Scope:** `create_household_of_one` now mints the two structural accounts every
+household needs (`spending`/'Bank' default + `external`) via new
+`create_default_accounts`. New `/account credit|locked <amount>` command
+(`handle_account` + `set_account_opening_balance`) sets a signed `opening_balance`
+— credit's reported amount negated (§18 "same column, different question"), one
+account per kind (repeat = update, not duplicate). `confirm_pending` now stamps
+each new transaction's `account_id` from the household default. Webhook routes
+`/account` to `handle_account` and excludes it from metering. WELCOME/HELP_TEXT
+updated. Adds `tests/test_account_command.py` (6) + accounts/db/webhook tests.
+
+**Status: ⚠️ CHANGES REQUESTED** — one reachable unhandled crash (open-mode
+edge). Money logic, sign convention, routing, and metering are correct.
+
+### What I checked (commands and results)
+
+- `git show HEAD --stat` / full diff — 11 files, matches the commit message scope.
+- `uv run pytest -q` → **319 passed**, 1 warning. No pre-existing test regressed.
+- **Credit-negation guard reddens without the fix.** Replaced
+  `signed = -amount if kind == "credit" else amount` with `signed = amount` in
+  `set_account_opening_balance` (accounts.py:66) and re-ran the account tests →
+  `test_set_account_opening_balance_negates_credit_and_updates_on_a_repeat`,
+  `test_credit_amount_is_stored_negated_and_reads_back_as_owed`, and
+  `test_repeat_call_updates...` **FAILED**; 7 passed. Restored (`git checkout`).
+  So the money guard fails for the reason it exists, not on a surface string.
+- Confirmed the sign convention end-to-end: credit stores `-amount`,
+  `account_balances` multiplies credit by `-1`, so a `/account credit 5000` reads
+  back `Decimal("5000.00")` owed — money stays `Decimal`, no float. ✅
+- Confirmed `confirm_pending` derives `household_id` via a `LEFT JOIN accounts`
+  on `is_default AND deleted_at IS NULL`; migration 009's partial unique index
+  (`accounts_one_default_per_household`) guarantees ≤1 live default, so the join
+  can't multiply the pending row. NULL household → `(None, None)` → NOT NULL
+  refuses (unchanged behaviour; `test_confirm_without_a_household_is_refused`
+  still passes). ✅
+- Webhook: `/account` is in the non-parse set (never metered) and routes to
+  `handle_account`; `test_webhook_routes_account...` passes and asserts
+  `claims == [None]`. ✅
+
+### Findings
+
+**1. (Medium — blocking) `/account` before `/start` crashes with an unhandled
+`TypeError`, no user reply, and loops on redelivery.**
+`kanakko/db/accounts.py:82-89` (`set_account_opening_balance`, INSERT branch) /
+`kanakko/handlers.py:406`.
+
+In `open` signup mode (`SIGNUP_MODE=open`, a supported config), a brand-new
+user is admitted by `is_authorized`, `get_or_create_user` mints their user row,
+but **no household exists until `/start`**. If their first message is
+`/account credit 5000`, `set_account_opening_balance`'s `INSERT ... SELECT ...
+FROM household_members WHERE user_id = %s` inserts zero rows, so
+`(account_id,) = cur.fetchone()` unpacks `None`.
+
+Reproduced against the test DB (temp test, since removed):
+```
+DB RAISED: TypeError: cannot unpack non-iterable NoneType object
+HANDLER RAISED: TypeError: cannot unpack non-iterable NoneType object
+```
+The webhook catches, logs `update.handled status=error`, and re-raises → 500.
+The `claim_update` rolls back with it, so Telegram redelivers and the 500
+repeats; the user gets no message. The sibling command `handle_transfer`
+degrades gracefully here (`household_roster` returns empty → usage/no-match
+reply), so this handler breaks a pattern the others hold.
+Failure scenario: open mode, first-ever message `/account credit 5000` →
+repeated 500s, nothing stored, silent to the user.
+Suggested fix: in `handle_account` (or `set_account_opening_balance`), detect the
+no-membership case and send a "send /start first" hint instead of unpacking a
+possibly-empty `RETURNING`. (Gated on open mode — in the default `invite` mode an
+authorized user always has a household, so this is edge, not a hot path.)
+
+### Not findings (checked, fine)
+
+- Existing pre-009 households have an `external` (backfilled by migration 009)
+  but no `spending` default, so their confirms stamp NULL `account_id`. The
+  `confirm_pending` docstring calls this out as permitted until the "Enforce
+  `account_id` NOT NULL" task lands; consistent with spec intent, not a defect
+  of this commit.
+- `create_default_accounts` has no existence guard, but it is only called from
+  the genuinely-new-household branch of `create_household_of_one`, and the
+  partial unique index would reject a second live default anyway.
+
+---
+
 ## 2026-08-12 — `87be3ac` — derive account balances from the ledger (Phase 10)
 
 **Scope:** New `db.account_balances(conn, user_id)` computes

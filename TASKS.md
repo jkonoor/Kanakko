@@ -712,11 +712,22 @@ per task:
       read back exactly the expense and income, and also exercises the CHECK
       invariant. Verified it reddens by broadening the day filter to
       `type <> 'income'`.
-- [ ] Derive balances: `opening_balance + inflows − outflows` per account, as a
+- [x] Derive balances: `opening_balance + inflows − outflows` per account, as a
       view or one query. **Never a stored running total** (§18) — a second source
       of truth that drifts silently is the one failure a money app cannot
       survive. `credit` accounts read as what is owed, so the sign convention is
       part of this task and needs its own check, not a comment.
+      Done: `db.account_balances(conn, user_id)` — one query, no stored column,
+      reads `active_transactions` (§6) so soft-deleted rows never count, scoped to
+      the caller's household (§16). Income/expense sum by `account_id`, transfers
+      by their endpoint columns (a transfer touches two accounts, never a total).
+      The sign convention lives in the query's `CASE`: a `credit` account's asset
+      balance (negative in debt) is negated so it reads as what is *owed*. Storage
+      is asset-convention — a credit debt is a negative `opening_balance`, which is
+      what 009's "can be negative" already permits (the onboarding task will store
+      it that way). `tests/test_accounts.py` seeds opening balances, income,
+      expense, transfers, a soft-deleted row and the credit account, asserts each
+      derived balance, and reddens if the credit negation is dropped.
 
 ### Onboarding, parsing, and the confirm card
 

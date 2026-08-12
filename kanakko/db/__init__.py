@@ -8,6 +8,7 @@ import surface is unchanged — `from kanakko.db import <name>` still resolves e
 function, re-exported here.
 """
 
+from kanakko.db.accounts import account_balances
 from kanakko.db.connection import connect
 from kanakko.db.households import (
     check_removal,
@@ -47,6 +48,7 @@ from kanakko.db.users import (
 
 __all__ = [
     "connect",
+    "account_balances",
     "get_or_create_user",
     "find_user",
     "user_exists",

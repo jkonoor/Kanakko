@@ -37,8 +37,11 @@ from kanakko.db.invites import (
 from kanakko.db.pending import (
     cancel_pending,
     confirm_pending,
+    pending_awaiting_amount,
+    request_amount_change,
     save_pending,
     set_pending_account,
+    set_pending_amount,
     set_pending_category,
     undo_last,
 )
@@ -97,6 +100,9 @@ __all__ = [
     "confirm_pending",
     "set_pending_category",
     "set_pending_account",
+    "set_pending_amount",
+    "request_amount_change",
+    "pending_awaiting_amount",
     "undo_last",
     "cancel_pending",
     "day_summary",

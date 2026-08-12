@@ -20,8 +20,8 @@ from fastapi.responses import HTMLResponse
 from kanakko import __version__, configure_logging
 from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import CATEGORY_PREFIX
-from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM
-from kanakko.db import claim_update, connect, get_or_create_user
+from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
+from kanakko.db import claim_update, connect, get_or_create_user, pending_awaiting_amount
 from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
@@ -43,8 +43,10 @@ from kanakko.handlers import (
     dispatch,
     handle_account,
     handle_account_choice,
+    handle_amount_reply,
     handle_cancel,
     handle_category,
+    handle_change_amount_request,
     handle_confirm,
     handle_help,
     handle_household,
@@ -166,6 +168,12 @@ async def webhook(request: Request) -> dict[str, bool]:
                       source="webhook", duration_ms=ms_since(start))
             return {"ok": True}
         user_id = get_or_create_user(conn, action.from_id)
+        # §18: a "Change amount" tap marks its card `awaiting_amount` (below), so
+        # the *next* text message this user sends is a replacement amount, not a
+        # transaction to parse — checked once, up front, for every TextMessage.
+        awaiting_message_id = (
+            pending_awaiting_amount(conn, user_id) if isinstance(action, TextMessage) else None
+        )
         # §16 cost control: only the text-parse path is an LLM call (§2), so a
         # runaway user is an unbounded bill on the owner's OpenRouter credits.
         # /undo and the Confirm/Cancel/category taps cost nothing — they are never
@@ -173,7 +181,9 @@ async def webhook(request: Request) -> dict[str, bool]:
         # crucially, never *metered*: the claim below stamps `user_id` only on the
         # parse path, leaving callback/undo rows NULL so `count_updates_on_day`
         # counts exactly the messages that spend credits (§16), not the free taps.
-        is_parse = isinstance(action, TextMessage) and not (
+        # An amount reply is the same kind of free tap — no LLM call — so it is
+        # excluded here too.
+        is_parse = isinstance(action, TextMessage) and awaiting_message_id is None and not (
             _is_undo(action.text)
             or _is_help(action.text)
             or _is_greeting(action.text)
@@ -197,7 +207,9 @@ async def webhook(request: Request) -> dict[str, bool]:
             return {"ok": True}  # a prior delivery of this update was handled
         try:
             if isinstance(action, TextMessage):
-                if _is_undo(action.text):
+                if awaiting_message_id is not None:
+                    handle_amount_reply(conn, action, awaiting_message_id)
+                elif _is_undo(action.text):
                     handle_undo(conn, action)
                 elif _is_help(action.text) or _is_greeting(action.text):
                     handle_help(conn, action)
@@ -221,6 +233,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                 handle_confirm(conn, action)
             elif action.data == CANCEL:
                 handle_cancel(conn, action)
+            elif action.data == CHANGE_AMOUNT:
+                handle_change_amount_request(conn, action)
             elif action.data.startswith(CATEGORY_PREFIX):
                 handle_category(conn, action)
             elif action.data.startswith(ACCOUNT_PREFIX):

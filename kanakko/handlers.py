@@ -25,7 +25,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from kanakko.auth import is_admin, signup_mode
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
-from kanakko.confirm import ACCOUNT_PREFIX, category_prompt, confirm_card, settled_card
+from kanakko.confirm import ACCOUNT_PREFIX, SKIP_LABEL, category_prompt, confirm_card, settled_card
 from kanakko.db import (
     cancel_pending,
     check_removal,
@@ -41,9 +41,11 @@ from kanakko.db import (
     locked_account_totals,
     refund_candidates,
     remove_member,
+    request_amount_change,
     save_pending,
     set_account_opening_balance,
     set_pending_account,
+    set_pending_amount,
     set_pending_category,
     transfer_ownership,
     undo_last,
@@ -190,6 +192,14 @@ HELP_TEXT = (
 PARSER_DOWN_PROMPT = (
     "I can't reach my parser right now — your message wasn't saved. "
     "Please try again shortly."
+)
+
+# §18: the "Change amount" reply pair — asked once the button is tapped, and
+# again if the reply couldn't be read as an amount. Tapping Skip on the card
+# is the way out if the user doesn't want to answer either.
+CHANGE_AMOUNT_PROMPT = "Reply with the new amount — just the number, like 5000."
+CHANGE_AMOUNT_RETRY_PROMPT = (
+    "I couldn't read that as an amount. Reply with just the number, like 5000."
 )
 
 ACCESS_REFUSED = (
@@ -1324,4 +1334,76 @@ def handle_account_choice(conn: psycopg.Connection, press: ButtonPress) -> Trans
     answer_callback_query(press.callback_query_id, f"Account: {account}")
     log_event("pending.reaccounted", status="ok", update_id=press.update_id,
               source=press.source, user_id=user_id, duration_ms=ms_since(start))
+    return txn
+
+
+def handle_change_amount_request(conn: psycopg.Connection, press: ButtonPress) -> int | None:
+    """Start "Change amount" on a recurring-rule card: ask for the new figure (§18).
+
+    Marks the pending row `awaiting_amount` (`db.request_amount_change`) so the
+    *next* text message this user sends is read as a replacement amount, not a
+    new transaction — `app.py`'s webhook checks `pending_awaiting_amount` before
+    routing a `TextMessage` anywhere else, which is what makes that distinction
+    exist at all. The card itself is left untouched: Confirm and Skip still work
+    while a reply is pending, and Skip is the escape hatch if the user changes
+    their mind — it deletes the pending row outright, which clears the awaiting
+    flag along with it. A stale tap (the card is already gone) is answered and
+    ignored rather than 500ing, the same non-retry contract every other button
+    handler here uses. Does not commit — the caller owns the transaction.
+    Returns the marked `pending_id`, or `None` when there was nothing to mark.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, press.from_id)
+    pending_id = request_amount_change(conn, user_id, press.message_id)
+    answer_callback_query(
+        press.callback_query_id, "Send the new amount" if pending_id else "That card's gone"
+    )
+    if pending_id is not None:
+        send_message(press.chat_id, CHANGE_AMOUNT_PROMPT)
+    log_event("pending.amount_change_requested", status="ok" if pending_id else "noop",
+              update_id=press.update_id, source=press.source, user_id=user_id,
+              duration_ms=ms_since(start))
+    return pending_id
+
+
+def handle_amount_reply(
+    conn: psycopg.Connection, msg: TextMessage, telegram_message_id: int
+) -> Transaction | None:
+    """Apply a typed replacement amount, then re-render the card in place (§18).
+
+    The other half of "Change amount": `app.py` resolves `telegram_message_id`
+    via `db.pending_awaiting_amount` *before* dispatch, which is what routes
+    this message here instead of `handle_text`'s ordinary parse — no LLM call,
+    no pending row of its own. An unparseable reply (`money.parse_amount`
+    raising) leaves the row still `awaiting_amount` so the user can just try
+    again; Skip on the card remains the way out. On success the card is
+    re-rendered with the same Skip label and "Change amount" button it had
+    before — `set_pending_amount` only changes `amount`, so the category,
+    account and note the model or an earlier tap already settled survive
+    unchanged. Does not commit — the caller owns the transaction. Returns the
+    updated `Transaction`, or `None` when the reply couldn't be read as an
+    amount or the card is already gone.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    try:
+        amount = parse_amount(msg.text)
+    except (TypeError, ValueError):
+        send_message(msg.chat_id, CHANGE_AMOUNT_RETRY_PROMPT)
+        log_event("pending.amount_changed", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    txn = set_pending_amount(conn, user_id, telegram_message_id, amount)
+    if txn is None:
+        send_message(msg.chat_id, "That card's gone.")
+        log_event("pending.amount_changed", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    accounts = list_accounts(conn, user_id)
+    text, keyboard = confirm_card(
+        txn, accounts, cancel_label=SKIP_LABEL, change_amount_button=True
+    )
+    edit_message_text(msg.chat_id, telegram_message_id, text, reply_markup=keyboard)
+    log_event("pending.amount_changed", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
     return txn

@@ -1,12 +1,10 @@
 """Recurring-rule cron send — the confirm card for a due auto-debit (§18).
 
 §18: "On the day, the cron sends the ordinary confirm card... with Confirm /
-Change amount / Skip. Not a silent insert." This sends Confirm / Skip today —
-`confirm_card`'s `cancel_label` gets the rule the wording it needs and the tap
-already routes through the existing `handle_confirm`/`handle_cancel` webhook
-code, unchanged. "Change amount" is a materially separate interaction (a new
-free-text reply mode) and is left for a follow-up task; it does not block a
-rule asking before it fires, which is §18's actual point.
+Change amount / Skip. Not a silent insert." `confirm_card`'s `cancel_label` and
+`change_amount_button` give the rule the wording and the third button §18
+names, and every tap routes through the existing `handle_confirm`/
+`handle_cancel`/`handle_change_amount_request` webhook code, unchanged.
 
 The `cron` service runs `python -m kanakko.jobs.recurring` daily, `Asia/Kolkata`
 (crontab in `cron/kanakko.crontab`).
@@ -16,7 +14,7 @@ import logging
 import time
 
 from kanakko import configure_logging
-from kanakko.confirm import confirm_card
+from kanakko.confirm import SKIP_LABEL, confirm_card
 from kanakko.db import connect, due_rules_today, list_accounts, save_pending
 from kanakko.eventlog import ERROR, OK, log_event, ms_since
 from kanakko.jobs import DeliveryFailures
@@ -25,8 +23,6 @@ from kanakko.parse import Transaction
 from kanakko.tg import send_message
 
 log = logging.getLogger(__name__)
-
-SKIP_LABEL = "⏭️ Skip"
 
 
 def run(conn) -> int:
@@ -59,7 +55,9 @@ def run(conn) -> int:
                     account=rule["account_name"],
                 )
                 accounts = list_accounts(conn, rule["created_by"])
-                text, keyboard = confirm_card(txn, accounts, cancel_label=SKIP_LABEL)
+                text, keyboard = confirm_card(
+                    txn, accounts, cancel_label=SKIP_LABEL, change_amount_button=True
+                )
                 response = send_message(rule["telegram_user_id"], text, keyboard)
                 card_message_id = response["result"]["message_id"]
                 save_pending(

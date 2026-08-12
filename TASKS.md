@@ -1210,7 +1210,7 @@ per task:
       fix: `recurring_rule_id` surviving Confirm, and the per-rule savepoint
       actually isolating a blocked recipient. `uv run pytest` → 435 passed
       (7 new).
-- [ ] Recurring rules for auto-debits — "Change amount" on the cron's confirm
+- [x] Recurring rules for auto-debits — "Change amount" on the cron's confirm
       card (split 3b/3), the second of the three buttons §18 specifies
       ("Confirm / Change amount / Skip" — split 3a/3 shipped Confirm/Skip).
       Needs a bot-side "awaiting a free-text amount for pending_id N" state —
@@ -1220,6 +1220,34 @@ per task:
       corrected amount before Confirm is even tappable. Decide where that
       state lives (a pending-row column, since the card being live already
       implies one; not a new table).
+      Done: migration `017_pending_awaiting_amount.sql` adds a plain
+      `awaiting_amount BOOLEAN NOT NULL DEFAULT false` to `pending_transactions`
+      — the column the task named, not a new table. `confirm_card` gains
+      `change_amount_button` (only `jobs.recurring` passes it), rendering a
+      third row with `callback_data=CHANGE_AMOUNT` between Confirm/Skip and the
+      category buttons; `SKIP_LABEL` moved from `jobs/recurring.py` into
+      `confirm.py` alongside it, since `handlers.py` now needs the same literal
+      to re-render the card. `db.pending` gains the write triple:
+      `request_amount_change` (marks the tapped card awaiting, `handle_change_
+      amount_request`'s write), `pending_awaiting_amount` (the read `app.py`'s
+      webhook runs on *every* `TextMessage`, before any command routing, to
+      decide whether the message in hand is a reply or a transaction), and
+      `set_pending_amount` (re-validates the reply through `money.parse_amount`
+      §9, rewrites only `amount`, clears the flag — scoped to a row still
+      `awaiting_amount` so a stray message after the card settled elsewhere
+      can't rewrite it). An unparseable reply leaves the row awaiting so the
+      user can just retry; Skip on the card (an ordinary `cancel_pending`
+      delete) is the escape hatch, since deleting the row deletes the flag with
+      it. The amount reply is unmetered and never counts against the daily cap,
+      the same free-tap treatment `/undo` gets, since it's not an LLM call.
+      Three guards verified red-without-fix, green-with-fix: the cron card
+      carrying the "✏️ Change amount" button (temporarily reverted
+      `jobs/recurring.py`'s `change_amount_button=True`, watched
+      `test_run_sends_a_confirm_card_and_links_the_pending_row_to_the_rule`
+      fail), and `set_pending_amount` refusing a row that was never marked
+      awaiting (temporarily dropped the `AND awaiting_amount` clause, watched
+      `test_set_pending_amount_refuses_a_row_that_is_not_awaiting_one` fail).
+      `uv run pytest` → 446 passed (17 new).
 - [ ] Recurring rules for auto-debits — the creation surface (a bot command in
       the `/account`/`/invite` shape, or a dashboard form). Undecided; belongs
       to its own task, not the schema, dashboard, or cron-send splits above.

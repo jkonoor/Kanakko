@@ -49,7 +49,7 @@ def _wipe_household(conn, telegram_user_id, household_id):
 
 
 def test_run_sends_a_confirm_card_and_links_the_pending_row_to_the_rule(conn, monkeypatch):
-    """A due rule gets its own card, with Skip instead of Cancel (§18)."""
+    """A due rule gets its own card: Confirm / Change amount / Skip, not Cancel (§18)."""
     migrate(conn)
     day = today_ist()
     user_id, _hh, rule = _rule(conn, 810100, EXPENSE_CATEGORIES[0], "5000", day.day)
@@ -71,6 +71,7 @@ def test_run_sends_a_confirm_card_and_links_the_pending_row_to_the_rule(conn, mo
     assert "5,000.00" in sent["text"]
     labels = [b.text for row in sent["reply_markup"].inline_keyboard for b in row]
     assert "⏭️ Skip" in labels
+    assert "✏️ Change amount" in labels
     assert "❌ Cancel" not in labels
 
     with conn.cursor() as cur:

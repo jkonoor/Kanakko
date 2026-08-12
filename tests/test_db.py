@@ -20,10 +20,13 @@ from kanakko.db import (
     day_summary,
     get_or_create_user,
     month_summary,
+    pending_awaiting_amount,
     recent_transactions,
+    request_amount_change,
     save_pending,
     set_account_opening_balance,
     set_pending_account,
+    set_pending_amount,
     set_pending_category,
     set_transaction_category,
     soft_delete_transaction,
@@ -575,6 +578,74 @@ def test_set_pending_account_unknown_message_returns_none(conn):
     """Setting an account on a card with no pending row is a no-op, not an error."""
     migrate(conn)
     assert set_pending_account(conn, 42, 999_999, "Card") is None
+    conn.rollback()
+
+
+def test_request_amount_change_marks_the_row_and_pending_awaiting_amount_finds_it(conn):
+    """The "Change amount" write pair (§18): mark, then look the mark back up.
+
+    `request_amount_change` is `handle_change_amount_request`'s write, and
+    `pending_awaiting_amount` is what `app.py`'s webhook calls on every text
+    message to decide whether it's a replacement amount. Before the tap,
+    nothing is awaiting; after it, the same card's `telegram_message_id` comes
+    back.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 32)
+    save_pending(conn, user_id, 557, _txn("250.00"))
+
+    assert pending_awaiting_amount(conn, user_id) is None
+    pending_id = request_amount_change(conn, user_id, 557)
+    assert pending_id is not None
+    assert pending_awaiting_amount(conn, user_id) == 557
+    conn.rollback()
+
+
+def test_request_amount_change_unknown_message_returns_none(conn):
+    migrate(conn)
+    assert request_amount_change(conn, 42, 999_999) is None
+    conn.rollback()
+
+
+def test_set_pending_amount_updates_the_amount_and_clears_awaiting(conn):
+    """A replacement amount rewrites just `amount`, and stops the row awaiting one.
+
+    Everything else the model or an earlier tap already settled (category,
+    note) must survive — the same "one field changes" shape
+    `set_pending_category`/`set_pending_account` use.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 33)
+    save_pending(conn, user_id, 558, _txn("250.00"))
+    request_amount_change(conn, user_id, 558)
+
+    txn = set_pending_amount(conn, user_id, 558, parse_amount("7500"))
+    assert txn is not None
+    assert txn.amount == Decimal("7500.00")
+    assert txn.category == EXPENSE_CATEGORIES[0]  # untouched
+
+    assert pending_awaiting_amount(conn, user_id) is None  # flag cleared
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 558")
+        (parsed,) = cur.fetchone()
+    assert parsed["amount"] == "7500.00"  # §9: still a string, not a float
+    conn.rollback()
+
+
+def test_set_pending_amount_refuses_a_row_that_is_not_awaiting_one(conn):
+    """A stray reply after the card was never marked `awaiting_amount` must not
+    silently rewrite it — only a "Change amount" tap opens that door."""
+    migrate(conn)
+    user_id = _seed_user(conn, 34)
+    save_pending(conn, user_id, 559, _txn("250.00"))  # no request_amount_change
+
+    assert set_pending_amount(conn, user_id, 559, parse_amount("100")) is None
+    conn.rollback()
+
+
+def test_set_pending_amount_unknown_message_returns_none(conn):
+    migrate(conn)
+    assert set_pending_amount(conn, 42, 999_999, parse_amount("100")) is None
     conn.rollback()
 
 

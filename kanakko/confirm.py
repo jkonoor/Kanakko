@@ -22,6 +22,16 @@ CANCEL = "cancel"
 # shape as `categories.CATEGORY_PREFIX`.
 ACCOUNT_PREFIX = "acct:"
 
+# callback_data for the "Change amount" button on a recurring-rule card (§18).
+# Not a prefix like ACCOUNT_PREFIX/CATEGORY_PREFIX — there is only ever one of
+# these per card, so an exact match is enough.
+CHANGE_AMOUNT = "change_amount"
+
+# `jobs.recurring`'s `cancel_label` and `handlers.handle_amount_reply`'s
+# re-render both need this exact string, so it lives here once rather than in
+# `jobs/recurring.py` where only the cron send used to read it.
+SKIP_LABEL = "⏭️ Skip"
+
 
 def account_keyboard(accounts: list[str]) -> InlineKeyboardMarkup:
     """Account buttons, two per row — the same shape as `categories.keyboard` (§18, §5).
@@ -41,7 +51,10 @@ def account_keyboard(accounts: list[str]) -> InlineKeyboardMarkup:
 
 
 def confirm_card(
-    txn: Transaction, accounts: list[str] | None = None, cancel_label: str = "❌ Cancel"
+    txn: Transaction,
+    accounts: list[str] | None = None,
+    cancel_label: str = "❌ Cancel",
+    change_amount_button: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Render `txn` as the confirm-card text plus its Confirm/Cancel keyboard.
 
@@ -79,7 +92,11 @@ def confirm_card(
     second handler: `callback_data=CANCEL` is unchanged, so the tap still
     routes through the ordinary `handle_cancel`, which is exactly what
     skipping this month's send means — discard the pending row, leave the rule
-    itself alone.
+    itself alone. `change_amount_button` adds the third button the spec names
+    ("Confirm / Change amount / Skip") on its own row, below Confirm/Skip and
+    above the category buttons — `jobs.recurring` is the only caller that
+    passes it, and `handlers.handle_amount_reply` passes it again when
+    re-rendering the card so the button survives the edit.
     """
     if txn.type == "transfer":
         to_display = txn.to_account or txn.new_locked_account
@@ -115,6 +132,8 @@ def confirm_card(
                 InlineKeyboardButton("✅ Confirm", callback_data=CONFIRM),
                 InlineKeyboardButton(cancel_label, callback_data=CANCEL),
             ],
+            *([[InlineKeyboardButton("✏️ Change amount", callback_data=CHANGE_AMOUNT)]]
+              if change_amount_button else []),
             *category_keyboard(txn.type).inline_keyboard,
             *(account_keyboard(accounts).inline_keyboard if show_accounts else []),
         ]

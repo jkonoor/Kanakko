@@ -9,7 +9,14 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM, confirm_card, settled_card
+from kanakko.confirm import (
+    ACCOUNT_PREFIX,
+    CANCEL,
+    CHANGE_AMOUNT,
+    CONFIRM,
+    confirm_card,
+    settled_card,
+)
 from kanakko.parse import Transaction
 
 
@@ -91,6 +98,21 @@ def test_account_line_and_buttons_appear_once_a_second_account_exists():
 
     text, _ = confirm_card(_txn(account="Card"), ["Bank", "Card"])
     assert "Account: Card" in text  # a chosen account displays as itself
+
+
+def test_change_amount_button_only_appears_when_requested():
+    # §18: "Confirm / Change amount / Skip" — the third button is opt-in, since
+    # only `jobs.recurring`'s cron-sent card offers it. The daily path (every
+    # other caller) must not gain a tap it never asked for.
+    text, keyboard = confirm_card(_txn(), change_amount_button=True)
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert CHANGE_AMOUNT in data
+    labels = [b.text for r in keyboard.inline_keyboard for b in r]
+    assert "✏️ Change amount" in labels
+
+    text, keyboard = confirm_card(_txn())  # default: not requested
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert CHANGE_AMOUNT not in data
 
 
 def test_transfer_card_shows_no_category_and_no_pickers():

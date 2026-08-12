@@ -11,6 +11,8 @@ whose validator routes them through `money.parse_amount` (§9) — a JSON number
 float) would be refused there, so a float can never reach the ledger.
 """
 
+from decimal import Decimal
+
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -259,6 +261,87 @@ def set_pending_account(
         txn = Transaction.model_validate({**parsed, "account": account})
         cur.execute(
             "UPDATE pending_transactions SET parsed = %s WHERE pending_id = %s",
+            (Jsonb(txn.model_dump(mode="json")), pending_id),
+        )
+    return txn
+
+
+def request_amount_change(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int
+) -> int | None:
+    """Mark the user's pending row `awaiting_amount` (§18).
+
+    `handlers.handle_change_amount_request`'s write, fired by a "Change amount"
+    tap on a recurring-rule card: the flag is what makes the *next* text message
+    this user sends get read as a replacement amount rather than a new
+    transaction — `app.py`'s webhook checks `pending_awaiting_amount` before
+    routing a `TextMessage` anywhere else. Scoped by `user_id` like every other
+    pending write here (§1). Returns the marked `pending_id`, or `None` when
+    there is no pending row for this card (a stale or already-settled tap).
+    Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE pending_transactions SET awaiting_amount = true"
+            " WHERE user_id = %s AND telegram_message_id = %s RETURNING pending_id",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def pending_awaiting_amount(conn: psycopg.Connection, user_id: int) -> int | None:
+    """The `telegram_message_id` of the user's card currently awaiting a
+    replacement amount (§18), or `None` when nothing is waiting.
+
+    `app.py`'s webhook calls this for every `TextMessage` before deciding where
+    to route it — a hit means the message in hand is a reply to "Change
+    amount", not a transaction to parse. Most-recent-first like the other
+    pending lookups, in case more than one card is unusually awaiting an amount
+    at once.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT telegram_message_id FROM pending_transactions"
+            " WHERE user_id = %s AND awaiting_amount"
+            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def set_pending_amount(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int, amount: Decimal
+) -> Transaction | None:
+    """Apply a replacement amount to the user's awaiting pending row (§18).
+
+    `handlers.handle_amount_reply`'s write: "Change amount" only ever asks for a
+    new figure, never a full re-parse, so only `amount` changes — the rest of
+    the parsed row (category, account, note, date) survives untouched, the same
+    round-trip-through-`Transaction` shape `set_pending_category`/
+    `set_pending_account` use, re-validating the amount through
+    `money.parse_amount` (§9) on the way in. Scoped to a row that is still
+    `awaiting_amount`, so a stray message arriving after the card was cancelled
+    or confirmed elsewhere cannot silently rewrite a row that is no longer
+    waiting for one. Clears the flag on success. Returns `None` when there is no
+    such row. Does not commit — the caller owns the transaction.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT pending_id, parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s AND awaiting_amount"
+            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        pending_id, parsed = row
+        txn = Transaction.model_validate({**parsed, "amount": str(amount)})
+        cur.execute(
+            "UPDATE pending_transactions SET parsed = %s, awaiting_amount = false"
+            " WHERE pending_id = %s",
             (Jsonb(txn.model_dump(mode="json")), pending_id),
         )
     return txn

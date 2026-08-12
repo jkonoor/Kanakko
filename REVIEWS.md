@@ -12,6 +12,92 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `256ba0b` — refund schema, guard trigger and write path (Phase 10, split 1/2)
+
+**Scope:** migration 014 adds a `refund` transaction type, `refund_of_txn_id`,
+a structural link CHECK, and a `BEFORE INSERT OR UPDATE` trigger enforcing "the
+sum of refunds against a transaction can never exceed it" (§18). `db/refunds.py`
+adds `create_refund` (household-scoped write path). `reports.py` nets refunds
+out of `day_summary`, `month_summary` (total + per-category), and
+`accounts.py` counts them as account inflows.
+
+**Status: ⚠️ CHANGES REQUESTED**
+
+### What I checked
+
+- Read the full diff (`git show HEAD`) against §18 of `docs/DECISIONS.md`.
+- `uv run pytest -q` → **389 passed, 1 warning** in 15.67s. The two new tests
+  (`test_refund_sum_cannot_exceed_the_original`,
+  `test_refund_reduces_category_and_account_but_never_income`) pass.
+- **Concurrency probe (the finding below).** Wrote a throwaway test opening two
+  real connections to the same test cluster, each inserting a ₹600 refund
+  against the same ₹1,000 expense before either commits. Result:
+  `CONCURRENCY VIOLATION: 1200.00 refunded against a 1000 original` — both
+  committed. The DB-level invariant §18 calls "the constraint that makes it
+  trustworthy" is violated under ordinary concurrent writes.
+- **Verified the proposed fix.** Added `FOR UPDATE` to the trigger's
+  `SELECT amount INTO original_amount ... WHERE txn_id = NEW.refund_of_txn_id`
+  and re-ran: the second connection's trigger now blocks on the first's row
+  lock (my single-threaded probe self-deadlocks, which is the proof the lock
+  engages — in two real threads the first commits, the second unblocks, re-reads
+  the now-committed ₹600, and rejects). Reverted both the probe and the edit;
+  working tree is clean.
+- Confirmed money stays `Decimal`/`NUMERIC(12,2)` throughout; reads go through
+  `active_transactions`; the view is rebuilt so `refund_of_txn_id` is visible;
+  no `Refund` removed from `INCOME_CATEGORIES` yet (correctly deferred to its
+  own task, per the commit).
+
+### Findings
+
+**1. (High — silent money corruption) The refund-sum guard is not race-safe,
+and the write path claims it is.**
+`migrations/014_refunds.sql:50-51`, claim at `kanakko/db/refunds.py:5-9`.
+
+The trigger reads `refunded_so_far` with a plain aggregate `SELECT` and no row
+lock. Under Postgres's default READ COMMITTED isolation, two concurrent
+transactions each inserting a refund cannot see each other's uncommitted rows,
+so each passes the check independently. **Verified live:** two ₹600 refunds
+against a ₹1,000 expense both commit → ₹1,200 refunded against ₹1,000. This is
+exactly the §18 invariant ("the sum of refunds against a transaction can never
+exceed it") that the commit's own test claims to protect, and `refunds.py`'s
+docstring asserts the opposite of what happens: *"a race between two concurrent
+refunds still lands on the correct, DB-enforced answer rather than a
+check-then-write gap."* Per CLAUDE.md, a guard that reports safety it does not
+provide is worse than none. Two household members refunding the same expense
+(a shared ledger, §16) is the realistic trigger, not a contrived one.
+
+Failure scenario: expense ₹1,000; member A taps refund ₹600, member B taps
+refund ₹600 within the same instant → both succeed → the expense is over-refunded
+by ₹600, and its category total in `month_summary` goes negative (or is dropped
+by the `HAVING <> 0`), silently.
+
+Suggested fix: lock the original row inside the trigger so concurrent refunds
+against the same transaction serialize —
+`SELECT amount INTO original_amount FROM transactions WHERE txn_id = NEW.refund_of_txn_id FOR UPDATE;`
+(verified above). Add a two-connection test to `test_migrate.py` so this
+regression stays red without the lock — the current single-connection test
+cannot exercise it.
+
+**2. (Low — note, no fix required this commit) No guard prevents deleting or
+editing an expense that has live refunds.**
+`kanakko/db/reports.py` netting assumes the original still exists. If an expense
+with a ₹300 refund is later soft-deleted, `active_transactions` drops the
+₹1,000 expense but the ₹300 refund row survives, so the category nets to −₹300.
+Delete/edit-of-a-refunded-original is out of scope for this commit (the delete
+path isn't touched here), but it should be handled when split 2/2 or the edit
+path lands — flagging so it isn't forgotten.
+
+### Not issues
+
+- `day_summary` netting a refund by the refund's *own* `occurred_on` (so a day
+  can show negative `spent`) is a documented design choice, not a bug.
+- Deferring `INCOME_CATEGORIES` cleanup and the bot/dashboard UX to later tasks
+  is correct and clearly marked in `TASKS.md`.
+- The `txn_id <> NEW.txn_id` self-exclusion on INSERT (NULL comparison) is
+  correct.
+
+---
+
 ## 2026-08-12 — `aad95a6` — split Mini App data routes out of `app.py`
 
 **Scope:** pure refactor. Moves `/app/data`, `/app/delete`, `/app/category`,

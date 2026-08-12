@@ -15,7 +15,7 @@ import pytest
 from conftest import household_of, join_household
 
 from kanakko.categories import EXPENSE_CATEGORIES, INCOME_CATEGORIES
-from kanakko.db import month_summary
+from kanakko.db import day_summary, month_summary
 from kanakko.migrate import MIGRATIONS, migrate
 from kanakko.money import parse_amount
 
@@ -471,6 +471,86 @@ def test_account_backfill_leaves_every_report_number_unchanged(conn):
             (hh,),
         )
         assert placed == [cur.fetchone()[0]], "rows not homed to the household's default account"
+    conn.rollback()
+
+
+def test_transfer_is_excluded_from_spending_and_income_totals(conn):
+    """A transfer between two of a household's accounts moves neither total (§18).
+
+    §18: a transfer is "excluded from every spending and income total". The
+    exclusion is structural — `day_summary` and `month_summary` sum with positive
+    `type = 'expense'` / `type = 'income'` filters (db/reports.py:37,66,78), so a
+    `transfer` row is invisible to both. This proves it against the applied schema:
+    seed an expense, an income, and a ₹5,000 transfer between the household's two
+    accounts, then assert the summaries read back exactly the expense and the
+    income — the transfer counted for nothing. Broadening any one of those three
+    filters to catch a transfer (dropping a FILTER, or `type <> 'income'`) reddens
+    an assertion here. The 011 CHECK invariant is exercised too: a transfer must
+    name both ends, and no other type may name either.
+    """
+    migrate(conn)
+    first, last = date(2026, 8, 1), date(2026, 9, 1)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9710) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+
+        def account(name):
+            cur.execute(
+                "INSERT INTO accounts (household_id, owner, kind, name)"
+                " VALUES (%s, %s, 'spending', %s) RETURNING account_id",
+                (hh, uid, name),
+            )
+            return cur.fetchone()[0]
+
+        bank, cash = account("Bank"), account("Cash")
+
+        # An expense and an income the totals must count.
+        cur.execute(
+            "INSERT INTO transactions"
+            " (user_id, household_id, amount, type, category, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05', %s)",
+            (uid, hh, parse_amount("300.00"), EXPENSE_CATEGORIES[0], bank),
+        )
+        cur.execute(
+            "INSERT INTO transactions"
+            " (user_id, household_id, amount, type, category, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, 'income', %s, '2026-08-05', %s)",
+            (uid, hh, parse_amount("1000.00"), INCOME_CATEGORIES[0], bank),
+        )
+        # A ₹5,000 transfer Bank → Cash — neither spending nor income (§18).
+        cur.execute(
+            "INSERT INTO transactions"
+            " (user_id, household_id, amount, type, occurred_on, from_account_id, to_account_id)"
+            " VALUES (%s, %s, %s, 'transfer', '2026-08-05', %s, %s)",
+            (uid, hh, parse_amount("5000.00"), bank, cash),
+        )
+
+    # The transfer counted for nothing in either total.
+    _, spent, received = day_summary(conn, uid, date(2026, 8, 5))
+    assert spent == Decimal("300.00"), "transfer leaked into the spend total"
+    assert received == Decimal("1000.00"), "transfer leaked into the income total"
+    income, expenses, _ = month_summary(conn, uid, first, last)
+    assert expenses == Decimal("300.00"), "transfer leaked into the month's expenses"
+    assert income == Decimal("1000.00"), "transfer leaked into the month's income"
+
+    with conn.cursor() as cur:
+        # The invariant: a transfer must name both ends...
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            cur.execute(
+                "INSERT INTO transactions"
+                " (user_id, household_id, amount, type, occurred_on, from_account_id)"
+                " VALUES (%s, %s, %s, 'transfer', '2026-08-05', %s)",
+                (uid, hh, parse_amount("1.00"), bank),
+            )
+        # ...and no other type may name either end.
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            cur.execute(
+                "INSERT INTO transactions"
+                " (user_id, household_id, amount, type, category, occurred_on, account_id, to_account_id)"
+                " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05', %s, %s)",
+                (uid, hh, parse_amount("1.00"), EXPENSE_CATEGORIES[0], bank, cash),
+            )
     conn.rollback()
 
 

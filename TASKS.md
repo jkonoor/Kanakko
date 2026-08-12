@@ -693,7 +693,7 @@ per task:
       `confirm_pending` doesn't stamp `account_id`. That wiring is the onboarding
       task below ("Everyone gets a default `spending` account"); NOT NULL lands
       once it does.
-- [ ] Add the `transfer` type: extend the `type` CHECK, add
+- [x] Add the `transfer` type: extend the `type` CHECK, add
       `from_account_id`/`to_account_id` (both NULL except on transfers, and both
       NOT NULL when the type *is* transfer — a CHECK, so the invariant is
       structural). **Exclude transfers from every expense and income total**
@@ -701,6 +701,17 @@ per task:
       a household's accounts must move neither the spend nor the income figure,
       and it must fail if any one of those three filters is missed — assert the
       totals, not the SQL text (CLAUDE.md).
+      Done — migration `011_transfer_type.sql`: widens the `type` CHECK to
+      `('expense','income','transfer')`, adds the two nullable account-endpoint
+      columns with a structural CHECK (both set iff transfer), recreates the view.
+      **`db/reports.py` needed no change**: its sums use positive `type = 'expense'`
+      / `type = 'income'` FILTERs, so a `transfer` row is invisible to both totals
+      and the category breakdown by construction. The guard
+      (`test_transfer_is_excluded_from_spending_and_income_totals`) seeds an
+      expense, income, and a ₹5,000 transfer, asserts `day_summary`/`month_summary`
+      read back exactly the expense and income, and also exercises the CHECK
+      invariant. Verified it reddens by broadening the day filter to
+      `type <> 'income'`.
 - [ ] Derive balances: `opening_balance + inflows − outflows` per account, as a
       view or one query. **Never a stored running total** (§18) — a second source
       of truth that drifts silently is the one failure a money app cannot

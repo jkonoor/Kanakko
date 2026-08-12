@@ -69,6 +69,37 @@ def test_text_message_is_dispatched_with_its_fields():
     assert action.source == "webhook"
 
 
+def test_text_message_carries_the_telegram_reply_target():
+    # §18: a reconcile reply is routed by which nudge it replies to, read from
+    # Telegram's own reply_to_message.message_id — a bare message has none.
+    replied = dispatch(
+        {
+            "update_id": 4244,
+            "message": {
+                "message_id": 8,
+                "chat": {"id": 42},
+                "from": {"id": 99},
+                "text": "42300",
+                "reply_to_message": {"message_id": 909},
+            },
+        }
+    )
+    assert replied.reply_to_message_id == 909
+
+    bare = dispatch(
+        {
+            "update_id": 4245,
+            "message": {
+                "message_id": 9,
+                "chat": {"id": 42},
+                "from": {"id": 99},
+                "text": "spent 500 on food",
+            },
+        }
+    )
+    assert bare.reply_to_message_id is None
+
+
 def test_button_press_is_dispatched_with_its_fields():
     action = dispatch(
         {

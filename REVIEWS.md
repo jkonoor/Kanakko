@@ -14,7 +14,24 @@ returned, not what they were assumed to return.
 
 ## 2026-08-13 — `b71effc` reconcile reply routes by nudge, not by recency (104d562 review follow-up)
 
-**Status: ⚠️ CHANGES REQUESTED**
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — both
+findings fixed in the follow-up commit on `ralph/phase-10`.
+
+> **RESOLVED.** Finding 1 (MEDIUM — untested extraction line): added
+> `test_text_message_carries_the_telegram_reply_target` (`tests/test_webhook.py`),
+> asserting `dispatch()` reads `reply_to_message.message_id` off a real Telegram
+> payload into `TextMessage.reply_to_message_id`, and that a bare message (no
+> `reply_to_message` key) yields `None`. Sabotaged
+> `kanakko/handlers.py`'s extraction line to hardcode `reply_to_message_id=None`
+> — the new test failed (`assert None == 909`); restored — passes. Finding 2
+> (MEDIUM — nudge doesn't ask for a reply): `nudge_text` now appends "Reply to
+> this message with the number." to both the credit and non-credit wording, so
+> the reply shape `pending_awaiting_reconcile` needs for a multi-account
+> household is the one the nudge steers the user into. Extended
+> `test_run_nudges_every_live_non_external_account` to assert the cue appears in
+> both sent nudges; blanked `_REPLY_CUE` to `""` — failed; restored — passes.
+> `uv run pytest -q` → **477 passed, 1 warning** (was 476; +1 new test).
+> `ruff check kanakko/ tests/` → **All checks passed!**
 
 Scope: the fix commit for the three `104d562` findings — `TextMessage` gains
 `reply_to_message_id`; `pending_awaiting_reconcile` matches the reply to its

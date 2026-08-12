@@ -26,12 +26,27 @@ from kanakko.tg import send_message
 log = logging.getLogger(__name__)
 
 
+_REPLY_CUE = " Reply to this message with the number."
+
+
 def nudge_text(name: str, kind: str, balance: Decimal) -> str:
     """§18's example nudge, worded per kind — a credit account is asked what is
-    *owed*, never what is "in" it, the same distinction onboarding draws."""
+    *owed*, never what is "in" it, the same distinction onboarding draws.
+
+    Ends with an explicit "reply to this message" cue: `db.pending_awaiting_reconcile`
+    only routes a bare (non-reply) answer when exactly one account is outstanding
+    — the ordinary multi-account household (§18) needs the user to actually tap
+    Reply, so the nudge has to ask for it rather than assume it.
+    """
     if kind == "credit":
-        return f"I think you owe {format_amount(balance)} on {name} — what does your card statement say?"
-    return f"I think your {name} has {format_amount(balance)} — what does your bank say?"
+        return (
+            f"I think you owe {format_amount(balance)} on {name} — what does your "
+            f"card statement say?{_REPLY_CUE}"
+        )
+    return (
+        f"I think your {name} has {format_amount(balance)} — what does your bank "
+        f"say?{_REPLY_CUE}"
+    )
 
 
 def run(conn) -> int:

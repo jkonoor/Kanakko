@@ -52,6 +52,10 @@ def test_run_nudges_every_live_non_external_account(conn, monkeypatch):
     assert "what does your bank say" in texts
     assert "what does your card statement say" in texts
     assert "₹500.00" in texts  # the card's derived balance, what is owed
+    # §18's normal case is a multi-account household — pending_awaiting_reconcile
+    # only guesses the account when exactly one ask is outstanding, so the nudge
+    # itself has to steer the user into replying rather than typing bare.
+    assert texts.count("Reply to this message with the number.") == 2
 
     # Two accounts means two outstanding asks — `pending_awaiting_reconcile`
     # with no `reply_to_message_id` only resolves a single outstanding ask

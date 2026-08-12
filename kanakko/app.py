@@ -28,6 +28,7 @@ from kanakko.handlers import (
     CAP_REACHED,
     REMOVE_PREFIX,
     TextMessage,
+    _is_account,
     _is_greeting,
     _is_help,
     _is_household,
@@ -38,6 +39,7 @@ from kanakko.handlers import (
     _is_transfer,
     _is_undo,
     dispatch,
+    handle_account,
     handle_cancel,
     handle_category,
     handle_confirm,
@@ -366,6 +368,7 @@ async def webhook(request: Request) -> dict[str, bool]:
             or _is_household(action.text)
             or _is_remove(action.text)
             or _is_transfer(action.text)
+            or _is_account(action.text)
         )
         if is_parse and not within_daily_cap(conn, user_id):
             send_message(action.chat_id, CAP_REACHED)
@@ -393,6 +396,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_remove(conn, action)
                 elif _is_transfer(action.text):
                     handle_transfer(conn, action)
+                elif _is_account(action.text):
+                    handle_account(conn, action)
                 else:
                     handle_text(conn, action)
             elif action.data == CONFIRM:

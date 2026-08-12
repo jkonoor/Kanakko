@@ -36,13 +36,14 @@ from kanakko.db import (
     household_roster,
     remove_member,
     save_pending,
+    set_account_opening_balance,
     set_pending_category,
     transfer_ownership,
     undo_last,
     user_exists,
 )
 from kanakko.eventlog import log_event, ms_since
-from kanakko.money import format_amount
+from kanakko.money import format_amount, parse_amount
 from kanakko.parse import Transaction, build_request, parse_message, resolve_model
 from kanakko.tg import (
     answer_callback_query,
@@ -171,7 +172,9 @@ HELP_TEXT = (
     "/household — who's in your household\n"
     "/invite <name> — a single-use link to add someone (owner only)\n"
     "/remove <name> — remove a member, or /remove on its own to leave\n"
-    "/transfer <name> — hand over ownership\n\n"
+    "/transfer <name> — hand over ownership\n"
+    "/account credit <amount> — add a credit card, what you currently owe\n"
+    "/account locked <amount> — add an FD/SIP/chit, what's already in it\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went."
 )
 
@@ -199,7 +202,11 @@ _START_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 WELCOME = (
     "Welcome to Kanakko — your personal finance tracker.\n\n"
     'Just tell me what you spent or earned — like "spent 500 on groceries" or '
-    '"got 20000 salary" — and I\'ll log it after a one-tap confirm.\n\n'
+    '"got 20000 salary" — and I\'ll log it after a one-tap confirm. Everyday '
+    "spending already has a default account, so this works right away.\n\n"
+    "Got a credit card or an FD/SIP/chit? `/account credit 5000` (what you owe) "
+    "or `/account locked 20000` (what's already in it) adds it — skip this if "
+    "you don't, nothing else needs it.\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went, "
     "and send /help any time for everything I can do."
 )
@@ -852,6 +859,81 @@ def handle_transfer(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     log_event("ownership.transferred", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id, duration_ms=ms_since(start))
     return target_id
+
+
+ACCOUNT_COMMAND = "/account"
+
+ACCOUNT_USAGE = (
+    "Add a credit card or locked savings with its starting balance — e.g. "
+    "`/account credit 5000` (what you currently owe) or `/account locked 20000` "
+    "(what's already in an FD, SIP or chit). Everyday spending already has a "
+    "default account, so this is only for the rest."
+)
+
+ACCOUNT_BAD_KIND = (
+    "I only set up `credit` (a card — what you owe) and `locked` (FD, SIP, "
+    "chit — what's already in it) this way — e.g. `/account credit 5000`."
+)
+
+ACCOUNT_BAD_AMOUNT = "That doesn't look like an amount — try `/account credit 5000`."
+
+
+def _is_account(text: str) -> bool:
+    """True when `text` is the `/account` command — bare or `/account@bot`."""
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == ACCOUNT_COMMAND
+
+
+def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
+    """Set up a credit card or locked-savings account with its opening balance (§18).
+
+    `/account credit <amount>` and `/account locked <amount>` are the onboarding
+    ask `WELCOME` points to: `amount` is always what the user reports positively —
+    "how much you owe" for a card, "how much is already in it" for savings —
+    `set_account_opening_balance` is the one place that turns it into the signed
+    `opening_balance` the ledger stores (§18: "same column, different question").
+    Everyday spending already has a default account minted at household creation
+    (`create_household_of_one`), so this command is only for the other two kinds,
+    and an abandoned onboarding still leaves a working bot. Running it twice
+    corrects a typo rather than minting a duplicate account. Does not commit —
+    the caller owns the transaction. Returns the account row on success, or
+    `None` on a usage/validation refusal.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    arg = _command_arg(msg.text)
+    parts = arg.split(maxsplit=1) if arg else []
+    kind = parts[0].lower() if parts else None
+    amount_text = parts[1] if len(parts) == 2 else None
+
+    if kind is None or amount_text is None:
+        send_message(msg.chat_id, ACCOUNT_USAGE)
+        log_event("account.set_up", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    if kind not in {"credit", "locked"}:
+        send_message(msg.chat_id, ACCOUNT_BAD_KIND)
+        log_event("account.set_up", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    try:
+        amount = parse_amount(amount_text)
+    except (TypeError, ValueError):
+        send_message(msg.chat_id, ACCOUNT_BAD_AMOUNT)
+        log_event("account.set_up", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+
+    account = set_account_opening_balance(conn, user_id, kind, amount)
+    verb = "owe" if kind == "credit" else "have"
+    send_message(
+        msg.chat_id,
+        f"Got it — {account['name']} ({kind}), you {verb} {format_amount(amount)}.",
+    )
+    log_event("account.set_up", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+              account_id=account["account_id"], kind=kind, amount=amount)
+    return account
 
 
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:

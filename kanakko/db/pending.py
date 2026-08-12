@@ -56,6 +56,10 @@ def confirm_pending(
     `household_members` row for `user_id`, the tenancy axis §16 moves off the user.
     A user with no membership yields NULL and the NOT NULL constraint (migration
     008) refuses the insert rather than orphaning money from every household total.
+    `account_id` is the household's default account (§18) — a transaction that
+    names no account lands there; a household with no default (a test fixture that
+    bypassed onboarding) yields NULL, which `accounts.account_id` still permits
+    until the NOT NULL write-wiring task lands.
 
     The read → insert → delete → audit run in one transaction so a crash can never
     store a transaction while leaving its pending row live (a later double
@@ -81,11 +85,20 @@ def confirm_pending(
         pending_id, parsed = row
         txn = Transaction.model_validate(parsed)
         cur.execute(
+            "SELECT hm.household_id, a.account_id FROM household_members hm"
+            " LEFT JOIN accounts a"
+            "   ON a.household_id = hm.household_id AND a.is_default AND a.deleted_at IS NULL"
+            " WHERE hm.user_id = %s",
+            (user_id,),
+        )
+        home = cur.fetchone()
+        household_id, account_id = home if home is not None else (None, None)
+        cur.execute(
             "INSERT INTO transactions"
-            " (user_id, household_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, (SELECT household_id FROM household_members WHERE user_id = %s),"
-            " %s, %s, %s, %s, %s) RETURNING txn_id",
-            (user_id, user_id, txn.amount, txn.type, txn.category, txn.note, txn.date),
+            " (user_id, household_id, account_id, amount, type, category, note, occurred_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (user_id, household_id, account_id,
+             txn.amount, txn.type, txn.category, txn.note, txn.date),
         )
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))

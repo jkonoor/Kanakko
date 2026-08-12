@@ -731,12 +731,34 @@ per task:
 
 ### Onboarding, parsing, and the confirm card
 
-- [ ] Ask for accounts at onboarding: which kinds they have, and an opening
+- [x] Ask for accounts at onboarding: which kinds they have, and an opening
       balance for each. **A `credit` account is asked "how much do you currently
       owe", not "what is in it"** (§18) — same column, different question, and a
       card asking the wrong one is nonsense on screen. Everyone gets a default
       `spending` account whether or not they answer, so an abandoned onboarding
       still leaves a working bot.
+      Done as a command, not an interactive wizard — a card offering kind buttons
+      still needs a free-text amount reply, which means new per-user conversation
+      state either way, so `/account <kind> <amount>` (`credit`/`locked`, the two
+      askable kinds — `spending` is minted automatically and `external` is
+      structural) reuses the `/invite`-style single-command shape the bot already
+      has, with no new state machine. `WELCOME` names it right after describing the
+      default account, so onboarding surfaces it without a second message or a
+      forked welcome text; `HELP_TEXT` lists it permanently. `set_account_opening_balance`
+      is where "same column, different question" lives: `credit`'s reported amount
+      is negated on the way into `opening_balance`, `locked`'s is stored as-is — one
+      account per kind per household, so a repeat call corrects a typo instead of
+      minting a duplicate `Card`. The other half — `create_household_of_one` now
+      calls `create_default_accounts`, minting the default `spending` ('Bank') and
+      the structural `external` account the moment a household exists, and
+      `confirm_pending` stamps every new transaction's `account_id` from that
+      default — is the prerequisite the next task already names. Checks: household
+      creation mints exactly `{spending, external}` with no onboarding answer;
+      `set_account_opening_balance`'s credit negation and repeat-call update
+      (verified red without the fix); `confirm_pending` stamping the default
+      `account_id` (verified red without the wiring); `/account`'s usage, bad-kind
+      and bad-amount refusals; the webhook routes `/account` to `handle_account` and
+      never meters it (verified red without the routing branch).
 - [ ] Enforce `account_id` NOT NULL — the write-wiring half split off from the
       "Add `account_id` to `transactions`" task above, deferred like 007→008.
       Prereq (the task above): every household-creation path

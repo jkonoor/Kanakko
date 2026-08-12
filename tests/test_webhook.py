@@ -871,6 +871,36 @@ def test_webhook_routes_transfer_to_handle_transfer_and_never_meters_it(monkeypa
     assert claims == [None]  # unmetered — never counts against the daily cap
 
 
+def test_webhook_routes_account_to_handle_account_and_never_meters_it(monkeypatch):
+    """`/account` sets up a credit/locked account, not a transaction, so it must
+    never be metered.
+
+    Same two silent failures as `/invite`, `/household`, `/remove` and `/transfer`:
+    a routing miss would feed "/account credit 5000" to `handle_text` (an LLM call
+    and a junk pending card), and a metering miss would burn a daily-cap unit per
+    setup — locking a capped user out of ever adding a card. Asserts it routes to
+    `handle_account` and the claim is unmetered (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    accounted, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_account", lambda conn, msg: accounted.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 300, "message": {"message_id": 1, "chat": {"id": 42},
+                                          "text": "/account credit 5000"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(accounted) == 1 and texted == []  # routed to account setup, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
 def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
 

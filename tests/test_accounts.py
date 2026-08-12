@@ -14,7 +14,7 @@ from decimal import Decimal
 from conftest import household_of
 
 from kanakko.categories import EXPENSE_CATEGORIES, INCOME_CATEGORIES
-from kanakko.db import account_balances
+from kanakko.db import account_balances, create_household_of_one, set_account_opening_balance
 from kanakko.migrate import migrate
 from kanakko.money import parse_amount
 
@@ -110,3 +110,56 @@ def test_balances_are_household_scoped(conn):
     mine_names = {a["name"] for a in account_balances(conn, mine)}
     assert mine_names == {"Mine"}
     assert account_balances(conn, mine)[0]["balance"] == Decimal("60.00")
+
+
+def test_household_creation_mints_the_two_structural_accounts(conn):
+    """`create_household_of_one` leaves a working bot with no onboarding answer (§18).
+
+    A `spending` default ('Bank') — the pool a transaction naming no account lands
+    in — and the structural `external` counterparty, both minted the moment the
+    household exists, before anyone has typed `/account`. Dropping the
+    `create_default_accounts` call from `create_household_of_one` would leave the
+    first confirm with no default to stamp, which is exactly what this guards.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7301) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    accounts = {a["kind"]: a for a in account_balances(conn, uid)}
+    assert accounts.keys() == {"spending", "external"}
+    assert accounts["spending"]["name"] == "Bank"
+    assert accounts["spending"]["is_default"] is True
+    assert accounts["spending"]["balance"] == Decimal("0.00")
+    assert accounts["external"]["is_default"] is False
+    conn.rollback()
+
+
+def test_set_account_opening_balance_negates_credit_and_updates_on_a_repeat(conn):
+    """§18: "same column, different question" — credit stores what is *owed* as a
+    negative asset, `locked` stores what is already parked as a positive one. A
+    second call (correcting a typo) updates the one account rather than minting a
+    second `Card`, which the account_id staying the same across both calls proves.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7302) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    card = set_account_opening_balance(conn, uid, "credit", parse_amount("5000"))
+    savings = set_account_opening_balance(conn, uid, "locked", parse_amount("20000"))
+
+    balances = {a["account_id"]: a for a in account_balances(conn, uid)}
+    # Credit reads back as what is owed (positive) — stored internally as the
+    # negative asset the sign-convention CASE in account_balances negates again.
+    assert balances[card["account_id"]]["balance"] == Decimal("5000.00")
+    assert balances[savings["account_id"]]["balance"] == Decimal("20000.00")
+
+    corrected = set_account_opening_balance(conn, uid, "credit", parse_amount("4500"))
+    assert corrected["account_id"] == card["account_id"]  # updated, not duplicated
+    balances = {a["account_id"]: a for a in account_balances(conn, uid)}
+    assert balances[card["account_id"]]["balance"] == Decimal("4500.00")
+    assert len([a for a in balances.values() if a["kind"] == "credit"]) == 1
+    conn.rollback()

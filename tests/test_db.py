@@ -15,6 +15,7 @@ from conftest import household_of
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.db import (
     confirm_pending,
+    create_household_of_one,
     day_summary,
     get_or_create_user,
     recent_transactions,
@@ -131,6 +132,36 @@ def test_confirm_homes_the_transaction_in_the_confirmers_household(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT household_id FROM transactions WHERE txn_id = %s", (row["txn_id"],))
         assert cur.fetchone() == (ha,)  # A's household, not B's
+    conn.rollback()
+
+
+def test_confirm_stamps_the_households_default_account(conn):
+    """A confirmed row lands in the household's default account (§18).
+
+    `_seed_user`'s `household_of` is a raw test fixture that predates accounts and
+    mints no default (§18's `test_household_creation_mints_...` covers the real
+    onboarding path); this test uses `create_household_of_one` instead, the
+    production path, so the default `Bank` account actually exists to stamp.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (76) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    save_pending(conn, uid, 760, _txn("60.00"))
+    confirm_pending(conn, uid, 760, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.account_id, a.name FROM transactions t"
+            " JOIN accounts a ON a.account_id = t.account_id"
+            " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)",
+            (uid,),
+        )
+        account_id, name = cur.fetchone()
+    assert account_id is not None
+    assert name == "Bank"
     conn.rollback()
 
 

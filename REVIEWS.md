@@ -12,6 +12,55 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `d59e511` split handlers.py: `/remove` → `kanakko/commands/remove.py` (Phase 10, slice 3/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slices 1/6 (`/transfer`) and 2/6 (`/account`). Moves
+the `/remove` surface — the `REMOVE_*` constants, `_REMOVE_WARNING`,
+`_is_remove`, `_removal_keyboard`, `handle_remove`, and `handle_remove_choice`
+— out of `handlers.py` into a new `kanakko/commands/remove.py`, rewires
+`app.py`'s imports, drops the now-stale `check_removal`/`remove_member` db
+imports from `handlers.py`, and retargets `tests/test_member_removal.py` and
+`tests/test_webhook.py` at the new module. The shared spine
+(`TextMessage`/`ButtonPress`/`_command_arg`) stays in `handlers.py`. No
+behaviour, money, timezone, soft-delete, or SQL path is touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the block
+  deleted from `handlers.py` is character-identical to the block added in
+  `kanakko/commands/remove.py` (constants, warning template, both handlers,
+  `_is_remove`, `_removal_keyboard`). No logic, string, or `§16` authorization
+  changed. Money/tz/soft-delete not in scope of a move.
+- **Routing intact.** `grep` of `app.py`: line 24 imports
+  `REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice` from
+  `kanakko.commands.remove`; dispatch still calls `_is_remove` (190, 220),
+  `handle_remove` (221), and routes `REMOVE_PREFIX`-prefixed callbacks to
+  `handle_remove_choice` (242–243). The re-auth-on-tap design (`remove_member`
+  keyed by presser, not button) is preserved unchanged.
+- **No circular import.** `remove.py` imports `TextMessage`/`ButtonPress`/
+  `_command_arg` from `handlers.py`; `handlers.py` no longer references
+  anything in `remove.py`. `uv run python -c "import kanakko.app; import
+  kanakko.commands.remove; import kanakko.handlers"` → `imports ok`.
+- **Shared spine / stale imports.** `grep` confirms `TextMessage` (67),
+  `ButtonPress` (96), `_command_arg` (245) remain in `handlers.py`;
+  `check_removal`/`remove_member`/`_is_remove` no longer appear there
+  (correctly dropped/moved).
+- **No stale monkeypatches.** `grep "handlers\." tests/test_member_removal.py`
+  → no matches; all `send_message`/`edit_message_text`/`answer_callback_query`
+  patches and `REMOVE_*` reads now target `remove_command`. A patch left on
+  `handlers` would silently no-op (the finding class the commit guards against);
+  none remain. `test_webhook.py` patches `app_module.handle_remove*`
+  (routing-level, valid since `app` imports them into its own namespace).
+- **Suite + lint.** `uv run pytest` → **457 passed**; `uv run ruff check` on
+  the three touched modules → **All checks passed!**. `handlers.py` is **1116
+  lines** and `remove.py` **184** — both match the commit message.
+
+### Findings
+
+None. Verbatim move, routing and tests intact, `TASKS.md` box correctly ticked.
+
 ## 2026-08-13 — `d14980a` split handlers.py: `/account` → `kanakko/commands/account.py` (Phase 10, slice 2/6)
 
 **Status: ✅ DONE**

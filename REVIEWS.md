@@ -12,6 +12,91 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `d2c2e80` — auto-create a locked account on first mention (Phase 10)
+
+**Scope:** `new_locked_account` free-text field on the parse schema/`Transaction`,
+its confirm-card question, and `confirm_pending` get-or-creating the `locked`
+account on Confirm.
+
+**Status: ✅ DONE** — behaviour is correct and well-guarded; two low-severity,
+non-blocking notes below (neither corrupts a total or a balance).
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **364 passed, 1 warning** (the pre-existing Starlette/httpx
+  deprecation). Matches the commit's claim of 364 / 10 new.
+- Read the spec I judge against: `docs/DECISIONS.md` §18 (accounts, `locked` kind,
+  "contributions only, never market value", transfers excluded from all totals,
+  "show the account, never ask for it"). The change fits it.
+- Traced the full path end to end: `parse.py` (`parse_schema` gate,
+  `Transaction` field + validator), `handlers.py:358` (a transfer routes to
+  `confirm_card`, never `category_prompt`, so a null-category new-pool transfer
+  is not misrouted), `confirm.py` (card + settled receipt), `db/pending.py`
+  (`confirm_pending` get-or-create), migration `011`'s transfer CHECK.
+- **Money path:** `amount` stays `Decimal` — serialized as a string in
+  `save_pending`, read back through `Transaction`/`money.parse_amount`. No float
+  introduced by this diff. `NUMERIC(12,2)` unchanged.
+- **Reads/soft-delete:** the get-or-create SELECTs filter `deleted_at IS NULL`;
+  balance reads still go through `account_balances`/`active_transactions`
+  (unchanged here). No new raw `transactions` read.
+- **Maturities-need-no-code claim:** verified `list_accounts`
+  (`db/accounts.py:112`) returns every kind except `external`, so once a `locked`
+  pool exists its name is in the parse enum and an ordinary transfer
+  (`from_account` = pool) already handles a payout. Claim holds.
+- **Guard spot-check (red-without-fix):** ran `/tmp/probe.py` against the
+  `Transaction` validator directly — a new-pool transfer that also names
+  `to_account`, one missing `from_account`, one on a non-transfer type, and a
+  blank/whitespace pool name are each refused; a clean `new_locked_account`
+  transfer validates with `to_account=None`. Matches the four schema/validator
+  guards.
+
+### Findings (both LOW, non-blocking)
+
+1. **LOW — `kanakko/parse.py:313` — no distinctness guard on the new-pool path
+   (bounded, no money impact).** `_transfer_names_two_distinct_ends` enforces
+   `from_account != to_account` on the ordinary transfer path but not
+   `from_account != new_locked_account` on the new-pool path (the field is
+   deliberately unchecked against the closed set). Confirmed live:
+   `Transaction.model_validate({... from_account:"Bank", to_account:None,
+   new_locked_account:"Bank"})` is accepted. If the model emits
+   `new_locked_account` equal to an existing account that is also the
+   `from_account`, `confirm_pending`'s get-or-create reuses that account, so
+   `from_account_id == to_account_id` — a self-transfer, which migration 011's
+   CHECK permits (it requires only that both ends are non-null). **Why it's low:**
+   a self-transfer nets zero in `account_balances` (inflow +X, outflow −X on the
+   same account) and is excluded from every spending/income total, so no number
+   is wrong — the artifacts are a junk ledger row plus a misleading `New savings
+   account "Bank"?` card. The model is also guided against naming an existing
+   account. Suggested one-line fix if worth it: in the `new_locked_account`
+   branch also `raise` when `self.new_locked_account == self.from_account`.
+
+2. **LOW — `kanakko/db/pending.py:70-74,115-135` — "reuses rather than mints a
+   duplicate" holds for the stale-card case it describes, but not for true
+   concurrency.** There is no `UNIQUE(household_id, name)` on `accounts`
+   (migration 009), so the SELECT-before-INSERT prevents a duplicate only when the
+   racing pool's INSERT has already committed (the sequential stale-card scenario
+   the docstring literally names — verified by
+   `test_confirm_reuses_an_existing_account_...`). Two genuinely simultaneous
+   Confirms of the same new pool could each SELECT-miss and both INSERT. **Why
+   it's low:** negligible at household scale, and duplicate `locked` accounts split
+   history rather than corrupt a total. Noting it only because the docstring's
+   "racing a housemate's pool" wording reads slightly stronger than the guard
+   delivers.
+
+### Not findings (checked, fine)
+
+- The ticked box is not a false tick: auto-create works (minted `locked`, kind
+  and household asserted in `test_confirm_mints_...`), contributions are transfers,
+  maturities reuse the existing transfer path. The per-account in/out total was
+  split into a new *unchecked* bullet — a genuinely separate report with no query
+  to extend, a fair split, not scope-dodging.
+- Single-account households: `new_locked_account` rides the same `len(accounts) > 1`
+  gate, so their schema stays byte-for-byte unchanged (pinned test still green).
+- No secret, no float, no ORM/Celery/Redis, no charting lib, no confidence score
+  introduced.
+
+---
+
 ## 2026-08-12 — `7210fff` — credit card semantics end to end: transfers, not double spending (Phase 10)
 
 **Scope:** adds a `transfer` transaction type end to end — `parse_schema` gains

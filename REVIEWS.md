@@ -12,6 +12,96 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `285b835` — per-account contribution/payout totals for locked accounts (Phase 10)
+
+**Scope:** `db.locked_account_totals` (gross transfer-in / transfer-out per
+`locked` account) and the read side of `/account <name>` in `handlers.py`,
+delegated to a new `_handle_account_query`.
+
+**Status: ⚠️ CHANGES REQUESTED** — the core sum is correct, `Decimal`-safe,
+household-scoped and soft-delete-safe, and its guards fail for the right reason.
+But two behaviours need a decision before this is done: a whole class of the
+accounts this feature exists to report on is unreachable through the command
+(F1), and a freshly-onboarded pool reports "put in ₹0.00" (F2).
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **367 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the diff's 3 new tests on top of 364.
+- Read the spec I judge against: `docs/DECISIONS.md` §18 — the `locked` kind
+  ("Contributions in, maturity out. **Contributions only, never market
+  value**"), "knows what you put in and what came back", transfers excluded from
+  every total, and the table at line 767 that models an opening balance as a
+  `transfer external → the account`.
+- Read `kanakko/db/accounts.py:171` (`locked_account_totals`) against its sibling
+  `account_balances` (line 121): same two transfer subqueries, `to_account_id`
+  for contributions and `from_account_id` for payouts, reads
+  `active_transactions` (§6), scoped by `household_members` (§16), `kind =
+  'locked'`, `deleted_at IS NULL`. Sums are gross, not netted, and never touch
+  `opening_balance`. `NUMERIC → Decimal` preserved end to end (asserted by
+  `test_locked_account_totals_are_gross_sums_not_a_balance`).
+- **Verified both guards go red for the right reason** (asserting effects, not
+  spellings): the gross-sum test asserts `contributed == 7000.00` /
+  `paid_out == 3000.00` separately, so folding the 1000 opening balance in, or
+  summing net, reddens it; it also plants a second household's `SIP` (must not
+  appear, §16) and a soft-deleted `9999` contribution (must not count, §6). The
+  case-insensitive test queries lowercase `savings` against `Savings`; an
+  exact-case match would return `None` and `result["name"]` would raise. Good.
+- **Exercised the routing against a live DB** (throwaway test, since removed)
+  and confirmed the three findings below with actual output, not assumption.
+
+### Findings
+
+**F1 — medium — multi-word `locked` account names are unreachable via
+`/account <name>`.** `handlers.py:957` splits the argument with
+`arg.split(maxsplit=1)`, so any query of two or more words is read as
+`kind`+`amount` and falls into the onboarding branch. The *immediately prior*
+commit (`d2c2e80`) lets a `locked` account be auto-created with a free-text name
+from natural language ("put 5000 in my kids fund" → a pool named `Kids Fund`),
+and nothing normalises that to one word. Live probe: with a `locked` account
+`Kids Fund`, `/account Kids Fund` →
+`"I only set up credit … and locked … this way"` (`ACCOUNT_BAD_KIND`) — the read
+path silently misroutes to a message about *creating* an account. So the feature
+cannot report on a whole class of the very accounts it was built for.
+*Fix:* if `parts[0]` isn't `credit`/`locked`, treat the entire `arg` (not just
+the first word) as the account name and query it; only a leading
+`credit`/`locked` should enter the onboarding branch.
+
+**F2 — medium (spec fit) — a freshly-onboarded pool reports "put in ₹0.00".**
+`/account locked 20000` stores `20000` as `opening_balance` and the query
+deliberately excludes it, so `/account <name>` immediately after shows
+`"… — put in ₹0.00, got back ₹0.00."` (asserted by the commit's own
+`test_bare_name_reports_…` with `1000`). The onboarding prompt calls that number
+"what's already in it" and §18 says a `locked` account "knows what you put in";
+telling a user who just said they have 20 000 in an FD that they put in ₹0.00 is
+misleading. It also diverges from §18's own model (line 767: an opening balance
+*is* a `transfer external → account` — which, stored as a row, would count as a
+contribution here). The implementer's exclusion is documented and defensible
+(an opening balance is a net *position*, not purely contributions, so folding
+all of it into `contributed` is also not strictly right) — which is exactly why
+this needs a spec-owner decision rather than a silent choice in code. *Fix:*
+either surface the opening position as a third line ("started with …"), or
+have the spec owner confirm the "starting position is invisible to this report"
+reading and note it in §18 so it isn't re-litigated.
+
+**F3 — low — a missing-amount onboarding typo now yields the "not locked"
+message.** Before this commit, `/account credit` (amount forgotten) fell through
+to `ACCOUNT_USAGE`. Now `len(parts) == 1` routes it to the query path: live
+probe `/account credit` → `'I don't have a locked account named "credit" …'`.
+A user fumbling the onboarding command gets a reply about a nonexistent account
+instead of the usage hint. Minor. *Fix (optional):* if `parts[0]` is
+`credit`/`locked` with no amount, keep showing `ACCOUNT_USAGE`.
+
+**Nit (non-blocking):** the commit body says "Two guards verified
+red-without-fix" while `TASKS.md` says "Three guards" — the prose disagrees with
+itself; harmless.
+
+None of these corrupts a total: the sums themselves are correct, gross, and
+soft-delete-safe. The findings are about which accounts the command can *reach*
+(F1) and what an onboarded opening balance *reports* (F2).
+
+---
+
 ## 2026-08-12 — `d2c2e80` — auto-create a locked account on first mention (Phase 10)
 
 **Scope:** `new_locked_account` free-text field on the parse schema/`Transaction`,

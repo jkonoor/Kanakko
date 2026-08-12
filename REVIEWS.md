@@ -12,6 +12,60 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `a833485` — query lookup runs before bad-kind heuristic in `/account` routing (Phase 10)
+
+**Scope:** resolves **F4** against `aaaeb21`. `handle_account` now looks up
+`_find_locked_account(conn, user_id, arg)` before the `ACCOUNT_BAD_KIND` check,
+so a two-word `locked` account name whose second word parses as an amount
+("Goa 2026", "Car 2025") resolves as a query when such an account exists,
+instead of being misrouted to the "unknown kind" refusal. The lookup is hoisted
+out of `_handle_account_query` and passed in as a `match` parameter.
+
+**Status: ✅ DONE** — the fix is correct, minimal, and the new test fails for
+the reason it exists. No blocking findings.
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **372 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the diff's +1 test on top of 371.
+- **Verified the new test goes red without the fix.** Replaced only
+  `kanakko/handlers.py` with its `HEAD~1` version (keeping the new test), then
+  `uv run pytest tests/test_account_command.py -q` →
+  `test_year_suffixed_locked_account_name_is_reachable_as_a_query` **FAILED**
+  (the account exists but `/account Goa 2026` returned the bad-kind refusal,
+  never its totals). Restored `handlers.py` afterward.
+  - Note: reverting also cascaded a second failure in
+    `test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind`. That is an
+    artifact of the module-scoped `conn` fixture (`tests/conftest.py:75`) having
+    no per-test rollback — when the first test raises before its trailing
+    `conn.rollback()`, the uncommitted `locked` account leaks into the next
+    test. Pre-existing pattern across the whole file, not introduced here; the
+    new test follows it correctly and all pass in the committed state.
+- **Traced the routing by hand for each branch:**
+  - `/account Goa 2026` with the account present → `kind="goa"` ∉ {credit,
+    locked}, `match` found, bad-kind guard `match is None and …` is False →
+    query. ✅ (message: `Goa 2026 — put in ₹0.00, got back ₹0.00, started with
+    ₹500.00.`)
+  - `/account cash 500` with no such account → `match is None`, second word
+    looks like an amount → `ACCOUNT_BAD_KIND` still fires. ✅ (existing
+    `test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind` covers it.)
+  - `/account Savings` (single-word, existing) → `len(parts)==1` so the bad-kind
+    condition is False regardless, query with the hoisted `match`. Equivalent to
+    the old inline lookup — no double query, no behaviour change.
+
+### Notes (non-blocking)
+
+- The hoist is a net simplification: the lookup moved from inside
+  `_handle_account_query` to `_find_locked_account` and is done exactly once per
+  call, same as before. No extra DB round-trip.
+- Money paths untouched — `format_amount`/`Decimal` handling is unchanged; the
+  diff only reorders control flow and passes the already-computed row through.
+- If a user genuinely names a `locked` account "cash 500", `/account cash 500`
+  now queries it rather than refusing — that is the intended and correct
+  consequence of "an existing account wins over the onboarding guess."
+
+---
+
 ## 2026-08-12 — `aaaeb21` — multi-word locked names, opening-balance visibility, `/account credit` usage hint (Phase 10)
 
 **Scope:** resolves the three findings against `285b835` — F1 (multi-word

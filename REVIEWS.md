@@ -12,6 +12,61 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `aad95a6` — split Mini App data routes out of `app.py`
+
+**Scope:** pure refactor. Moves `/app/data`, `/app/delete`, `/app/category`,
+`/app/edit`, plus the `authenticated_user`/`permitted_user` helpers and
+`_parsed_edit_value`, from `kanakko/app.py` into a new
+`kanakko/webapp/routes.py` `APIRouter` included by `app.py`. `connect` moves
+with them; `tests/test_webapp.py` repoints its `app_module` import at the new
+module. Doc touch-ups in `AGENTS.md`/`TASKS.md`. No behaviour intended to change.
+
+**Status: ✅ DONE** — no findings. The move is byte-faithful, the routes are
+actually served, the load-bearing test import is verified red-without-fix, and
+the ticked task is real.
+
+### What I checked (commands, and what they returned)
+
+- **The move is faithful, not a rewrite.** Diffed the removed vs. added code
+  lines (normalising `@app.get/post` → `@router.get/post`); the only lines
+  removed-and-not-re-added are import reshuffles, the docstring, and the
+  `AGENTS.md`/`TASKS.md` prose. No route-body logic was dropped. Every handler,
+  the two auth helpers, and `_parsed_edit_value` are character-for-character the
+  same, so the money path (`parse_amount` → `Decimal`), the `active_transactions`
+  reads inside `month_summary`/`recent_transactions`, the IST period boundaries
+  (`current_month_ist`/`current_week_ist`/`previous_month_first`), the closed
+  `ALL_CATEGORIES`/`EDITABLE_TRANSACTION_FIELDS` whitelists, the 24h `max_age` on
+  the three mutating routes, and the user-scoping are all untouched.
+- **The routes are really served, not just defined.** `app.routes` shows the
+  moved routes nested under an `_IncludedRouter` entry (so a flat scan misleadingly
+  omits them), so I exercised them: `TestClient` `GET /app/data`, `POST
+  /app/delete`, `POST /app/category`, `POST /app/edit` each returned **401**
+  (`authenticated_user` rejecting the missing `initData`) — a matched route, not a
+  404. `include_router` wired them up correctly.
+- **`uv run pytest -q` → 387 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Unchanged count from the prior review.
+- **The test import change is load-bearing (guard-that-guards).** Temporarily
+  reverted just that one line back to `from kanakko import app as app_module` and
+  reran `tests/test_webapp.py` → **19 failed, 52 passed**, the failures raising
+  `RuntimeError: DATABASE_URL is not set` because `monkeypatch.setattr(app_module,
+  "connect", ...)` was patching a name the routes no longer look up. Restored the
+  line; `git status` clean. Exactly the 19-failure result the commit message
+  claimed.
+- **No dead imports left in `app.py`.** `CATEGORY_PREFIX` (callback routing),
+  `claim_update`/`connect`/`get_or_create_user` (webhook), and `SHELL_HTML` (shell
+  route) are all still referenced. `app.py` is 222 lines, `routes.py` 299 — both
+  within CLAUDE.md's 300-line guideline, matching the commit.
+- **Doc edits accurate.** `AGENTS.md`'s `db/` line reflects the already-existing
+  `kanakko/db/` package (prior work), and the new `webapp/` line is correct. The
+  `TASKS.md` tick is genuine work, not a stub.
+
+### Findings
+
+None. This is a mechanical, verified-faithful split with the one subtle risk (the
+monkeypatch target moving with `connect`) explicitly proven to still hold.
+
+---
+
 ## 2026-08-12 — `b14eeeb` — edit a dashboard row: amount, date, note, account (Phase 10)
 
 **Scope:** adds the four remaining editable fields (amount, date, note, account)

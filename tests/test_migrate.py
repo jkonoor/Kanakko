@@ -7,13 +7,15 @@ against a virgin database, and `migrate()` commits, so a persistent DSN would
 pass once and then fail on every later run.
 """
 
+from datetime import date
 from decimal import Decimal
 
 import psycopg
 import pytest
-from conftest import household_of
+from conftest import household_of, join_household
 
-from kanakko.categories import EXPENSE_CATEGORIES
+from kanakko.categories import EXPENSE_CATEGORIES, INCOME_CATEGORIES
+from kanakko.db import month_summary
 from kanakko.migrate import MIGRATIONS, migrate
 from kanakko.money import parse_amount
 
@@ -391,6 +393,84 @@ def test_account_kind_check_and_signed_opening_balance(conn):
                 " VALUES (%s, %s, 'savings', 'nope')",
                 (hh, uid),
             )
+    conn.rollback()
+
+
+def test_account_backfill_leaves_every_report_number_unchanged(conn):
+    """Adding account_id and backfilling moves no report number (§18).
+
+    §18 relocates every pre-existing row into its household's default account — a
+    pure placement, not a re-scoping. So `month_summary` must read identically
+    before and after 010's account-creation + backfill run. The check is a
+    before/after comparison across the migration: seed a two-member household with
+    income, expenses across categories, and a soft-deleted row, record the summary,
+    run 010's real statements (read from the file, not paraphrased), record it
+    again, and assert equality. A backfill that dropped a row, double-counted one,
+    or a view left frozen at 007 (so account_id never surfaces) would still pass
+    this — the summary reads `active_transactions` — which is the point: the
+    migration must be invisible to the totals. The row-level half asserts the
+    placement actually happened: every seeded row now points at the one live
+    default, none left NULL.
+    """
+    migrate(conn)
+    text = (MIGRATIONS / "010_transactions_account.sql").read_text()
+    make_default = "INSERT INTO accounts" + text.split("INSERT INTO accounts", 1)[1].split(";", 1)[0]
+    backfill = "UPDATE transactions t" + text.split("UPDATE transactions t", 1)[1].split(";", 1)[0]
+
+    food, groceries = EXPENSE_CATEGORIES[0], EXPENSE_CATEGORIES[1]
+    salary = INCOME_CATEGORIES[0]
+    first, last = date(2026, 8, 1), date(2026, 9, 1)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9610) RETURNING user_id")
+        (owner,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9620) RETURNING user_id")
+        (member,) = cur.fetchone()
+        hh = household_of(conn, owner)
+        join_household(conn, hh, member)
+
+        # Amounts chosen so a float sum would drift. A soft-deleted row is seeded so
+        # the "unchanged" claim covers the view's filter, not just the sum.
+        rows = [
+            (owner, "expense", food, "10.10"),
+            (owner, "expense", groceries, "20.20"),
+            (member, "expense", food, "0.05"),
+            (member, "income", salary, "999.99"),
+        ]
+        for uid, typ, cat, raw in rows:
+            cur.execute(
+                "INSERT INTO transactions (user_id, household_id, amount, type, category, occurred_on)"
+                " VALUES (%s, %s, %s, %s, %s, '2026-08-05')",
+                (uid, hh, parse_amount(raw), typ, cat),
+            )
+        cur.execute(
+            "INSERT INTO transactions (user_id, household_id, amount, type, category, occurred_on, deleted_at)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05', now())",
+            (owner, hh, parse_amount("500.00"), food),
+        )
+
+        before = month_summary(conn, owner, first, last)
+
+        cur.execute(make_default)  # 010: mint the household's default account
+        cur.execute(backfill)      # 010: home every row into it
+
+        after = month_summary(conn, owner, first, last)
+        assert after == before, "the account backfill changed a report number"
+
+        # Every seeded row is homed to the one live default; none left NULL.
+        cur.execute(
+            "SELECT count(*) FROM transactions WHERE household_id = %s AND account_id IS NULL", (hh,)
+        )
+        assert cur.fetchone() == (0,), "a transaction was left without an account"
+        cur.execute(
+            "SELECT DISTINCT account_id FROM transactions WHERE household_id = %s", (hh,)
+        )
+        placed = [r[0] for r in cur.fetchall()]
+        cur.execute(
+            "SELECT account_id FROM accounts"
+            " WHERE household_id = %s AND is_default AND deleted_at IS NULL",
+            (hh,),
+        )
+        assert placed == [cur.fetchone()[0]], "rows not homed to the household's default account"
     conn.rollback()
 
 

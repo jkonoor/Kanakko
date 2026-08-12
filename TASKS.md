@@ -676,13 +676,23 @@ per task:
       counterparty for opening balances and adjustments, so it is structural, not
       optional. No transaction changes yet; this task is the table and its
       constraints, proven against a real server.
-- [ ] Add `account_id` to `transactions`, nullable, with the backfill: every
+- [x] Add `account_id` to `transactions`, nullable, with the backfill: every
       existing row belongs to its household's default account. Then `SET NOT
       NULL` in the same idempotent style as 007/008 — a three-step migration
       because the column cannot be NOT NULL before the backfill runs. `db/`
       writes and reads keep working unchanged; this task must not alter a single
       report number, and the check that proves it is a before/after comparison of
       `month_summary` across the migration.
+      Split — did the nullable + backfill half (migration `010`): each existing
+      household gets a default `spending` account ('Cash'), every row is homed to
+      it, the view is recreated (`SELECT *` froze the list at 007), report numbers
+      unchanged (before/after `month_summary` check in `test_migrate.py`). **`SET
+      NOT NULL` is deferred**, exactly as 007 deferred it to 008: enforcing it now
+      breaks the first confirm of every household minted *after* the migration,
+      because no household-creation path yet mints a default account and
+      `confirm_pending` doesn't stamp `account_id`. That wiring is the onboarding
+      task below ("Everyone gets a default `spending` account"); NOT NULL lands
+      once it does.
 - [ ] Add the `transfer` type: extend the `type` CHECK, add
       `from_account_id`/`to_account_id` (both NULL except on transfers, and both
       NOT NULL when the type *is* transfer — a CHECK, so the invariant is
@@ -705,6 +715,14 @@ per task:
       card asking the wrong one is nonsense on screen. Everyone gets a default
       `spending` account whether or not they answer, so an abandoned onboarding
       still leaves a working bot.
+- [ ] Enforce `account_id` NOT NULL — the write-wiring half split off from the
+      "Add `account_id` to `transactions`" task above, deferred like 007→008.
+      Prereq (the task above): every household-creation path
+      (`create_household_of_one`, member re-homing) mints a default account and
+      `confirm_pending` stamps `account_id` from it, so no new insert omits the
+      column. Then a migration mirrors 008's single `SET NOT NULL`. Check: a
+      household minted after the migration can still record its first confirm, and
+      a NULL `account_id` insert is refused.
 - [ ] Make the parse schema's account enum per-request: `build_request` takes the
       household's accounts and emits them as the `account` enum. §18 says this
       departs from §11 deliberately — the list still comes from the accounts

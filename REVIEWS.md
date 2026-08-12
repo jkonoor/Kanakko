@@ -12,6 +12,67 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `74e6c1b` split handlers.py: design pass + `/transfer` → `kanakko/commands/` (Phase 10, slice 1/6)
+
+**Status: ✅ DONE**
+
+Pure refactor. Moves `/transfer` (`_is_transfer`, `handle_transfer`, its six
+`TRANSFER_*` constants) out of `handlers.py` into a new
+`kanakko/commands/transfer.py`, rewires `app.py`'s imports, and retargets the
+monkeypatches in `tests/test_transfer.py` at the new module. No behaviour,
+money, timezone, or SQL path is touched — the money/spec decisions
+(`Decimal`/`NUMERIC`, `active_transactions`, `AT TIME ZONE`, categories source)
+are not in scope for this diff.
+
+### What I checked
+
+- **Code move is byte-identical.** Diffed the removed block in `handlers.py`
+  against the new `transfer.py` body — same constants, same predicate, same
+  handler line-for-line. No logic changed in the move.
+- **Imports are correct and complete.** `transfer.py` imports everything it
+  uses (`time`, `psycopg`, `get_or_create_user`/`household_roster`/
+  `transfer_ownership` from `db`, `log_event`/`ms_since`, `TextMessage`/
+  `_command_arg` from `handlers`, `send_message`). `app.py` now pulls
+  `_is_transfer, handle_transfer` from `kanakko.commands.transfer` and drops
+  them from the `handlers` import block.
+- **No leftover / no orphaned imports.** `transfer_ownership` was removed from
+  `handlers.py`'s `db` import — grep confirms it has no other user there.
+  `household_roster` is *kept* because `/remove` still uses it (handlers.py:611,
+  730). `ruff check kanakko/ tests/` → **All checks passed!** (would flag an
+  unused import, so this is a real check, not a claim).
+- **No circular import.** `transfer.py` imports from `kanakko.handlers`;
+  `handlers.py` does not import `kanakko.commands.*`. `app.py` importing
+  `kanakko.commands.transfer` loads cleanly. `uv run python -c "import
+  kanakko.app"` and the full suite import without error.
+- **Dispatch wiring intact.** `app.py:195/226-227` still gate on `_is_transfer`
+  and call `handle_transfer` — now via the new import, same call site.
+- **The commit's central claim — the monkeypatch-retargeting gotcha — is real.**
+  Confirmed at the namespace level: `handle_transfer` resolves the unqualified
+  `send_message` in `kanakko.commands.transfer`'s module namespace, so a test
+  that patched `handlers.send_message` (the pre-move target) would *silently
+  fail to intercept* — the stub never fires, and the handler runs the real send.
+  That is exactly the "guard/stub that reports safety it doesn't provide" class:
+  the test would still exercise the code but stop asserting anything about the
+  reply. The test correctly moved its patch to `transfer_module`, and all its
+  assertions on `TRANSFER_USAGE`/`TRANSFER_NOT_OWNER` reference the new module.
+- **Tests, run not trusted.** `uv run pytest tests/test_transfer.py -q` → **9
+  passed**. `uv run pytest -q` (full suite) → **457 passed, 1 warning** —
+  matches the commit message exactly.
+
+### Findings
+
+None. The refactor is faithful, the retargeting was genuinely necessary (not
+cosmetic), the guard against it (ruff + the passing retargeted tests) is real,
+and `TASKS.md` accurately records this as slice 1/6 with the remaining five
+still unchecked — nothing is falsely ticked. The ticked box claims a design
+pass plus one command moved, which is precisely what the diff does.
+
+One note for the implementer, not a finding: `handlers.py` is now 1462 lines —
+still far past the 300-line guideline. That is expected and honestly recorded;
+slices 2–6 in `TASKS.md` are unchecked, so "missing is not wrong."
+
+---
+
 ## 2026-08-13 — `be98eab` — recurring rules: the creation surface, `/recurring` command (Phase 10)
 
 **Status: ✅ DONE**

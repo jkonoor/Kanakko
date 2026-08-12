@@ -12,6 +12,74 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `b7b4287` — migration 012: enforce `account_id` NOT NULL, except transfers
+
+**Scope:** Adds `migrations/012_transactions_account_not_null.sql` — a CHECK
+(`account_id IS NOT NULL OR type = 'transfer'`) enforcing the account axis on
+every non-transfer row, the write-wiring half deferred by migration 010. The
+rest of the diff is test-fixture surgery: `household_of()` now delegates to
+`create_household_of_one` (so test households get the default account production
+mints), a new `default_account_of()` helper looks it up, and ~20 raw-SQL inserts
+across 6 test files now stamp `account_id`. One new test covers the CHECK.
+
+**Status: ✅ DONE** — the migration is correct, the guard fails for the reason
+it exists (verified both directions), the production prereq genuinely holds, and
+the full suite passes. No blocking findings.
+
+### What I checked (commands and results)
+
+- **`uv run pytest -q` → `321 passed`.** Matches the commit message.
+- **The guard fails for the right reason — both directions.** Neutered the CHECK
+  to `CHECK (true)` and ran the new test
+  (`test_transactions_account_id_is_required_except_for_transfers`) → **FAILED**
+  (the "non-transfer with no account_id is refused" assertion reddens).
+  Separately tightened the CHECK to `CHECK (account_id IS NOT NULL)` (dropping
+  the transfer exemption) → **FAILED** (the "transfer with only from/to ends is
+  accepted" assertion reddens). So both halves of the exemption are actually
+  tested, not asserted-in-name-only. Restored the file; `git diff --stat` clean.
+- **The production prereq holds — no reachable NULL-account path.** The only
+  `INSERT INTO households` in the codebase is in `create_household_of_one`
+  (`kanakko/db/households.py:32`), which calls `create_default_accounts`
+  (line 46) minting the default `spending` pool. `confirm_pending`
+  (`kanakko/db/pending.py:88-95`) resolves `account_id` from that default via a
+  LEFT JOIN. I grepped `kanakko/db/accounts.py` for any soft-delete/close path
+  that could strip a household of its live default — there is none (only create,
+  set-opening-balance, and read). So a NULL `account_id` on a non-transfer
+  confirm is unreachable in production; the CHECK never fires on the money path.
+- **`ADD CONSTRAINT` won't fail on existing data.** Migration 010 backfilled
+  every existing non-transfer row's `account_id`, and nothing writes a
+  `transfer` row yet (011 only added the type), so the constraint validates
+  cleanly against current data.
+- **Migration ordering.** `kanakko/migrate.py:28` applies `sorted(*.sql)`, so 012
+  runs after 011 (the transfer type it references exists). `type = 'transfer'` in
+  the CHECK is a valid enum value per `011_transfer_type.sql`.
+- **Test-fixture changes are faithful to the new reality.** The
+  `test_balances_are_household_scoped` assertion change
+  (`tests/test_accounts.py:122`) — `{"Mine"}` → `{"Mine", "External"}` — is
+  correct: `household_of` now mints both structural accounts, so the untouched
+  `external` counterparty legitimately shows up. The `_account` helper's
+  `is_default=True` branch (renames/re-opens the existing default via UPDATE
+  rather than inserting a second, which the partial unique index would reject) is
+  correct; it ignores a requested `kind`, but every `is_default=True` caller
+  asks for `kind="spending"`, matching the minted default, so it's harmless.
+- **Money/timezone/soft-delete surfaces untouched.** The migration adds a table
+  constraint only; no report query, boundary computation, or view changed. The
+  backfill-preservation tests (`test_transactions_household_backfill_preserves_totals`,
+  `test_account_backfill_leaves_every_report_number_unchanged`) correctly drop
+  the new CHECK for the span they simulate a pre-account world, and roll back.
+
+### Minor observation (not blocking, out of this diff)
+
+- `confirm_pending`'s docstring (`kanakko/db/pending.py:59-62`) still says a
+  household with no default "yields NULL, which `accounts.account_id` still
+  permits until the NOT NULL write-wiring task lands." That task has now landed,
+  so the sentence is stale — a NULL there would now raise `CheckViolation`, not
+  be permitted. It's unreachable in practice (no path deletes the default), and
+  the line isn't in this commit's diff, so it's not a finding here — just worth a
+  one-line docstring fix next time that file is touched.
+
+---
+
 ## 2026-08-12 — `b29eced` — `/account` no longer crashes when the sender has no household
 
 **Scope:** Fixes the one blocking finding from the `70b6cc4` review — a

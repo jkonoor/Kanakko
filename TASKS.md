@@ -668,11 +668,11 @@ per task:
 ### The account model — nothing else works until this is done
 
 - [ ] Add `migrations/009_accounts.sql`: `accounts` (household_id, owner
-      user_id, `kind` CHECK in `spending`/`credit`/`pot`/`virtual`, name,
+      user_id, `kind` CHECK in `spending`/`credit`/`locked`/`external`, name,
       `opening_balance NUMERIC(12,2)` — signed, since a `credit` account's is
       what is owed — `is_default BOOLEAN`, created_at, deleted_at). One default
       per household enforced by a partial UNIQUE index, not by application code.
-      Every household gets a `virtual` account at creation — §18 makes it the
+      Every household gets a `external` account at creation — §18 makes it the
       counterparty for opening balances and adjustments, so it is structural, not
       optional. No transaction changes yet; this task is the table and its
       constraints, proven against a real server.
@@ -728,10 +728,10 @@ per task:
       `spending` account and **is not spending a second time**. The guard is the
       double-count itself — swipe ₹2,000, pay the bill, and the month's spending
       must read ₹2,000, not ₹4,000.
-- [ ] Investment pots: auto-create a `pot` on first mention ("put 5000 in SIP" →
-      "new pot 'SIP'?", one tap), contributions and maturities as transfers,
-      and a per-pot total of what went in and what came back. **No market value,
-      ever** (§18) — the pot reports contributions, which are facts.
+- [ ] Investment accounts: auto-create a `locked` on first mention ("put 5000 in SIP" →
+      "new savings account 'SIP'?", one tap), contributions and maturities as transfers,
+      and a per-account total of what went in and what came back. **No market value,
+      ever** (§18) — it reports contributions, which are facts.
 - [ ] Editing a row in the dashboard: amount, date, note, category, account.
       §13 built the recent-transactions list for exactly this ("correcting older
       entries") and §16 already scopes it — only the member who entered a row may
@@ -754,7 +754,7 @@ per task:
       delete live in the dashboard, consistent with the edit task above.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
-      adjustment row** against the `virtual` account. The guard is that the
+      adjustment row** against the `external` account. The guard is that the
       adjustment appears in the ledger and in the audit trail — a silent
       correction is the failure mode, so a test that only checks the balance
       afterwards would pass on the broken version.

@@ -737,10 +737,10 @@ kinds cover everything above:
 |---|---|---|
 | `spending` | Bank, Cash | Falls when you spend. **UPI is not a kind** — it is a rail that pulls from the bank |
 | `credit` | HDFC card | You *owe*. A swipe increases the debt; paying the bill is a transfer from a `spending` account |
-| `pot` | SIP, FD, Chit, RD, "Lent — cousin" | Money parked. Contributions in, maturity out. **Contributions only, never market value** |
-| `virtual` | Opening balance, Adjustment | The counterparty for money with no real origin (below) |
+| `locked` | SIP, FD, Chit, RD, "Lent — cousin" | Money parked. Contributions in, maturity out. **Contributions only, never market value** |
+| `external` | Opening balance, Adjustment | The counterparty for money with no real origin (below) |
 
-**A `pot` never carries a market value.** It knows what you put in and what came
+**A `locked` account never carries a market value.** It knows what you put in and what came
 back, both of which are facts. What an SIP is *worth today* needs NAV feeds, unit
 counts and cost bases — a different product, and one the user's broker already
 provides. Stating this limit is the decision, not an omission.
@@ -759,12 +759,12 @@ schema change:
 
 | The thing | Is just |
 |---|---|
-| SIP / FD / chit contribution | transfer, Bank → pot |
-| FD maturity, chit payout, loan repaid to you | transfer, pot → Bank |
+| SIP / FD / chit contribution | transfer, Bank → the locked account |
+| FD maturity, chit payout, loan repaid to you | transfer, locked account → Bank |
 | ATM withdrawal | transfer, Bank → Cash |
 | Credit card bill payment | transfer, Bank → card |
 | Sending money to a family member | transfer between two accounts in the household |
-| Opening balance | transfer, `virtual` → the account |
+| Opening balance | transfer, `external` → the account |
 
 **The ATM case is the one that proves the rule.** Without transfers, people log
 the withdrawal *and* the cash spending, double-counting every rupee they take
@@ -772,7 +772,7 @@ out.
 
 ### Rules that fall out, and must not be re-litigated in code
 
-**Opening balance is not income.** It is a transfer from the `virtual` account.
+**Opening balance is not income.** It is a transfer from the `external` account.
 Income means money that arrived from outside; a starting figure is a position,
 not an event. Leaking it into income puts a fake windfall in month one.
 
@@ -844,7 +844,7 @@ missing one, because nobody knows to look for it.
 Nothing is connected to a bank, so the ledger drifts, and a ledger you stop
 trusting is one you stop feeding. Weekly, per account: *"I think your Bank has
 ₹42,300 — what does your bank say?"* A different figure writes an **adjustment**
-row against the `virtual` account.
+row against the `external` account.
 
 **The adjustment is a visible ledger row, never a silent correction.** A number
 quietly rewritten to match is how a ledger starts lying.
@@ -857,7 +857,7 @@ quietly rewritten to match is how a ledger starts lying.
   migration, another special case — accounts, built badly, one at a time.
 - *Double-entry.* Correct and far too much ceremony for a chat bot. A pool with
   an opening balance gets every number this product shows.
-- *Portfolio value.* See `pot` above.
+- *Portfolio value.* See `locked` above.
 - *Per-member privacy inside a household.* It makes every total ambiguous — "is
   this everything, or everything I may see?" — for a case that already has an
   escape hatch: `/invite_signup` gives anyone their own household.

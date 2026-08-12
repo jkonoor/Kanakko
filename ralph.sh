@@ -19,6 +19,15 @@
 # docs/DECISIONS.md is the spec. TASKS.md is the queue. REVIEWS.md is the
 # review log. Each pass is a fresh context — the repo is the memory.
 #
+# Exit codes (supervise.sh depends on these):
+#   0  COMPLETE — nothing left but `[human]` tasks. Stop.
+#   1  Stalled — a pass committed nothing. Usually an exhausted session limit;
+#      occasionally a genuine blocker. Worth retrying after a wait.
+#   2  Iteration cap reached, work remains. Restart immediately.
+#
+# There is no BLOCKED code: prompts/dev.md skips `[human]` tasks and reports
+# "only those remain" as COMPLETE, so the case exists but arrives as 0.
+#
 # Overridable: RALPH_DEV_MODEL RALPH_QA_MODEL RALPH_ALLOWED_TOOLS
 
 set -euo pipefail
@@ -27,7 +36,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 MODE="loop"
 case "${1:-}" in
   dev|qa|loop) MODE="$1"; shift ;;
-  -h|--help)   sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help)   sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 MAX="${1:-10}"
 
@@ -144,3 +153,7 @@ done
 
 log "reached the iteration cap ($MAX) without COMPLETE — work remains"
 log "review with:  git log --oneline  &&  cat REVIEWS.md"
+
+# Exit 2, not 0: "there is more to do" must be distinguishable from "everything
+# is done", or a supervisor stops the phase the first time it hits the cap.
+exit 2

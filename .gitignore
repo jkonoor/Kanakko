@@ -11,3 +11,6 @@ venv/
 *.sqlite3
 .DS_Store
 deploy.local.env
+
+# supervisor run logs
+logs/

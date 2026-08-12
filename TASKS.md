@@ -667,7 +667,7 @@ per task:
 
 ### The account model — nothing else works until this is done
 
-- [ ] Add `migrations/009_accounts.sql`: `accounts` (household_id, owner
+- [x] Add `migrations/009_accounts.sql`: `accounts` (household_id, owner
       user_id, `kind` CHECK in `spending`/`credit`/`locked`/`external`, name,
       `opening_balance NUMERIC(12,2)` — signed, since a `credit` account's is
       what is owed — `is_default BOOLEAN`, created_at, deleted_at). One default

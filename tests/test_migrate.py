@@ -274,6 +274,126 @@ def test_transactions_household_id_is_not_null(conn):
     conn.rollback()
 
 
+def test_accounts_external_backfill_homes_every_household(conn):
+    """Every household gets exactly one `external` account, owned by its owner (§18).
+
+    §18 makes the `external` account the counterparty for opening balances and
+    adjustments, so it is structural. The backfill (migration 009) is exercised
+    against a *seeded* multi-household database, not the virgin one migrate() ran
+    on: three households are created first, then 009's real INSERT (read from the
+    file, not paraphrased) runs over them. A backfill that missed a household, made
+    two, or set the wrong owner reddens an assertion. Re-running proves idempotency:
+    the NOT EXISTS guard makes the second pass a no-op.
+    """
+    migrate(conn)
+    text = (MIGRATIONS / "009_accounts.sql").read_text()
+    backfill = "INSERT INTO accounts" + text.split("INSERT INTO accounts", 1)[1]
+    with conn.cursor() as cur:
+        owners = []
+        for tg in (9310, 9320, 9330):
+            cur.execute("INSERT INTO users (telegram_user_id) VALUES (%s) RETURNING user_id", (tg,))
+            (uid,) = cur.fetchone()
+            cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (uid,))
+            (hh,) = cur.fetchone()
+            owners.append((uid, hh))
+
+        cur.execute(backfill)
+
+        for uid, hh in owners:
+            cur.execute(
+                "SELECT owner, kind, name FROM accounts WHERE household_id = %s AND kind = 'external'",
+                (hh,),
+            )
+            assert cur.fetchall() == [(uid, "external", "External")], f"household {hh}"
+
+        # Idempotent: a second pass mints no duplicate.
+        cur.execute(backfill)
+        hhs = [hh for _, hh in owners]
+        cur.execute(
+            "SELECT count(*) FROM accounts WHERE household_id = ANY(%s) AND kind = 'external'",
+            (hhs,),
+        )
+        assert cur.fetchone() == (len(hhs),)
+    conn.rollback()
+
+
+def test_accounts_one_live_default_per_household(conn):
+    """The partial UNIQUE index lets a household have at most one live default (§18).
+
+    §18 pins "one default per household" to a structural constraint, not app code.
+    The index is partial on `is_default AND deleted_at IS NULL`, so: a second live
+    default in the same household is refused, two households may each have one, and
+    a soft-deleted former default must not block naming a new one. Dropping the
+    index from migration 009 reddens the first assertion.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9410) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (uid,))
+        (hh_a,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9420) RETURNING user_id")
+        (uid_b,) = cur.fetchone()
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (uid_b,))
+        (hh_b,) = cur.fetchone()
+
+        def add(hh, owner, is_default):
+            cur.execute(
+                "INSERT INTO accounts (household_id, owner, kind, name, is_default)"
+                " VALUES (%s, %s, 'spending', 'Bank', %s) RETURNING account_id",
+                (hh, owner, is_default),
+            )
+            return cur.fetchone()[0]
+
+        first_default = add(hh_a, uid, True)
+        add(hh_a, uid, False)  # a non-default is fine alongside it
+        add(hh_b, uid_b, True)  # another household's default is fine
+
+        # A second live default in household A is refused. A savepoint, not a full
+        # rollback, so the seeded households above survive the expected failure.
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            add(hh_a, uid, True)
+
+        # A soft-deleted former default does not block a new one.
+        cur.execute("UPDATE accounts SET deleted_at = now() WHERE account_id = %s", (first_default,))
+        add(hh_a, uid, True)
+    conn.rollback()
+
+
+def test_account_kind_check_and_signed_opening_balance(conn):
+    """kind is a closed set, and a credit account's opening balance can be negative (§18).
+
+    §18: a `credit` account's opening balance is what is *owed*, so the column is
+    signed — a `CHECK (amount > 0)` here (copied from `transactions`) would be
+    wrong. It round-trips through the applied NUMERIC(12,2), which would round a
+    float. And a kind outside the four is a hard error, not a silent free-text
+    pool the reports would ignore.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9510) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (uid,))
+        (hh,) = cur.fetchone()
+
+        cur.execute(
+            "INSERT INTO accounts (household_id, owner, kind, name, opening_balance)"
+            " VALUES (%s, %s, 'credit', 'HDFC card', %s) RETURNING account_id",
+            (hh, uid, Decimal("-12345.67")),
+        )
+        (acc,) = cur.fetchone()
+        cur.execute("SELECT opening_balance FROM accounts WHERE account_id = %s", (acc,))
+        assert cur.fetchone() == (Decimal("-12345.67"),)
+
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            cur.execute(
+                "INSERT INTO accounts (household_id, owner, kind, name)"
+                " VALUES (%s, %s, 'savings', 'nope')",
+                (hh, uid),
+            )
+    conn.rollback()
+
+
 def test_parse_store_sum_by_category_stays_exact(conn):
     """The whole money path — parse → store → SUM(amount) GROUP BY category.
 

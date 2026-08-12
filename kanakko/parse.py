@@ -82,6 +82,12 @@ _ACCOUNT_GUIDANCE = (
     "already was. \"paid the credit card bill 2000\", \"paid off my card\" is "
     "`type` \"transfer\", `from_account` the everyday spending account, "
     "`to_account` the credit card account, `category` null."
+    " If the message puts money into a locked/savings pool by name — \"SIP\", "
+    "\"FD\", \"RD\", \"chit\" — and that name matches none of the accounts "
+    "above, set `new_locked_account` to the pool's short name, `type` "
+    "\"transfer\", `from_account` the everyday spending account, `to_account` "
+    "null, `category` null. Only for money going in — a pool that has never "
+    "been mentioned before has nothing to pay out yet."
 )
 
 
@@ -148,7 +154,21 @@ def parse_schema(accounts: list[str] | None = None) -> dict:
         schema["properties"]["type"]["enum"].append("transfer")
         schema["properties"]["from_account"] = account_or_null()
         schema["properties"]["to_account"] = account_or_null()
-        schema["required"] += ["account", "from_account", "to_account"]
+        # §18 (investment accounts): a locked pool mentioned for the first time
+        # isn't in `accounts` yet, so it can't be a `to_account` enum value — this
+        # is free text, the escape valve `to_account`'s closed set can't offer.
+        # `confirm_pending` mints the account and resolves the id.
+        schema["properties"]["new_locked_account"] = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": (
+                "Short name for a locked/savings pool (SIP, FD, chit, RD) this "
+                "message moves money into, when that pool's name doesn't match "
+                "any account above. Null otherwise."
+            ),
+        }
+        schema["required"] += [
+            "account", "from_account", "to_account", "new_locked_account"
+        ]
     return schema
 
 
@@ -235,6 +255,11 @@ class Transaction(BaseModel):
     # Checked against the caller's own accounts the same way `account` is.
     from_account: str | None = None
     to_account: str | None = None
+    # §18 (investment accounts): a locked pool named for the first time — free
+    # text, deliberately not checked against the closed account set, since the
+    # whole point is that it isn't in it yet. Set only on a transfer, in place
+    # of `to_account` (`confirm_pending` mints the account and resolves the id).
+    new_locked_account: str | None = None
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -270,6 +295,16 @@ class Transaction(BaseModel):
             raise ValueError(f"unknown account: {value!r}")
         return value
 
+    @field_validator("new_locked_account")
+    @classmethod
+    def _new_locked_account_name_is_not_blank(cls, value: str | None) -> str | None:
+        # Deliberately not checked against the closed account set (the point of
+        # this field is that it isn't in it yet) — but a blank name is still a
+        # bad parse, not a pool.
+        if value is not None and not value.strip():
+            raise ValueError("new_locked_account must not be blank")
+        return value
+
     @model_validator(mode="after")
     def _transfer_names_two_distinct_ends(self) -> "Transaction":
         # Mirrors migration 011's structural CHECK: a transfer names both ends,
@@ -278,12 +313,29 @@ class Transaction(BaseModel):
         # IntegrityError. Two different ends: a self-transfer moves no money and
         # is never what "paid the credit card bill" means.
         if self.type == "transfer":
-            if self.from_account is None or self.to_account is None:
+            if self.new_locked_account is not None:
+                # §18: a pool mentioned for the first time has no existing
+                # `to_account` to name — confirm_pending mints it. Only ever a
+                # contribution: you cannot get money out of a pool that has
+                # never been mentioned before.
+                if self.from_account is None:
+                    raise ValueError("a new-pool transfer needs a from_account")
+                if self.to_account is not None:
+                    raise ValueError(
+                        "a new-pool transfer must not also name to_account"
+                    )
+            elif self.from_account is None or self.to_account is None:
                 raise ValueError("a transfer needs both from_account and to_account")
-            if self.from_account == self.to_account:
+            elif self.from_account == self.to_account:
                 raise ValueError("a transfer needs two different accounts")
-        elif self.from_account is not None or self.to_account is not None:
-            raise ValueError("from_account/to_account only apply to a transfer")
+        elif (
+            self.from_account is not None
+            or self.to_account is not None
+            or self.new_locked_account is not None
+        ):
+            raise ValueError(
+                "from_account/to_account/new_locked_account only apply to a transfer"
+            )
         return self
 
 

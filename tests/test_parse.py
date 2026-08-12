@@ -121,6 +121,19 @@ def test_account_vocabulary_guidance_appears_only_with_a_real_account_choice():
     assert "swiped" not in no_accounts["messages"][0]["content"]
 
 
+def test_new_locked_account_guidance_appears_only_with_a_real_account_choice():
+    # §18 (investment accounts): the model must be told about the escape valve
+    # for a pool it hasn't seen before, under the same gate as the rest of the
+    # account vocabulary.
+    system = build_request("put 5000 in SIP", accounts=["Bank", "Card"])[
+        "messages"
+    ][0]["content"]
+    assert "new_locked_account" in system
+
+    one_account = build_request("put 5000 in SIP", accounts=["Bank"])
+    assert "new_locked_account" not in one_account["messages"][0]["content"]
+
+
 def test_a_household_with_one_account_behaves_like_no_accounts_at_all():
     # The check the task names explicitly: a single-account household has no
     # real choice to make (null already means "the default account"), so its
@@ -153,6 +166,22 @@ def test_transfer_type_and_endpoints_appear_only_with_a_real_account_choice():
     assert "transfer" not in parse_schema()["properties"]["type"]["enum"]
     assert "transfer" not in parse_schema(accounts=["Bank"])["properties"]["type"]["enum"]
     assert "from_account" not in parse_schema(accounts=["Bank"])["properties"]
+
+
+def test_new_locked_account_field_rides_the_same_gate_as_transfer():
+    # §18 (investment accounts): the escape valve for a locked pool named for the
+    # first time is only meaningful once a transfer is reachable at all — same
+    # len(accounts) > 1 gate, so a single-account household's schema stays
+    # byte-for-byte unchanged (test_a_household_with_one_account_behaves_like_
+    # no_accounts_at_all already pins that).
+    schema = parse_schema(accounts=["Bank", "Card"])
+    field = schema["properties"]["new_locked_account"]
+    assert {"type": "string"} in field["anyOf"]
+    assert {"type": "null"} in field["anyOf"]
+    assert "new_locked_account" in schema["required"]
+
+    assert "new_locked_account" not in parse_schema(accounts=["Bank"])["properties"]
+    assert "new_locked_account" not in parse_schema()["properties"]
 
 
 def test_model_default_survives_empty_env(monkeypatch):
@@ -348,6 +377,61 @@ def test_a_transfer_to_itself_is_refused(monkeypatch):
     # A self-transfer moves no money — never what "paid the credit card bill"
     # means, and not a shape confirm_pending's insert could make sense of.
     bad = {**_TRANSFER, "from_account": "Card"}  # to_account is already "Card"
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_a_new_locked_account_transfer_validates_with_a_null_to_account(monkeypatch):
+    # §18 (investment accounts): a pool named for the first time isn't in the
+    # closed set yet, so it rides in `new_locked_account` instead of
+    # `to_account`, which the model leaves null.
+    new_pool = {
+        **_TRANSFER,
+        "note": "put 5000 in SIP",
+        "to_account": None,
+        "new_locked_account": "SIP",
+    }
+    calls = _feed(monkeypatch, new_pool)
+    txn = parse_message("put 5000 in SIP", accounts=["Bank", "Card"])
+    assert txn.new_locked_account == "SIP"
+    assert txn.to_account is None
+    assert txn.from_account == "Bank"
+    assert len(calls) == 1
+
+
+def test_a_new_locked_account_transfer_naming_an_existing_to_account_is_refused(
+    monkeypatch,
+):
+    # `new_locked_account` stands in for `to_account`, never alongside it — a
+    # parse naming both is ambiguous about which one the money actually moved to.
+    bad = {**_TRANSFER, "new_locked_account": "SIP"}  # to_account is "Card"
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_a_new_locked_account_transfer_needs_a_from_account(monkeypatch):
+    bad = {**_TRANSFER, "to_account": None, "from_account": None,
+           "new_locked_account": "SIP"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_new_locked_account_on_a_non_transfer_is_refused(monkeypatch):
+    bad = {**_GOOD, "new_locked_account": "SIP"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_new_locked_account_name_must_not_be_blank(monkeypatch):
+    bad = {**_TRANSFER, "to_account": None, "new_locked_account": "   "}
     calls = _feed(monkeypatch, bad, bad)
     with pytest.raises(ValidationError):
         parse_message("x", accounts=["Bank", "Card"])

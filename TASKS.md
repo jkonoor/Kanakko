@@ -919,10 +919,48 @@ per task:
       CHECK), the named double-count guard itself (swipe ₹2,000 + pay the bill →
       `month_summary` reads exactly ₹2,000), and `handle_text`'s picker exclusion.
       `uv run pytest` → 354 passed (10 new).
-- [ ] Investment accounts: auto-create a `locked` on first mention ("put 5000 in SIP" →
-      "new savings account 'SIP'?", one tap), contributions and maturities as transfers,
-      and a per-account total of what went in and what came back. **No market value,
-      ever** (§18) — it reports contributions, which are facts.
+- [x] Investment accounts: auto-create a `locked` on first mention ("put 5000 in SIP" →
+      "new savings account 'SIP'?", one tap), contributions and maturities as transfers.
+      **Split off the per-account total below** — this bullet bundled three things
+      and the total is a genuinely separate, unstarted piece (its own report, no
+      existing query to extend), not a prerequisite of the other two.
+      Done: the auto-create gap was schema-shaped, not application logic — a pool
+      named for the first time ("SIP") can't be a `to_account` enum value (it isn't
+      in `accounts` yet), so the model has no way to say where the money went.
+      `parse_schema`'s `len(accounts) > 1` gate (unchanged — same gate as every
+      other §18 field, so a single-account household's schema stays byte-for-byte
+      `parse_schema()`, still proven by the existing pinned test) now also adds
+      `new_locked_account` (free text, no enum — the escape valve a closed set
+      can't offer), and `_ACCOUNT_GUIDANCE` teaches it: "put 5000 in SIP" is
+      `type` "transfer", `from_account` the spending account, `to_account` null,
+      `new_locked_account` "SIP". `Transaction`'s model validator extends 011's
+      mirrored CHECK: a new-pool transfer needs `from_account` and *no*
+      `to_account` (the field replaces it), everything else is unchanged.
+      `confirm_card` leads with the question the task names — 'New savings
+      account "SIP"?' — over the same Confirm/Cancel buttons, no new callback
+      route. `confirm_pending`'s transfer branch get-or-creates the `locked`
+      account (SELECT before INSERT, so a stale card racing a same-named pool
+      reuses it rather than duplicating it) and resolves it as `to_account_id`;
+      the settled receipt names it via `txn.to_account or txn.new_locked_account`.
+      **Maturities needed no code**: once a pool has been mentioned once, its name
+      is in `accounts` and an ordinary transfer (`from_account` the pool,
+      `to_account` the spending account) already works — this task was only ever
+      about the pool that doesn't exist yet. Five guards verified red-without-fix,
+      green-with-fix: the schema gate, the guidance text, the Transaction
+      validator (`extra_forbidden` without the field), the confirm-card question
+      (rendered "Bank → None" without it), and `confirm_pending` minting the
+      account (a `CheckViolation` without it — a silent NULL `to_account_id` on a
+      transfer is refused at the DB, not just wrong). `uv run pytest` → 364 passed
+      (10 new).
+- [ ] Investment accounts: a per-account total of what a `locked` account has
+      received (contributions) and paid out (maturities) — split off the bullet
+      above. **No market value, ever** (§18): this reports two sums from the
+      ledger, not a balance and not what the pool is worth today — `locked`
+      already has a derived balance (`db.account_balances`) but no read shows the
+      gross in/out `docs/DECISIONS.md` calls the fact worth keeping ("it knows
+      what you put in and what came back, both of which are facts"). Undecided
+      and left to that task: where it surfaces — a bot command (`/account`
+      already exists as a light command surface) or a dashboard section.
 - [ ] Editing a row in the dashboard: amount, date, note, category, account.
       §13 built the recent-transactions list for exactly this ("correcting older
       entries") and §16 already scopes it — only the member who entered a row may

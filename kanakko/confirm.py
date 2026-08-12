@@ -67,11 +67,20 @@ def confirm_card(
     it renders its two account names instead ("Bank → Card") and skips the
     category line, buttons and account picker entirely; Cancel-and-retype is
     the correction path for a wrong transfer, not a second chooser.
+
+    §18 (investment accounts): a transfer naming `new_locked_account` instead of
+    `to_account` (the pool doesn't exist yet — `confirm_pending` mints it on
+    Confirm) leads with the question the task names: "New savings account
+    'SIP'?" — Confirm/Cancel doubling as create/decline, no separate tap.
     """
     if txn.type == "transfer":
-        lines = [
+        to_display = txn.to_account or txn.new_locked_account
+        lines = []
+        if txn.new_locked_account:
+            lines.append(f'New savings account "{txn.new_locked_account}"?')
+        lines += [
             f"Transfer — {format_amount(txn.amount)}",
-            f"{txn.from_account} → {txn.to_account}",
+            f"{txn.from_account} → {to_display}",
             f"Date: {txn.date.isoformat()}",
             f"Note: {txn.note}",
         ]

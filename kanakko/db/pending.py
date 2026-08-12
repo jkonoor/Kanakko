@@ -67,7 +67,11 @@ def confirm_pending(
     and `from_account_id`/`to_account_id` resolve `txn.from_account`/`to_account`
     by name instead — mirroring migration 011's CHECK, so a swipe (an ordinary
     expense on the `credit` account) and its bill payment (a transfer into it)
-    never both count as spending.
+    never both count as spending. A transfer naming `txn.new_locked_account`
+    instead of `to_account` (§18: a locked pool mentioned for the first time,
+    e.g. "put 5000 in SIP") mints that `locked` account here — get-or-create, not
+    a bare INSERT, so a stale card racing a housemate's identically-named pool
+    reuses it rather than minting a duplicate.
 
     The read → insert → delete → audit run in one transaction so a crash can never
     store a transaction while leaving its pending row live (a later double
@@ -102,14 +106,41 @@ def confirm_pending(
             # migration 011's CHECK enforces the same shape on the row.
             account_id = category = None
             cur.execute(
-                "SELECT"
-                "  (SELECT account_id FROM accounts"
-                "    WHERE household_id = %s AND name = %s AND deleted_at IS NULL),"
-                "  (SELECT account_id FROM accounts"
-                "    WHERE household_id = %s AND name = %s AND deleted_at IS NULL)",
-                (household_id, txn.from_account, household_id, txn.to_account),
+                "SELECT account_id FROM accounts"
+                " WHERE household_id = %s AND name = %s AND deleted_at IS NULL",
+                (household_id, txn.from_account),
             )
-            from_account_id, to_account_id = cur.fetchone()
+            from_row = cur.fetchone()
+            from_account_id = from_row[0] if from_row else None
+            if txn.new_locked_account is not None:
+                # §18 (investment accounts): the pool named on the card doesn't
+                # exist until this Confirm — get-or-create rather than a bare
+                # INSERT, since a stale card (accounts fetched before a
+                # housemate created the same-named pool) must not mint a
+                # duplicate.
+                cur.execute(
+                    "SELECT account_id FROM accounts"
+                    " WHERE household_id = %s AND name = %s AND deleted_at IS NULL",
+                    (household_id, txn.new_locked_account),
+                )
+                new_row = cur.fetchone()
+                if new_row is not None:
+                    to_account_id = new_row[0]
+                else:
+                    cur.execute(
+                        "INSERT INTO accounts (household_id, owner, kind, name)"
+                        " VALUES (%s, %s, 'locked', %s) RETURNING account_id",
+                        (household_id, user_id, txn.new_locked_account),
+                    )
+                    (to_account_id,) = cur.fetchone()
+            else:
+                cur.execute(
+                    "SELECT account_id FROM accounts"
+                    " WHERE household_id = %s AND name = %s AND deleted_at IS NULL",
+                    (household_id, txn.to_account),
+                )
+                to_row = cur.fetchone()
+                to_account_id = to_row[0] if to_row else None
         else:
             cur.execute(
                 "SELECT coalesce("
@@ -140,7 +171,10 @@ def confirm_pending(
             "note": txn.note,
             "occurred_on": txn.date,
             "from_account": txn.from_account,
-            "to_account": txn.to_account,
+            # A new pool's name lived in `new_locked_account`, not `to_account`,
+            # until the INSERT above minted it — the settled receipt still names
+            # it as the transfer's destination.
+            "to_account": txn.to_account or txn.new_locked_account,
         }
         _record_event(cur, txn_id=txn_id, user_id=user_id, action="confirm",
                       before=None, after=stored, source=source, update_id=update_id)

@@ -247,6 +247,103 @@ def test_confirm_writes_a_transfer_with_two_endpoints_and_no_account(conn):
     conn.rollback()
 
 
+def test_confirm_mints_a_new_locked_account_named_on_first_mention(conn):
+    """"Put 5000 in SIP" with no SIP account yet mints one, not a floating NULL (§18).
+
+    `confirm_pending`'s transfer branch resolves `new_locked_account` by minting a
+    `locked` account when Confirm is tapped, rather than trusting the account
+    already exists — the whole point of the field is that it doesn't yet. The
+    guard: the row's `to_account_id` names a real, freshly created `locked`
+    account, not NULL (which migration 011's CHECK would refuse for a transfer
+    anyway, but a silent fallback to the default account would slip past that
+    CHECK while still being the wrong account).
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (81) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)  # mints "Bank"
+
+    txn = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "5000.00",
+            "category": None,
+            "date": "2026-08-12",
+            "note": "put 5000 in SIP",
+            "from_account": "Bank",
+            "to_account": None,
+            "new_locked_account": "SIP",
+        }
+    )
+    save_pending(conn, uid, 810, txn)
+    row = confirm_pending(conn, uid, 810, source="webhook", update_id=None)
+    assert row["to_account"] == "SIP"  # the settled receipt names the new pool
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.kind, a.household_id FROM transactions t"
+            " JOIN accounts a ON a.account_id = t.to_account_id"
+            " WHERE t.txn_id = %s",
+            (row["txn_id"],),
+        )
+        kind, household_id = cur.fetchone()
+        cur.execute(
+            "SELECT household_id FROM household_members WHERE user_id = %s", (uid,)
+        )
+        (expected_household,) = cur.fetchone()
+    assert kind == "locked"
+    assert household_id == expected_household
+    conn.rollback()
+
+
+def test_confirm_reuses_an_existing_account_instead_of_a_second_new_locked_account(
+    conn,
+):
+    """A second "put 2000 in SIP" must land in the same pool, not mint a duplicate.
+
+    The get-or-create shape (not a bare INSERT) is what this proves: reverting
+    the SELECT-before-INSERT to an unconditional INSERT would mint a second "SIP"
+    account here and split the pool's history across two rows.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (82) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    first = Transaction.model_validate(
+        {
+            "type": "transfer", "amount": "5000.00", "category": None,
+            "date": "2026-08-12", "note": "put 5000 in SIP",
+            "from_account": "Bank", "to_account": None, "new_locked_account": "SIP",
+        }
+    )
+    save_pending(conn, uid, 811, first)
+    confirm_pending(conn, uid, 811, source="webhook", update_id=None)
+
+    second = Transaction.model_validate(
+        {
+            "type": "transfer", "amount": "2000.00", "category": None,
+            "date": "2026-08-13", "note": "put 2000 more in SIP",
+            "from_account": "Bank", "to_account": None, "new_locked_account": "SIP",
+        }
+    )
+    save_pending(conn, uid, 812, second)
+    confirm_pending(conn, uid, 812, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM accounts"
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            "   AND name = 'SIP' AND deleted_at IS NULL",
+            (uid,),
+        )
+        (count,) = cur.fetchone()
+    assert count == 1
+    conn.rollback()
+
+
 def test_credit_card_swipe_then_bill_payment_does_not_double_count_spending(conn):
     """The task's own guard: a swipe and its bill payment must read as ₹2,000, not ₹4,000 (§18).
 

@@ -107,6 +107,22 @@ def test_transfer_card_shows_no_category_and_no_pickers():
     assert data == [CONFIRM, CANCEL]  # nothing else on the card
 
 
+def test_new_locked_account_transfer_card_asks_before_creating_it():
+    # §18 (investment accounts): "put 5000 in SIP" with no SIP account yet leads
+    # with the question the task names, and shows the destination by the pool's
+    # name even though `to_account` itself is still null (confirm_pending mints
+    # the account on Confirm — same Confirm/Cancel buttons, no extra tap).
+    txn = _txn(
+        type="transfer", category=None, from_account="Bank", to_account=None,
+        new_locked_account="SIP",
+    )
+    text, keyboard = confirm_card(txn, ["Bank"])
+    assert 'New savings account "SIP"?' in text
+    assert "Bank → SIP" in text
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert data == [CONFIRM, CANCEL]
+
+
 def test_settled_transfer_card_shows_accounts_not_category_none():
     # settled_card's counterpart: a stored transfer row must never render
     # "Category: None" — the same gap a null category would leave on any other

@@ -13,9 +13,10 @@ from decimal import Decimal
 
 from conftest import household_of
 
-from kanakko import handlers
+from kanakko.commands import account as account_command
+from kanakko.commands.account import handle_account
 from kanakko.db import account_balances, create_household_of_one, get_or_create_user
-from kanakko.handlers import TextMessage, handle_account
+from kanakko.handlers import TextMessage
 from kanakko.migrate import migrate
 
 USER_TG = 501
@@ -23,7 +24,7 @@ USER_TG = 501
 
 def _stub_send(monkeypatch):
     sent = []
-    monkeypatch.setattr(handlers, "send_message",
+    monkeypatch.setattr(account_command, "send_message",
                         lambda chat_id, text: sent.append((chat_id, text)))
     return sent
 
@@ -45,7 +46,7 @@ def test_bare_command_is_a_usage_hint_and_stores_nothing(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_account(conn, _account("/account"))
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_USAGE)]
+    assert sent == [(USER_TG, account_command.ACCOUNT_USAGE)]
     assert {a["kind"] for a in account_balances(conn, user_id)} == {"spending", "external"}
     conn.rollback()
 
@@ -56,7 +57,7 @@ def test_unknown_kind_is_refused(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_account(conn, _account("/account cash 500"))
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_BAD_KIND)]
+    assert sent == [(USER_TG, account_command.ACCOUNT_BAD_KIND)]
     assert {a["kind"] for a in account_balances(conn, user_id)} == {"spending", "external"}
     conn.rollback()
 
@@ -67,7 +68,7 @@ def test_unparseable_amount_is_refused(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_account(conn, _account("/account credit not-a-number"))
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_BAD_AMOUNT)]
+    assert sent == [(USER_TG, account_command.ACCOUNT_BAD_AMOUNT)]
     conn.rollback()
 
 
@@ -110,7 +111,7 @@ def test_no_household_is_refused_not_a_crash(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_account(conn, _account("/account credit 5000"))
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_NO_HOUSEHOLD)]
+    assert sent == [(USER_TG, account_command.ACCOUNT_NO_HOUSEHOLD)]
     conn.rollback()
 
 
@@ -174,7 +175,7 @@ def test_bare_name_with_no_matching_locked_account_is_refused(conn, monkeypatch)
     result = handle_account(conn, _account("/account SIP"))
 
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_NOT_LOCKED.format(name="SIP"))]
+    assert sent == [(USER_TG, account_command.ACCOUNT_NOT_LOCKED.format(name="SIP"))]
     conn.rollback()
 
 
@@ -237,7 +238,7 @@ def test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind(conn, monkeypa
     result = handle_account(conn, _account("/account cash 500"))
 
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_BAD_KIND)]
+    assert sent == [(USER_TG, account_command.ACCOUNT_BAD_KIND)]
     assert {a["kind"] for a in account_balances(conn, user_id)} == {"spending", "external"}
     conn.rollback()
 
@@ -255,5 +256,5 @@ def test_credit_or_locked_with_no_amount_is_a_usage_hint_not_a_query(conn, monke
     result = handle_account(conn, _account("/account credit"))
 
     assert result is None
-    assert sent == [(USER_TG, handlers.ACCOUNT_USAGE)]
+    assert sent == [(USER_TG, account_command.ACCOUNT_USAGE)]
     conn.rollback()

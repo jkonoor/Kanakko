@@ -1304,11 +1304,26 @@ per task:
       intercepted the send) instead of a clean assertion failure — restargeted
       it at `kanakko.commands.transfer` and all 5 passed. `handlers.py` is now
       1462 lines; `uv run pytest` → 457 passed, `ruff check` clean.
-- [ ] `handlers.py` split, slice 2/6: `kanakko/commands/account.py`
+- [x] `handlers.py` split, slice 2/6: `kanakko/commands/account.py`
       (`handle_account` + its three helpers). Retarget
       `tests/test_account_command.py`'s `handlers.send_message` patch and
       `handlers.ACCOUNT_*`/`handlers._is_account` reads at the new module, move
       the `app.py` import, and repeat the red-without-fix check slice 1/6 did.
+      Done: moved `ACCOUNT_COMMAND`/`ACCOUNT_USAGE`/`ACCOUNT_BAD_KIND`/
+      `ACCOUNT_BAD_AMOUNT`/`ACCOUNT_NO_HOUSEHOLD`/`ACCOUNT_NOT_LOCKED`,
+      `_is_account`, `_looks_like_amount`, `_find_locked_account`,
+      `_handle_account_query` and `handle_account` verbatim; `app.py` now
+      imports `_is_account`/`handle_account` from `kanakko.commands.account`
+      (`handle_account_choice` stays in `handlers.py` — it's part of the
+      confirm-card core, not this command). Dropped `locked_account_totals`/
+      `set_account_opening_balance` from `handlers.py`'s now-stale `db` import.
+      `tests/test_account_command.py` retargeted its monkeypatch and every
+      `handlers.ACCOUNT_*` read at the new `account_command` module — verified
+      red-without-fix by patching `handlers.send_message` again: all 14 tests
+      failed with `RuntimeError: TELEGRAM_BOT_TOKEN is not set` (the stub never
+      intercepted, the real send path ran), same failure class slice 1/6 found.
+      `handlers.py` is now 1286 lines; `uv run pytest` → 457 passed, `ruff
+      check` clean.
 - [ ] `handlers.py` split, slice 3/6: `kanakko/commands/remove.py`
       (`handle_remove` + `handle_remove_choice`). `tests/test_member_removal.py`
       and `tests/test_webhook.py`'s `REMOVE_PREFIX`-routed callback tests both

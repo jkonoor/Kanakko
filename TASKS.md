@@ -1455,12 +1455,47 @@ per task:
       300-line guideline — the spine itself may need a further split later,
       not assumed done here); `kanakko/confirm_flow.py` is 263.
       `uv run pytest` → 457 passed, `ruff check` clean.
-- [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
-      ₹42,300 — what does your bank say?" A different figure writes a **visible
-      adjustment row** against the `external` account. The guard is that the
-      adjustment appears in the ledger and in the audit trail — a silent
-      correction is the failure mode, so a test that only checks the balance
-      afterwards would pass on the broken version.
+- [x] The reconcile nudge (§18) — the adjustment write path (split 1/2). Split
+      the same way 014/015 split refunds/recurring: the money-correctness core
+      (compute the drift, write a **visible** row, never a silent rewrite)
+      lands first; the weekly cron nudge and the bot-side reply that supplies
+      `reported_balance` are UX wiring on top of it — a genuinely separate
+      task (new per-user "awaiting a reconcile reply" state, the same shape
+      017's `awaiting_amount` needed for "Change amount"), not a deferrable
+      stub of this one.
+      Done: `kanakko.db.reconcile.create_adjustment(conn, user_id, account_id,
+      reported_balance, occurred_on, *, source, update_id)`. No schema change —
+      an adjustment is an ordinary `transfer` against the household's `external`
+      account (011 already has the columns and CHECK); migration `018` only
+      widens `transaction_events.action` to admit `'adjustment'`, distinct from
+      `'confirm'` so the audit query can tell a system correction from a
+      user-typed transfer. Recomputes the account's presented balance with the
+      same formula and credit-sign convention `accounts.account_balances` uses
+      (§18), then derives the transfer algebraically: `delta_raw = sign * drift`
+      (`sign` −1 for `credit`, else +1) makes the transfer amount `abs(delta_raw)`
+      and its direction the sign of `delta_raw`, so a `credit` account owing more
+      than the ledger thought moves money *out* of the card (the same direction
+      an ordinary swipe already moves it) rather than needing a kind-branched
+      special case. Zero drift writes nothing and returns `None`. Household-scoped
+      (§16, an `EXISTS`-shaped account lookup) and refuses the `external` account
+      itself (structural, never something a nudge is sent for). No caller yet,
+      same as `create_refund`/`create_recurring_rule` when their schemas landed.
+      The named guard verified two ways: (a) reverted migration 018, reran
+      `tests/test_reconcile.py` — 3 of 6 failed on `CheckViolation`, restored,
+      green; (b) rewrote the write to silently `UPDATE accounts SET
+      opening_balance = ...` instead of inserting a transfer + audit row (the
+      exact failure mode §18 names) — the same 3 tests failed because the
+      ledger row and audit row the assertions look for don't exist, proving a
+      balance-only check would have passed on the broken version. `uv run
+      pytest` → 463 passed (6 new), `ruff check` clean.
+- [ ] The reconcile nudge (§18) — the weekly cron send and the bot-side reply
+      (split 2/2). Weekly per account (a new schedule, not daily like the other
+      jobs): "I think your Bank has ₹42,300 — what does your bank say?", then
+      capture the free-text reply and call `db.reconcile.create_adjustment` with
+      it. Needs a per-pending-row "awaiting a reconcile figure" state — the same
+      shape `pending_transactions.awaiting_amount` (017) gave "Change amount",
+      not a new table — and a decision on where the nudge fits among the
+      existing evening/noon/monthly/recurring cron sends.
 
 ### After the code
 

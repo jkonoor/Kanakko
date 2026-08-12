@@ -17,9 +17,10 @@ from kanakko import app as app_module
 from kanakko import db, eventlog, handlers
 from kanakko.app import WEBHOOK_SECRET_HEADER, app
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
+from kanakko.commands.remove import REMOVE_PREFIX
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
 from kanakko.db import get_or_create_user, save_pending, set_account_opening_balance
-from kanakko.handlers import REMOVE_PREFIX, ButtonPress, TextMessage, dispatch
+from kanakko.handlers import ButtonPress, TextMessage, dispatch
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
 

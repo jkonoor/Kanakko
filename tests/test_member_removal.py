@@ -12,22 +12,21 @@ from decimal import Decimal
 
 from conftest import default_account_of, household_of
 
-from kanakko import handlers
+from kanakko.commands import remove as remove_command
+from kanakko.commands.remove import (
+    REMOVE_DELETE,
+    REMOVE_PREFIX,
+    REMOVE_RETAIN,
+    handle_remove,
+    handle_remove_choice,
+)
 from kanakko.db import (
     create_household_of_one,
     get_or_create_user,
     household_roster,
     remove_member,
 )
-from kanakko.handlers import (
-    REMOVE_DELETE,
-    REMOVE_PREFIX,
-    REMOVE_RETAIN,
-    ButtonPress,
-    TextMessage,
-    handle_remove,
-    handle_remove_choice,
-)
+from kanakko.handlers import ButtonPress, TextMessage
 from kanakko.migrate import migrate
 
 OWNER_TG = 111
@@ -37,7 +36,7 @@ OTHER_TG = 333
 
 def _stub_send(monkeypatch):
     sent = []
-    monkeypatch.setattr(handlers, "send_message",
+    monkeypatch.setattr(remove_command, "send_message",
                         lambda chat_id, text, reply_markup=None: sent.append((chat_id, text, reply_markup)))
     return sent
 
@@ -45,9 +44,9 @@ def _stub_send(monkeypatch):
 def _stub_taps(monkeypatch):
     """Capture the settled card edit and the callback ack for a button-tap test."""
     edits, acks = [], []
-    monkeypatch.setattr(handlers, "edit_message_text",
+    monkeypatch.setattr(remove_command, "edit_message_text",
                         lambda chat_id, message_id, text, reply_markup=None: edits.append(text))
-    monkeypatch.setattr(handlers, "answer_callback_query",
+    monkeypatch.setattr(remove_command, "answer_callback_query",
                         lambda cbq, text=None: acks.append(text))
     return edits, acks
 
@@ -297,7 +296,7 @@ def test_handle_remove_choice_reauthorizes_a_forged_button(conn, monkeypatch):
 
     # ravi (a member) forges a delete tap targeting priya.
     assert handle_remove_choice(conn, _tap(MEMBER_TG, REMOVE_DELETE, priya)) is None
-    assert acks[-1] == handlers.REMOVE_NOT_OWNER
+    assert acks[-1] == remove_command.REMOVE_NOT_OWNER
     assert priya in {m for m, _o, _l in household_roster(conn, owner)}  # untouched
     conn.rollback()
 
@@ -309,7 +308,7 @@ def test_handle_remove_owner_leaving_is_refused(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
 
     assert handle_remove(conn, _msg(OWNER_TG)) is None
-    assert sent[-1][:2] == (OWNER_TG, handlers.REMOVE_OWNER_MUST_TRANSFER)
+    assert sent[-1][:2] == (OWNER_TG, remove_command.REMOVE_OWNER_MUST_TRANSFER)
     assert _household_of(conn, owner) == hid
     conn.rollback()
 
@@ -323,7 +322,7 @@ def test_handle_remove_member_cannot_remove_another_via_label(conn, monkeypatch)
 
     # ravi (a member) tries to remove priya by label — refused before the ask.
     assert handle_remove(conn, _msg(MEMBER_TG, "/remove priya")) is None
-    assert sent[-1][:2] == (MEMBER_TG, handlers.REMOVE_NOT_OWNER)
+    assert sent[-1][:2] == (MEMBER_TG, remove_command.REMOVE_NOT_OWNER)
     assert priya in {m for m, _o, _l in household_roster(conn, owner)}
     conn.rollback()
 
@@ -354,11 +353,11 @@ def test_handle_remove_ambiguous_label_removes_nobody(conn, monkeypatch):
 
 
 def test_is_remove_recognises_the_command():
-    assert handlers._is_remove("/remove")
-    assert handlers._is_remove("/remove ravi")
-    assert handlers._is_remove("/remove@kanakko_bot")  # group form
-    assert not handlers._is_remove("remove")
-    assert not handlers._is_remove("/removed")
+    assert remove_command._is_remove("/remove")
+    assert remove_command._is_remove("/remove ravi")
+    assert remove_command._is_remove("/remove@kanakko_bot")  # group form
+    assert not remove_command._is_remove("remove")
+    assert not remove_command._is_remove("/removed")
 
 
 # --- roster label scope (regression guard for the join fix) -----------------

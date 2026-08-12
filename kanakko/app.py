@@ -21,6 +21,7 @@ from kanakko import __version__, configure_logging
 from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import CATEGORY_PREFIX
 from kanakko.commands.account import _is_account, handle_account
+from kanakko.commands.remove import REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice
 from kanakko.commands.transfer import _is_transfer, handle_transfer
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
 from kanakko.db import claim_update, connect, get_or_create_user, pending_awaiting_amount
@@ -29,7 +30,6 @@ from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
     REFUND_PREFIX,
-    REMOVE_PREFIX,
     TextMessage,
     _is_greeting,
     _is_help,
@@ -38,7 +38,6 @@ from kanakko.handlers import (
     _is_invite_signup,
     _is_recurring,
     _is_refund,
-    _is_remove,
     _is_start,
     _is_undo,
     dispatch,
@@ -55,8 +54,6 @@ from kanakko.handlers import (
     handle_recurring,
     handle_refund,
     handle_refund_choice,
-    handle_remove,
-    handle_remove_choice,
     handle_start,
     handle_text,
     handle_undo,

@@ -1324,13 +1324,35 @@ per task:
       intercepted, the real send path ran), same failure class slice 1/6 found.
       `handlers.py` is now 1286 lines; `uv run pytest` → 457 passed, `ruff
       check` clean.
-- [ ] `handlers.py` split, slice 3/6: `kanakko/commands/remove.py`
+- [x] `handlers.py` split, slice 3/6: `kanakko/commands/remove.py`
       (`handle_remove` + `handle_remove_choice`). `tests/test_member_removal.py`
       and `tests/test_webhook.py`'s `REMOVE_PREFIX`-routed callback tests both
       patch `handlers` directly — check `test_webhook.py`'s patches
       (`send_message`/`edit_message_text`/`answer_callback_query`) against
       *which* handler each specific test exercises before retargeting, since
       that file spans many commands in one module.
+      Done: moved `REMOVE_COMMAND`/`REMOVE_NO_MATCH`/`REMOVE_AMBIGUOUS`/
+      `REMOVE_NOT_OWNER`/`REMOVE_OWNER_MUST_TRANSFER`/`REMOVE_NOT_MEMBER`/
+      `REMOVE_PREFIX`/`REMOVE_RETAIN`/`REMOVE_DELETE`, `_is_remove`,
+      `_removal_keyboard`, `handle_remove` and `handle_remove_choice` verbatim
+      into the new module; `app.py` now imports them from
+      `kanakko.commands.remove` (`ButtonPress`/`TextMessage`/`_command_arg`
+      stay in `handlers.py`, same shared-spine shape as slices 1-2). Dropped
+      `check_removal`/`remove_member` from `handlers.py`'s now-stale `db`
+      import — `household_roster` and `InlineKeyboardButton`/`InlineKeyboardMarkup`
+      stay, still used by `handle_household` and the refund keyboard.
+      `test_webhook.py`'s `REMOVE_PREFIX`-routed callback tests patch
+      `app_module.handle_remove`/`handle_remove_choice` directly (routing-level,
+      unaffected by which module they live in) — only its `REMOVE_PREFIX` import
+      needed retargeting. `test_member_removal.py`'s handler-layer tests
+      (`send_message`/`edit_message_text`/`answer_callback_query`) retargeted
+      at the new `remove_command` module, same pattern as
+      `test_account_command.py`. Verified red-without-fix: reran with the
+      `send_message`/`edit_message_text`/`answer_callback_query` patches left on
+      `handlers` after the move — 10 failed on `InFailedSqlTransaction` (the real
+      send path ran, same failure class slices 1-2 found), not a clean assertion
+      mismatch. `handlers.py` is now 1116 lines; `uv run pytest` → 457 passed,
+      `ruff check` clean.
 - [ ] `handlers.py` split, slice 4/6: `kanakko/commands/invite.py`
       (`handle_invite` + `handle_invite_signup`, both `/invite*` commands share
       the same shape). Retarget `tests/test_invite.py` and

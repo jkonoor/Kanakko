@@ -745,6 +745,21 @@ per task:
       column. Then a migration mirrors 008's single `SET NOT NULL`. Check: a
       household minted after the migration can still record its first confirm, and
       a NULL `account_id` insert is refused.
+      **Settle the transfer case in this task**: a `transfer` names two accounts
+      and no single one, so blanket NOT NULL forces it to pick arbitrarily. Either
+      the constraint exempts transfers (a CHECK: `account_id` NOT NULL unless the
+      type is transfer) or a transfer stamps its `from_account_id`. Decide and say
+      which in the migration comment — an arbitrary pick made silently is a number
+      that looks right and answers the wrong question.
+- [ ] Show transfers in the dashboard's recent list. `recent_transactions` returns
+      every live row regardless of type, so a transfer will surface there the
+      moment one can be written — and `_category_select` will render it an empty
+      dropdown, because `CATEGORIES_BY_TYPE` has no `transfer` key. It degrades
+      rather than crashes today, which is why this needs a task rather than a
+      finding: a transfer should read as "Bank → SIP", not as a category-less
+      expense. While there: the hero panel's **"Balance" stat is `income −
+      expenses`**, a flow, and now that `account_balances` exists that name means
+      something else on the same screen. Rename it or show the real thing.
 - [ ] Make the parse schema's account enum per-request: `build_request` takes the
       household's accounts and emits them as the `account` enum. §18 says this
       departs from §11 deliberately — the list still comes from the accounts

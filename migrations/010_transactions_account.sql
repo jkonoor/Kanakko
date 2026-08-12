@@ -18,10 +18,13 @@
 
 -- Each existing household gets a default `spending` account, owned by the
 -- household owner — the pool a transaction naming no account lands in (§18).
+-- Named `Bank`, not `Cash`: every pre-existing row lands here, and that history
+-- is mostly UPI and card, which §18 says pull from the bank. Neither name is
+-- true of all of it, but `Cash` would mislabel the majority on screen.
 -- Idempotent: a re-run skips households that already have a live default (the
 -- partial UNIQUE index from 009 would reject a duplicate anyway).
 INSERT INTO accounts (household_id, owner, kind, name, is_default)
-SELECT h.household_id, h.owner, 'spending', 'Cash', true
+SELECT h.household_id, h.owner, 'spending', 'Bank', true
 FROM households h
 WHERE NOT EXISTS (
     SELECT 1 FROM accounts a

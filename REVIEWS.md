@@ -12,6 +12,121 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `104d562` reconcile nudge: the weekly send and the reply (Phase 10, split 2/2)
+
+**Status: ⚠️ CHANGES REQUESTED**
+
+Lands the other half of §18's reconcile nudge: `kanakko/jobs/reconcile.py` (the
+weekly Sunday-10:00-IST cron fan-out, one nudge per household account), migration
+`019` (makes `pending_transactions.parsed` nullable, adds
+`awaiting_reconcile_account_id` with an XOR CHECK), the `db.reconcile` read/ask/
+clear triple, and `kanakko/reconcile_flow.py` wired into the webhook. The money
+math, sign convention, failure-isolation loop, and both named guards all hold.
+**But the reply is routed to the wrong account whenever a household has more than
+one reconcilable account — which is the normal §18 case — writing the reported
+figure as an adjustment against an account the user never meant.** That is a
+silent money-correctness bug and blocks.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD --stat` — scope is exactly the 14 files claimed. No money-path
+  code outside the reconcile flow is touched.
+- `uv run pytest -q` → **473 passed, 1 warning** (the pre-existing Starlette
+  deprecation). Matches the commit's claimed count. `ruff check kanakko/` → **All
+  checks passed!**
+- **Both named guards verified red-without-fix, independently:**
+  - Stripped the `CHECK` block from migration `019` (kept the column change),
+    reran `test_migrate.py::test_pending_transactions_row_is_a_parsed_transaction_xor_a_reconcile_ask`
+    → **1 failed** (the "neither set" / "both set" inserts stopped raising
+    `CheckViolation`). Restored.
+  - Removed the `elif awaiting_reconcile is not None:` branch from `app.py`'s
+    webhook, reran `test_webhook.py::test_webhook_routes_an_awaited_reconcile_reply_and_never_meters_it`
+    → **1 failed** (the reply fell through instead of routing to
+    `handle_reconcile_reply`). Restored. `git status` clean afterwards.
+- **Reproduced the routing bug empirically.** A throwaway test: one user, the
+  default `Bank` (spending, id 1) plus a seeded `Card` (credit, id 3); ran
+  `reconcile.run(conn)` (2 nudges sent), then called the same
+  `pending_awaiting_reconcile(conn, uid)` the webhook uses to pick where a reply
+  goes. It returned `account_id = 3` (Card) — so a user answering the *Bank*
+  nudge has their bank balance applied to the *Card*. Deleted the temp test;
+  tree clean.
+- Read the spec (`docs/DECISIONS.md` §18), `db/reconcile.py`, `db/accounts.py`
+  (`account_balances`), `db/pending.py`, `money.py` (`parse_amount` is `Decimal`,
+  rejects float), `handlers.py` (`dispatch`, `TextMessage`), and confirmed
+  `today_ist()` buckets in `Asia/Kolkata`, not UTC.
+
+### Findings
+
+**1. (HIGH — silent wrong account) The reply is matched to the newest outstanding
+ask by LIFO, not to the nudge the user is answering.**
+`kanakko/reconcile_flow.py` + `kanakko/app.py:185` + `kanakko/db/reconcile.py:293`
+(`pending_awaiting_reconcile`).
+
+The weekly cron creates one awaiting-reply row *per account* in a household
+(`jobs/reconcile.py` fan-out; `test_run_nudges_every_live_non_external_account`
+asserts `count == 2` for a single user with a Bank and a Card). When a reply
+arrives, `app.py` picks the ask via `pending_awaiting_reconcile`, which returns
+`ORDER BY created_at DESC, pending_id DESC LIMIT 1` — the *most recent* ask. The
+reply carries no linkage to which nudge it answers: `dispatch` (`handlers.py:106`)
+never captures `reply_to_message`, and `RECONCILE_ADJUSTED` doesn't name the
+account, so the misroute is invisible.
+
+Failure scenario (reproduced above): Sunday 10:00, a household with Bank (id 1)
+and Card (id 3) receives two nudges — "I think your Bank has ₹42,300 — what does
+your bank say?" and "I think you owe ₹5,000 on Card…". The user reads the Bank
+nudge and replies `42300`. `pending_awaiting_reconcile` returns the Card ask
+(newest), so `handle_reconcile_reply` clears the Card ask and calls
+`create_adjustment(..., account_id=Card, reported=42300)` — writing a ~₹37,300
+adjustment against the credit card the user never touched, and replying "Logged
+an adjustment of ₹37,300.00 to match what you told me" with no account name. The
+user believes they reconciled the Bank. Note `created_at` is the transaction
+timestamp (constant within the run), so the `pending_id DESC` tie-break makes
+this deterministic, not race-dependent.
+
+Suggested fix: tie the reply to its nudge. Capture `reply_to_message.message_id`
+in `dispatch`, and have the webhook look up the ask by that specific
+`telegram_message_id` (the ask is already keyed by the nudge's message id) rather
+than by "most recent". When the reply isn't a Telegram reply (a bare number with
+no `reply_to`), either refuse-and-ask-which-account or fall back only when exactly
+one ask is outstanding. The single-account case the tests cover keeps working
+either way; the multi-account case stops corrupting the wrong ledger.
+
+**2. (LOW — compounds #1) The reply receipt names neither the account nor the
+old figure.** `kanakko/reconcile_flow.py:19-21` (`RECONCILE_MATCHED`,
+`RECONCILE_ADJUSTED`). Even once #1 is fixed, "Logged an adjustment of ₹X to
+match what you told me" gives the user nothing to verify against — which account,
+adjusted from what to what. Including the account name (and the previous derived
+balance) turns the receipt into a check the user can actually read, and would
+have made #1 visible in manual testing. Suggested fix: include the account name
+in both messages.
+
+**3. (LOW — edge) A genuinely-zero reported balance can't be entered.**
+`kanakko/reconcile_flow.py:502` calls `money.parse_amount`, which rejects `"0"`
+(`amount must be positive`). A user whose bank truly reads ₹0 gets
+`RECONCILE_RETRY_PROMPT` on every attempt and can never settle the ask. §18
+doesn't mandate zero handling, so this is non-blocking, but worth a note.
+
+### What is correct
+
+- **Money stays `Decimal`.** `parse_amount` refuses floats; `create_adjustment`
+  and `account_balances` compute over `NUMERIC` via `active_transactions` (§6),
+  never `transactions` directly. The nudge quotes `account_balances`'s own figure
+  rather than a third copy of the balance formula, as the commit claims.
+- **Sign convention carries through** for `credit`: reply `700` on a card owing
+  `500` deepens the debt (`from_account_id == card`), verified by the committed
+  test and consistent with `create_adjustment`'s algebra.
+- **Failure isolation** mirrors `jobs.fan_out`: per-account savepoint, failures
+  collected and raised after a commit, so one blocked recipient neither stops nor
+  rolls back the rest (`test_one_blocked_recipient_does_not_silence_the_others`).
+- **Metering:** the reply is a free tap — not metered, not capped (`is_parse` is
+  false, `claim_update` gets `None`), matching §16 and the amount-reply path.
+- **The XOR CHECK** genuinely prevents a pending row from being both/neither a
+  parsed transaction and a reconcile ask, verified red-without-fix.
+- **Crontab:** weekly `0 10 * * 0`, parsed by `test_crontab.py`; the `cron`
+  container runs `TZ=Asia/Kolkata`, so Sunday 10:00 is IST.
+
+---
+
 ## 2026-08-13 — `2fd6537` reconciliation adjustments: the write path (Phase 10, split 1/2)
 
 **Status: ✅ DONE**

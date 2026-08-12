@@ -106,15 +106,33 @@ h2 {
   color: var(--tg-theme-hint-color, #707579);
   width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
 }
+/* Third action, `expense` rows only (task 1082) — its own row so it doesn't
+   contend with `.del`/`.edit-toggle` for row 1/2, column 2; row 3 column 1 is
+   simply left empty on these rows, same as it already is on every other row. */
+.refund-toggle {
+  grid-row: 3; grid-column: 2; border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
 /* The hidden per-row editor (task 974): amount, date, note, account. `[hidden]`
    needs restating after `display: flex` below — an attribute selector and a
    class selector have equal specificity, so without this rule the later
-   `.txn-edit` declaration would win and the panel would never actually hide. */
-.txn-edit { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
-.txn-edit[hidden] { display: none; }
-.txn-edit input, .txn-edit select {
+   `.txn-edit` declaration would win and the panel would never actually hide.
+   `.txn-refund` (task 1082) shares the same shape. */
+.txn-edit, .txn-refund { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
+.txn-edit[hidden], .txn-refund[hidden] { display: none; }
+.txn-edit input, .txn-edit select, .txn-refund input {
   font: inherit; color: inherit; background: var(--tg-theme-secondary-bg-color, rgba(128,128,128,.1));
   border: 0; border-radius: 8px; padding: 8px 10px; min-height: 44px;
+}
+/* The refund panel's explicit submit (task 1082) — unlike the edit fields, which
+   auto-save on `change`, a refund adds a new row rather than overwriting one, so
+   it gets a real button rather than firing on blur. Telegram's own button colour,
+   the same var `.fill` already follows. */
+.refund-submit {
+  border: 0; border-radius: 8px; padding: 10px; min-height: 44px; font: inherit; font-weight: 600;
+  background: var(--tg-theme-button-color, #3390ec); color: var(--tg-theme-button-text-color, #fff);
+  cursor: pointer;
 }
 </style>
 </head>
@@ -161,6 +179,27 @@ app.addEventListener('click', e => {
   if (editBtn) {
     const panel = editBtn.closest('.txn').querySelector('.txn-edit');
     panel.hidden = !panel.hidden;
+    return;
+  }
+  // Same for the refund toggle (task 1082) — reveals `_refund_panel`.
+  const refundBtn = e.target.closest('.refund-toggle');
+  if (refundBtn) {
+    const panel = refundBtn.closest('.txn').querySelector('.txn-refund');
+    panel.hidden = !panel.hidden;
+    return;
+  }
+  // The refund panel's own submit (task 1082) — unlike every other control here,
+  // this one doesn't fire on `change`: a refund adds a row rather than
+  // overwriting one, so it waits for an explicit tap.
+  const refundSubmit = e.target.closest('.refund-submit');
+  if (refundSubmit) {
+    const amount = refundSubmit.closest('.txn-refund').querySelector('.refund-amount').value;
+    if (!amount) return;
+    fetch('/app/refund', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(refundSubmit.dataset.id), amount}),
+    }).then(r => { if (r.ok) load(); });
     return;
   }
   const btn = e.target.closest('.del');

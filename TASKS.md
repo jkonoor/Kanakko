@@ -1079,20 +1079,32 @@ per task:
       takes its own savepoint (`conn.transaction()`), not the whole transaction.
       `refund` (bare word) is now in `HELP_TEXT` and `test_help.py`'s
       undiscoverable-command guard.
-- [ ] Refunds — the Mini App dashboard action (§18, split 3/3): a "Refund"
-      button on a dashboard row, alongside the existing Delete/category-select/
-      edit controls, POSTing to a new `/app/refund` route (`{"id": <txn_id>,
-      "amount": <string>}`) that calls `db.refunds.create_refund` the same way
-      `/app/edit` calls `edit_transaction_field` — 24h `max_age` (state-mutating,
-      §13), catch the trigger's `RaiseException` the same way the bot side now
-      does. `kanakko/webapp/routes.py` is already at 299 lines (the docstring
-      on it says as much — it was split from `app.py` for exactly this reason),
-      so this route pushes it over CLAUDE.md's 300-line guideline; either a
-      further split (mutations vs. reads) or a sibling module is due here, not
-      a silent overshoot. Frontend: `kanakko/webapp/render.py`'s per-row markup
-      and whatever client-side JS drives `/app/delete` today need the same
-      shape for `/app/refund` — read that JS before adding a fourth near-copy
-      of the same fetch-and-refresh call.
+- [x] Refunds — the Mini App dashboard action (§18, split 3/3): a "Refund"
+      toggle on each `expense` row (only an expense is refundable — `create_refund`
+      accepts nothing else), alongside the existing Delete/category-select/edit
+      controls, revealing a hidden panel (`kanakko.webapp.recent._refund_panel`)
+      with an amount input defaulting to the row's full amount and its own
+      explicit submit button — unlike the edit fields, which auto-save on
+      `change`, a refund *adds* a row rather than overwriting one, so firing on
+      blur would create a transaction nobody confirmed; it needs the same
+      explicitness the bot's button tap has. Submit POSTs to a new `POST
+      /app/refund` route (`{"id": <txn_id>, "amount": <string>}`) that calls
+      `db.refunds.create_refund` the same way `handle_refund_choice` does — 24h
+      `max_age` (state-mutating, §13), household-scoped not user-scoped (§16,
+      matching `create_refund` itself), the trigger's `RaiseException` caught and
+      turned into `409` (distinct from the `404` a gone/foreign/non-expense row
+      gets, `400` for an unparsable body). `routes.py` was already at 299 lines
+      (task 974's own docstring flags it), so a fifth route there would have
+      overshot CLAUDE.md's 300-line guideline — went with the sibling-module
+      option the task named rather than the mutations/reads split, since it is
+      the smaller diff and the existing `routes.py`/`test_webapp.py` monkeypatch
+      wiring for the other three mutation routes needed no change:
+      `kanakko/webapp/refund.py` is its own `APIRouter`, included alongside
+      `webapp_router` in `app.py`, importing `authenticated_user`/`permitted_user`
+      from `routes.py` rather than a third copy. Verified the `RaiseException`
+      catch is load-bearing, not decorative: temporarily removed it, watched
+      `test_refund_route_over_limit_is_409_and_writes_nothing` turn into an
+      unhandled 500, restored it.
 - [ ] Remove `Refund` from `INCOME_CATEGORIES` (§11, §18) — it inflates income
       and the previous task replaces it. Existing rows carrying it need a
       decision recorded in the commit, not a silent rewrite.

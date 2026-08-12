@@ -13,7 +13,7 @@ from decimal import Decimal
 from urllib.parse import urlencode
 
 import pytest
-from conftest import default_account_of, household_of
+from conftest import default_account_of, household_of, join_household
 from fastapi.testclient import TestClient
 
 from kanakko import eventlog
@@ -32,6 +32,7 @@ from kanakko.webapp import (
     user_id_from_init_data,
     validate_init_data,
 )
+from kanakko.webapp import refund as refund_module
 from kanakko.webapp import routes as app_module
 
 TOKEN = "123456:AA-test-token"
@@ -832,6 +833,28 @@ def test_recent_list_transfer_edit_panel_has_no_account_select():
     assert 'class="edit-date"' in out
 
 
+def test_recent_list_renders_a_refund_toggle_and_panel_for_an_expense():
+    """An `expense` row carries a refund toggle and a hidden refund panel naming
+    the `txn_id` `POST /app/refund` needs, the amount pre-filled (§13, §18, task
+    1082)."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    out = recent_list(rows)
+    assert 'class="refund-toggle" data-id="7"' in out
+    assert 'class="txn-refund" hidden data-id="7"' in out
+    assert 'class="refund-amount" data-id="7"' in out
+    assert 'class="refund-submit" data-id="7"' in out
+
+
+def test_recent_list_no_refund_control_for_income_or_transfer():
+    """Only an `expense` is refundable (§18, task 1082): `create_refund` accepts
+    nothing else, so offering the control on income or a transfer would just be a
+    tap that always 404s."""
+    income = [(8, Decimal("20000.00"), "income", "Salary", "", date(2026, 8, 6), None, None, 1)]
+    transfer = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    assert "refund-toggle" not in recent_list(income)
+    assert "refund-toggle" not in recent_list(transfer)
+
+
 def test_edit_route_changes_the_amount(conn, monkeypatch):
     """`POST /app/edit` with `field: "amount"` updates the row through the real
     `parse_amount` path — never a float (§9)."""
@@ -1227,6 +1250,176 @@ def test_delete_route_rejects_a_stale_init_data(conn, monkeypatch):
     assert resp.status_code == 401
 
 
+# --- Refund from the dashboard row (§13, §16, §18, task 1082) ---
+
+
+def _insert_expense(conn, user_id, amount, occurred_on=date(2026, 8, 6)):
+    return _insert_txn(conn, user_id, amount, "expense", "Food", occurred_on)
+
+
+def test_refund_route_creates_the_refund(conn, monkeypatch):
+    """`POST /app/refund` writes a linked refund row through the real
+    `create_refund` — the same write the bot's chooser uses (§18)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_expense(conn, uid, "500.00")
+
+    resp = client.post(
+        "/app/refund",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id, "amount": "200.00"},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT amount, refund_of_txn_id FROM active_transactions"
+            " WHERE type = 'refund' AND refund_of_txn_id = %s", (txn_id,))
+        assert cur.fetchone() == (Decimal("200.00"), txn_id)
+    conn.rollback()
+
+
+def test_refund_route_is_household_scoped_not_user_scoped(conn, monkeypatch):
+    """§16: any member may refund any member's expense — unlike `/app/edit`,
+    which restricts to whoever entered the row."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    owner = get_or_create_user(conn, 42)
+    hh = household_of(conn, owner)
+    member = get_or_create_user(conn, 99)
+    join_household(conn, hh, member)
+    txn_id = _insert_expense(conn, owner, "500.00")
+
+    resp = client.post(
+        "/app/refund",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=99)},
+        json={"id": txn_id, "amount": "500.00"},
+    )
+    assert resp.status_code == 204
+    conn.rollback()
+
+
+def test_refund_route_over_limit_is_409_and_writes_nothing(conn, monkeypatch):
+    """The trigger's `RaiseException` on an over-limit refund is answered 409, not
+    500 — the same guard the bot side relies on (§18, migration 014). Verified by
+    causing the exact overshoot the trigger exists to catch."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_expense(conn, uid, "500.00")
+
+    resp = client.post(
+        "/app/refund",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id, "amount": "600.00"},
+    )
+    assert resp.status_code == 409
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM active_transactions WHERE refund_of_txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 0  # nothing stored
+    conn.rollback()
+
+
+def test_refund_route_gone_expense_is_404(conn, monkeypatch):
+    """A missing, foreign-household, or non-expense `id` is a 404 — `create_refund`
+    returns `None` rather than writing anything (§18)."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    from kanakko.db import get_or_create_user
+    get_or_create_user(conn, 42)
+
+    resp = client.post(
+        "/app/refund",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": 999999, "amount": "10.00"},
+    )
+    conn.rollback()
+    assert resp.status_code == 404
+
+
+def test_refund_route_rejects_a_bad_body(conn, monkeypatch):
+    """A missing `id`/`amount`, or an amount that doesn't parse, is a 400 — a
+    forged body can't reach `create_refund` at all (§9)."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    from kanakko.db import get_or_create_user
+    get_or_create_user(conn, 42)
+    headers = {"Authorization": "tma " + _fresh_init_data()}
+
+    assert client.post("/app/refund", headers=headers, json={"amount": "10.00"}).status_code == 400
+    assert client.post("/app/refund", headers=headers, json={"id": 1}).status_code == 400
+    assert client.post("/app/refund", headers=headers,
+                       json={"id": 1, "amount": "not-a-number"}).status_code == 400
+    conn.rollback()
+
+
+def test_refund_route_rejects_a_stale_init_data(conn, monkeypatch):
+    """A genuine-but-old `initData` is a 401 on the refund route too — it passes
+    `max_age` like every other mutation route (§13)."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    resp = client.post(
+        "/app/refund",
+        headers={"Authorization": "tma " + _sign(FIELDS)},  # auth_date = 2023
+        json={"id": 1, "amount": "10.00"},
+    )
+    conn.rollback()
+    assert resp.status_code == 401
+
+
+def test_refund_route_logs_the_money_mutation(conn, monkeypatch):
+    """The dashboard refund emits one §17 `refund.created` line — `source="miniapp"`,
+    no `update_id`, the amount on `ok`; an over-limit tap is `noop` with
+    `outcome="over_limit"` and no amount."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_expense(conn, uid, "500.00")
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        ok = client.post("/app/refund", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": txn_id, "amount": "200.00"})
+        over = client.post("/app/refund", headers={"Authorization": "tma " + _fresh_init_data()},
+                           json={"id": txn_id, "amount": "301.00"})
+    finally:
+        eventlog.unbind_sink()
+
+    assert (ok.status_code, over.status_code) == (204, 409)
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("refund.created", "ok"),
+        ("refund.created", "noop"),
+    ]
+    assert events[0]["source"] == "miniapp" and "update_id" not in events[0]
+    assert events[0]["amount"] == Decimal("200.00")
+    assert events[1]["outcome"] == "over_limit" and "amount" not in events[1]
+    conn.rollback()
+
+
 def test_txn_row_places_note_and_delete():
     """A transaction row is a grid: note on its own row, delete pinned to row 1 (§13).
 
@@ -1319,15 +1512,16 @@ def test_mini_app_refuses_a_user_who_was_never_admitted(conn, monkeypatch):
 
 
 def test_mini_app_mutations_refuse_an_unadmitted_user(conn, monkeypatch):
-    """The three mutating routes reject an unadmitted caller too (§16).
+    """The four mutating routes reject an unadmitted caller too (§16).
 
     The read route is the one that minted the row, but a fix applied only there
-    would leave `/app/delete`, `/app/category` and `/app/edit` creating users.
-    They pass a 24h `max_age`, so the payload is signed fresh.
+    would leave `/app/delete`, `/app/category`, `/app/edit`, and `/app/refund`
+    creating users. They pass a 24h `max_age`, so the payload is signed fresh.
     """
     migrate(conn)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+    monkeypatch.setattr(refund_module, "connect", lambda: _Reuse(conn))
 
     fresh = dict(FIELDS, auth_date=str(int(datetime.now(timezone.utc).timestamp())))
     init_data = _sign(fresh)
@@ -1338,6 +1532,8 @@ def test_mini_app_mutations_refuse_an_unadmitted_user(conn, monkeypatch):
                            headers=headers)
     edit = client.post("/app/edit", json={"id": 1, "field": "note", "value": "x"},
                        headers=headers)
+    refund = client.post("/app/refund", json={"id": 1, "amount": "10.00"},
+                         headers=headers)
 
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM users WHERE telegram_user_id = 42")
@@ -1347,4 +1543,5 @@ def test_mini_app_mutations_refuse_an_unadmitted_user(conn, monkeypatch):
     assert delete.status_code == 403
     assert category.status_code == 403
     assert edit.status_code == 403
+    assert refund.status_code == 403
     assert after == 0

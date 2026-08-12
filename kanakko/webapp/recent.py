@@ -103,6 +103,27 @@ def _edit_panel(
     )
 
 
+def _refund_panel(txn_id: int, amount: Decimal) -> str:
+    """The hidden per-row refund input for an `expense` row (§13, §16, §18, task 1082).
+
+    Unlike `_edit_panel`'s fields, which auto-save on `change`, this carries its
+    own explicit submit button: a refund *adds* a new row rather than overwriting
+    one, so silently firing on blur would create a transaction the user never
+    meant to confirm — the same explicitness the bot's button tap has
+    (`handlers.handle_refund_choice`). The amount input defaults to the row's
+    full original amount; `POST /app/refund` (not this panel) is what enforces
+    that a refund can't exceed what's left, via migration 014's trigger, the same
+    guard the bot side relies on.
+    """
+    return (
+        f'<div class="txn-refund" hidden data-id="{txn_id}">'
+        f'<input type="number" step="0.01" min="0.01" class="refund-amount" '
+        f'data-id="{txn_id}" aria-label="Refund amount" value="{amount}">'
+        f'<button type="button" class="refund-submit" data-id="{txn_id}">Refund</button>'
+        "</div>"
+    )
+
+
 def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     """The recent-transactions list: per-row delete, category, and field edit
     (§13, §18, tasks 100, 101, 974).
@@ -124,7 +145,11 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     non-`external` accounts (`db.household_accounts`) — the same list for every
     row, so the caller fetches it once, not once per row. The delete button
     carries the `txn_id` for `POST /app/delete`; the edit toggle reveals the
-    hidden per-row editor built by `_edit_panel`. An empty ledger renders nothing.
+    hidden per-row editor built by `_edit_panel`. An `expense` row additionally
+    gets a refund toggle, revealing `_refund_panel` — nothing else is refundable
+    (§18, task 1082): a `transfer` moves money rather than spending it, an
+    `income`/`refund` row is not an expense to refund, and `create_refund` itself
+    only accepts a live `expense`. An empty ledger renders nothing.
     """
     if not rows:
         return ""
@@ -162,7 +187,14 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
             f'<button type="button" class="edit-toggle" data-id="{txn_id}" '
             f'aria-label="Edit {sign}{format_amount(amount)} on '
             f'{occurred_on:%d %b}">✎</button>'
+            + (
+                f'<button type="button" class="refund-toggle" data-id="{txn_id}" '
+                f'aria-label="Refund {format_amount(amount)} on '
+                f'{occurred_on:%d %b}">↩</button>'
+                if type_ == "expense" else ""
+            )
             + _edit_panel(txn_id, type_, amount, note, occurred_on, account_id, accounts)
+            + (_refund_panel(txn_id, amount) if type_ == "expense" else "")
             + "</div>"
         )
     return '<section class="recent"><h2>Recent</h2>' + "".join(items) + "</section>"

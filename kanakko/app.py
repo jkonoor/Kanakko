@@ -4,7 +4,9 @@ The Mini App's data routes (`/app/data`, `/app/delete`, `/app/category`,
 `/app/edit`) live in `kanakko.webapp.routes` — this file was 497 lines once the
 edit route (task 974) landed, past CLAUDE.md's 300-line guideline, and those
 four routes plus `authenticated_user`/`permitted_user` were the obvious,
-self-contained seam to move.
+self-contained seam to move. `/app/refund` (task 1082) is a sibling module,
+`kanakko.webapp.refund` — `routes.py` was already at the 300-line guideline, so
+a fifth route there would have overshot it again.
 """
 
 import hmac
@@ -58,12 +60,14 @@ from kanakko.handlers import (
 )
 from kanakko.tg import send_message
 from kanakko.webapp import SHELL_HTML
+from kanakko.webapp.refund import router as webapp_refund_router
 from kanakko.webapp.routes import router as webapp_router
 
 configure_logging()
 
 app = FastAPI(title="Kanakko", version=__version__)
 app.include_router(webapp_router)
+app.include_router(webapp_refund_router)
 
 WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 

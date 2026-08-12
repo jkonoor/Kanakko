@@ -501,7 +501,7 @@ def test_recent_list_escapes_the_note():
     Mini App. Assert the *escaped bytes* are present and the raw `<script>` tag is
     not — not merely that the page "looks fine".
     """
-    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6))]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6), None, None)]
     out = recent_list(rows)
     assert "<script>alert(1)</script>" not in out  # not rendered live
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out  # rendered inert
@@ -510,7 +510,7 @@ def test_recent_list_escapes_the_note():
 def test_recent_list_renders_row_with_delete_button_and_amount():
     """Each row shows its amount (through `format_amount`, §9) and a delete button
     carrying the `txn_id` the `POST /app/delete` route needs."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6))]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None)]
     out = recent_list(rows)
     assert "₹50.00" in out
     assert 'data-id="7"' in out
@@ -518,13 +518,35 @@ def test_recent_list_renders_row_with_delete_button_and_amount():
 
 
 def test_recent_list_null_category_is_uncategorised():
-    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6))]
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None)]
     out = recent_list(rows)
     assert "Uncategorised" in out
 
 
 def test_recent_list_empty_renders_nothing():
     assert recent_list([]) == ""
+
+
+def test_recent_list_transfer_shows_accounts_not_a_category_dropdown():
+    """A transfer reads as "Bank → SIP" (§18), not as a category-less expense —
+    the bug this task fixes. Before the fix, `_category_select` fell through
+    `CATEGORIES_BY_TYPE.get("transfer", ())` to an empty, useless dropdown."""
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP")]
+    out = recent_list(rows)
+    assert "Bank → SIP" in out
+    assert "cat-select" not in out  # no category dropdown for a transfer
+    assert "Uncategorised" not in out
+
+
+def test_recent_list_transfer_has_no_income_or_expense_sign():
+    """A transfer is neither spending nor income (§18) — no −/+ sign, no income
+    tint. Both directions are asserted so an unconditional sign can't sneak by."""
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP")]
+    out = recent_list(rows)
+    assert "₹5,000.00" in out
+    assert "−₹5,000.00" not in out
+    assert "+₹5,000.00" not in out
+    assert 'class="amt in"' not in out  # not tinted like income
 
 
 def _fresh_init_data(user_id: int = 42) -> str:
@@ -628,7 +650,7 @@ def test_delete_route_logs_the_money_mutation(conn, monkeypatch):
 def test_recent_list_renders_a_category_select():
     """Each row carries a `<select>` of the type's categories, current one selected,
     naming the `txn_id` the `POST /app/category` route needs (§5, §13)."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6))]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None)]
     out = recent_list(rows)
     assert 'class="cat-select" data-id="7"' in out
     assert "<option selected>Food</option>" in out
@@ -637,7 +659,7 @@ def test_recent_list_renders_a_category_select():
 
 
 def test_recent_list_null_category_select_defaults_to_uncategorised():
-    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6))]
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None)]
     out = recent_list(rows)
     assert '<option value="" disabled selected>Uncategorised</option>' in out
 

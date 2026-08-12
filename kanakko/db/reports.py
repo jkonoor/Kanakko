@@ -95,14 +95,19 @@ def recent_transactions(
     so a soft-deleted row never reappears (§6). `limit` caps the list — the
     dashboard shows a handful, not the whole ledger. Amounts come back as
     `NUMERIC` → `Decimal` (§9). Ordered by `created_at` (when logged) so the list
-    matches the order entries were added.
+    matches the order entries were added. The last two columns are the `from`/`to`
+    account names — `NULL` for every type but `transfer` — joined in here so
+    `recent_list` (§18) can render "Bank → SIP" without a second round trip.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT txn_id, amount, type, category, note, occurred_on"
-            " FROM active_transactions"
-            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
-            " ORDER BY created_at DESC, txn_id DESC LIMIT %s",
+            "SELECT t.txn_id, t.amount, t.type, t.category, t.note, t.occurred_on,"
+            " fa.name, ta.name"
+            " FROM active_transactions t"
+            " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
+            " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"
+            " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " ORDER BY t.created_at DESC, t.txn_id DESC LIMIT %s",
             (user_id, limit),
         )
         return cur.fetchall()

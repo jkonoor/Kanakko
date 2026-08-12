@@ -790,7 +790,7 @@ per task:
       test (`test_transactions_account_id_is_required_except_for_transfers`) —
       verified red without the CHECK, green with it restored. `uv run pytest` →
       321 passed.
-- [ ] Show transfers in the dashboard's recent list. `recent_transactions` returns
+- [x] Show transfers in the dashboard's recent list. `recent_transactions` returns
       every live row regardless of type, so a transfer will surface there the
       moment one can be written — and `_category_select` will render it an empty
       dropdown, because `CATEGORIES_BY_TYPE` has no `transfer` key. It degrades
@@ -799,6 +799,21 @@ per task:
       expense. While there: the hero panel's **"Balance" stat is `income −
       expenses`**, a flow, and now that `account_balances` exists that name means
       something else on the same screen. Rename it or show the real thing.
+      Done: `recent_transactions` (`kanakko/db/reports.py`) now `LEFT JOIN`s
+      `accounts` twice (`from_account_id`/`to_account_id`) and returns their
+      names alongside the existing columns — `NULL` for every type but
+      `transfer`. `recent_list` (`kanakko/webapp/render.py`) renders a `transfer`
+      row's two account names ("Bank → SIP") in place of the category `<select>`,
+      and drops the −/+ sign and income tint, since a transfer is neither
+      spending nor income (§18) — the empty-dropdown/green-`+` degradation is
+      gone, not just hidden. Chose the smaller of the two "Balance" fixes: renamed
+      the hero panel's flow stat to "Net" rather than wiring `account_balances`
+      (a real stock figure) into the dashboard, which is a bigger, undecided
+      surface — no task asks for account balances on this screen yet, and adding
+      one silently would be scope creep. Two new tests in `tests/test_webapp.py`
+      cover the transfer row (account names shown, no dropdown, no sign/tint) —
+      verified red against the pre-fix rendering, green restored. `uv run pytest`
+      → 323 passed.
 - [ ] Make the parse schema's account enum per-request: `build_request` takes the
       household's accounts and emits them as the `account` enum. §18 says this
       departs from §11 deliberately — the list still comes from the accounts

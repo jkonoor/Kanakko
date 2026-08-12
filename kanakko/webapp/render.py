@@ -54,7 +54,7 @@ def _period_panel(period: Period, selected: bool) -> str:
 
     The hero is *expenses*, not balance — "what have I spent?" is the question
     this screen gets opened for, and giving one figure dominant scale is what
-    gives the screen an entry point (NN/g: importance is shown by size). Balance
+    gives the screen an entry point (NN/g: importance is shown by size). Net
     and income stay as small supporting stats rather than competing at equal
     weight, which is what the previous layout did.
 
@@ -68,7 +68,7 @@ def _period_panel(period: Period, selected: bool) -> str:
         f'<p class="hero">{format_amount(period.expenses)}</p>'
         + _delta(period.expenses, period.prev_expenses, period.compare_label)
         + '<div class="substats">'
-        + _stat("Balance", period.income - period.expenses)
+        + _stat("Net", period.income - period.expenses)
         + _stat("Income", period.income, positive=True)
         + "</div>"
         + category_bars(period.top, period.expenses)
@@ -133,33 +133,48 @@ def _category_select(txn_id: int, type_: str, current: str | None) -> str:
 
 
 def recent_list(rows: list[tuple]) -> str:
-    """The recent-transactions list with per-row delete + category change (§13, tasks 100–101).
+    """The recent-transactions list with per-row delete + category change (§13, §18, tasks 100–101).
 
-    Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on)`
-    from `db.recent_transactions`. `note` is the first *user-typed* string the
-    dashboard renders — §11 keeps the note's original wording, so it is arbitrary
-    text that arrived through the bot — and it is HTML-escaped: an unescaped
-    `<img src=x onerror=...>` in a logged expense would be stored XSS. The category
-    is a per-row `<select>` (a null category is "Uncategorised") that POSTs to
-    `/app/category`. Amounts go through `format_amount` (§9), prefixed −/+ by
-    direction. The delete button carries the `txn_id` for `POST /app/delete`. An
-    empty ledger renders nothing.
+    Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on,
+    from_account, to_account)` from `db.recent_transactions` — `from_account`/
+    `to_account` are `NULL` for every type but `transfer` (§18). `note` is the
+    first *user-typed* string the dashboard renders — §11 keeps the note's
+    original wording, so it is arbitrary text that arrived through the bot — and
+    it is HTML-escaped: an unescaped `<img src=x onerror=...>` in a logged expense
+    would be stored XSS. A `transfer` has no category (it is excluded from both
+    totals, §18) so it renders its two account names — "Bank → SIP" — instead of
+    the category `<select>`, and carries neither the −/+ sign nor the income tint,
+    since it is neither spending nor income. Every other row keeps the existing
+    category `<select>` (a null category is "Uncategorised") that POSTs to
+    `/app/category`, and its −/+ sign by direction. Amounts go through
+    `format_amount` (§9). The delete button carries the `txn_id` for
+    `POST /app/delete`. An empty ledger renders nothing.
     """
     if not rows:
         return ""
     items = []
-    for txn_id, amount, type_, category, note, occurred_on in rows:
-        sign = "−" if type_ == "expense" else "+"
-        # The one accent: income reads as positive at a glance. The sign carries
-        # the same meaning, so colour is never the sole signal (WCAG 1.4.1).
-        amt_cls = "amt" if type_ == "expense" else "amt in"
+    for txn_id, amount, type_, category, note, occurred_on, from_account, to_account in rows:
+        if type_ == "transfer":
+            sign = ""
+            amt_cls = "amt"
+            detail = (
+                f'<span class="txn-transfer">{html.escape(from_account or "?")}'
+                f' → {html.escape(to_account or "?")}</span>'
+            )
+        else:
+            sign = "−" if type_ == "expense" else "+"
+            # The one accent: income reads as positive at a glance. The sign
+            # carries the same meaning, so colour is never the sole signal
+            # (WCAG 1.4.1).
+            amt_cls = "amt" if type_ == "expense" else "amt in"
+            detail = _category_select(txn_id, type_, category)
         note_html = (
             f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
         )
         items.append(
             '<div class="txn">'
             f'<div class="txn-main"><span>{occurred_on:%d %b} · '
-            + _category_select(txn_id, type_, category)
+            + detail
             + f'</span><span class="{amt_cls}">{sign}{format_amount(amount)}</span></div>'
             + note_html
             # aria-label because the glyph alone announces as "✕" to a screen
@@ -178,15 +193,18 @@ def dashboard_html(
 ) -> str:
     """The dashboard fragment: a period switcher, one panel per period, the list (§13).
 
-    Balance is `income - expenses` — exact `Decimal` subtraction, can be negative.
-    Server-rendered so every section stays Python + CSS with no charting library
-    (§13), and `recent` is the recent-transactions list with per-row delete.
-    Formatted amounts and escaped labels / category names / notes are the only
-    things interpolated — the note is the only user-typed string and `recent_list`
-    escapes it, so nothing reaches the markup unescaped.
+    Net is `income - expenses` — exact `Decimal` subtraction, can be negative.
+    It is named "Net", not "Balance": §18 gave "Balance" a real, different meaning
+    (an account's stock, `opening_balance + inflows − outflows`) and this figure
+    is the period's flow, not a pool's contents. Server-rendered so every section
+    stays Python + CSS with no charting library (§13), and `recent` is the
+    recent-transactions list with per-row delete. Formatted amounts and escaped
+    labels / category names / notes are the only things interpolated — the note
+    is the only user-typed string and `recent_list` escapes it, so nothing
+    reaches the markup unescaped.
 
     Why a switcher rather than three stacked sections: the old layout rendered
-    Balance/Income/Expenses three times over, nine near-identical rows for three
+    Net/Income/Expenses three times over, nine near-identical rows for three
     concepts, and on a young ledger all three showed *the same numbers*. One
     panel at a time with the others one tap away is progressive disclosure —
     nothing is lost and the screen gets an entry point. There is no `<h1>` either;

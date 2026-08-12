@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `b4ecffb` — migration 011: the `transfer` type, excluded from both totals (Phase 10)
+
+**Scope:** Adds §18's fourth transaction type `transfer`: widens the `type` CHECK
+to `('expense','income','transfer')`, adds nullable `from_account_id`/`to_account_id`
+FKs → `accounts`, a structural CHECK that both endpoints are set iff `type='transfer'`,
+and recreates `active_transactions` so the two columns surface. `db/reports.py`
+unchanged — its `FILTER (WHERE type = 'expense'/'income')` sums exclude a transfer
+row by construction. One new test guards the exclusion and the CHECK invariant.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD --stat` / `git show HEAD` — diff touches only
+  `migrations/011_transfer_type.sql` (new, 44 lines), `tests/test_migrate.py`
+  (+82), and `TASKS.md` (tick + note). No source change.
+- `uv run pytest tests/test_migrate.py -q` → **13 passed**.
+- `uv run pytest -q` → **307 passed**, 1 warning — matches the commit's claim.
+- Read `migrations/001_init.sql` to confirm the dropped constraint name: `type`
+  is an inline column CHECK, the only one on that column, so Postgres names it
+  `transactions_type_check` — the exact name `011` drops. The full suite applying
+  `011` cleanly (via `migrate()`) proves the DROP found the constraint live.
+- Read `DECISIONS.md` §18 (748–809): `transfer` carries `from_account`/`to_account`
+  and is "excluded from every spending and income total". The migration matches.
+- **Confirmed the exclusion holds codebase-wide, not just in the tested pair.**
+  Grepped every `sum(amount)` / `type =` site: the only money totals are in
+  `db/reports.py` (`day_summary` 37–38, `month_summary` 66–67, category breakdown
+  75–79), all type-filtered. The dashboard (`app.py:175–190`) and the evening/
+  monthly jobs route through these, so no total sees a transfer.
+  `recent_transactions` (a list, not a total) is the only reader that would show
+  one — and no write path mints transfers yet.
+- **Verified the guard actually reddens.** Temporarily changed `day_summary`'s
+  expense FILTER to `type <> 'income'` (the exact defeat the commit names), ran
+  `test_transfer_is_excluded_from_spending_and_income_totals` → **FAILED**
+  ("transfer leaked into the spend total"). Reverted; `git diff --stat` clean.
+- The test also exercises the `011` CHECK both ways — a transfer missing an
+  endpoint, and a non-transfer smuggling one — both raise `CheckViolation`.
+  Confirmed these are inside `conn.transaction()` blocks so a raised violation
+  doesn't poison the outer connection.
+
+### Findings
+
+None blocking.
+
+**Observations (out of this task's scope, not defects):**
+
+- The `transactions_transfer_accounts_check` invariant enforces *presence* of
+  both endpoints on a transfer, but not that `from_account_id <> to_account_id`
+  nor that both accounts share the transaction's `household_id`. A transfer to
+  its own account (a no-op) or referencing another household's account would
+  pass. This wasn't in the task (extend CHECK, add columns, exclude from totals)
+  and there's no write path creating transfers yet — worth a CHECK/FK-scope note
+  when the transfer *write* task lands, not a fix now.
+- `day_summary`'s `count(*)` counts a transfer as an "entry" (the entry_count
+  return value). That is not a money total, so it's outside §18's "spending and
+  income total" rule and arguably correct (a transfer is an entry). Noting only
+  so it's a conscious choice if the day card's count is ever shown.
+
+---
+
 ## 2026-08-12 — `2b14bc4` — migration 010: `account_id` on every transaction, backfilled (Phase 10)
 
 **Scope:** Adds `transactions.account_id` (nullable, FK → `accounts`), mints one

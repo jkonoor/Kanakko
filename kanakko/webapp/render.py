@@ -1,15 +1,16 @@
-"""Server-rendered dashboard fragment — figures, bars, and the recent list (§13).
+"""Server-rendered dashboard fragment — figures and bars (§13).
 
-Python and CSS only, no charting library (§13). The note is the one user-typed
-string that reaches the markup and is HTML-escaped here; nothing else is.
+Python and CSS only, no charting library (§13). The recent-transactions list —
+per-row delete, category change, and field edit — is `kanakko.webapp.recent`;
+this module is the period panels `dashboard_html` wraps around it.
 """
 
 import html
 from decimal import Decimal
 
-from kanakko.categories import CATEGORIES_BY_TYPE
 from kanakko.money import format_amount
 from kanakko.webapp.periods import Period
+from kanakko.webapp.recent import recent_list
 
 
 def _delta(current: Decimal, previous: Decimal | None, label: str) -> str:
@@ -107,89 +108,11 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
     return '<h2>Spending by category</h2>' + "".join(rows)
 
 
-def _category_select(txn_id: int, type_: str, current: str | None) -> str:
-    """A per-row category `<select>` for the recent list (§5, §13, task 101).
-
-    Offers the closed set for this transaction's `type_` (`categories.py`), the
-    current category pre-selected. A null/unknown category shows a disabled
-    "Uncategorised" placeholder so the picker still names one in one change. The
-    option *value* the browser reports is the decoded name (`html.escape` only
-    affects rendering), so `POST /app/category` receives the literal category. The
-    `data-id` carries the `txn_id`. Category names come from the fixed set today,
-    but escaping keeps the markup safe if a user-named category ever reaches it.
-    """
-    known = current in CATEGORIES_BY_TYPE.get(type_, ())
-    opts = []
-    if not known:
-        opts.append('<option value="" disabled selected>Uncategorised</option>')
-    for c in CATEGORIES_BY_TYPE.get(type_, ()):
-        sel = " selected" if c == current else ""
-        opts.append(f"<option{sel}>{html.escape(c)}</option>")
-    return (
-        f'<select class="cat-select" data-id="{txn_id}" aria-label="Category">'
-        + "".join(opts)
-        + "</select>"
-    )
-
-
-def recent_list(rows: list[tuple]) -> str:
-    """The recent-transactions list with per-row delete + category change (§13, §18, tasks 100–101).
-
-    Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on,
-    from_account, to_account)` from `db.recent_transactions` — `from_account`/
-    `to_account` are `NULL` for every type but `transfer` (§18). `note` is the
-    first *user-typed* string the dashboard renders — §11 keeps the note's
-    original wording, so it is arbitrary text that arrived through the bot — and
-    it is HTML-escaped: an unescaped `<img src=x onerror=...>` in a logged expense
-    would be stored XSS. A `transfer` has no category (it is excluded from both
-    totals, §18) so it renders its two account names — "Bank → SIP" — instead of
-    the category `<select>`, and carries neither the −/+ sign nor the income tint,
-    since it is neither spending nor income. Every other row keeps the existing
-    category `<select>` (a null category is "Uncategorised") that POSTs to
-    `/app/category`, and its −/+ sign by direction. Amounts go through
-    `format_amount` (§9). The delete button carries the `txn_id` for
-    `POST /app/delete`. An empty ledger renders nothing.
-    """
-    if not rows:
-        return ""
-    items = []
-    for txn_id, amount, type_, category, note, occurred_on, from_account, to_account in rows:
-        if type_ == "transfer":
-            sign = ""
-            amt_cls = "amt"
-            detail = (
-                f'<span class="txn-transfer">{html.escape(from_account or "?")}'
-                f' → {html.escape(to_account or "?")}</span>'
-            )
-        else:
-            sign = "−" if type_ == "expense" else "+"
-            # The one accent: income reads as positive at a glance. The sign
-            # carries the same meaning, so colour is never the sole signal
-            # (WCAG 1.4.1).
-            amt_cls = "amt" if type_ == "expense" else "amt in"
-            detail = _category_select(txn_id, type_, category)
-        note_html = (
-            f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
-        )
-        items.append(
-            '<div class="txn">'
-            f'<div class="txn-main"><span>{occurred_on:%d %b} · '
-            + detail
-            + f'</span><span class="{amt_cls}">{sign}{format_amount(amount)}</span></div>'
-            + note_html
-            # aria-label because the glyph alone announces as "✕" to a screen
-            # reader — Telegram's design guidelines require that inputs and
-            # images carry labels, and this button deletes a real transaction.
-            + f'<button type="button" class="del" data-id="{txn_id}" '
-            f'aria-label="Delete {sign}{format_amount(amount)} on '
-            f'{occurred_on:%d %b}">✕</button>'
-            "</div>"
-        )
-    return '<section class="recent"><h2>Recent</h2>' + "".join(items) + "</section>"
-
-
 def dashboard_html(
-    periods: list[Period], recent: list[tuple], selected: str = "month"
+    periods: list[Period],
+    recent: list[tuple],
+    selected: str = "month",
+    accounts: list[tuple[int, str]] = (),
 ) -> str:
     """The dashboard fragment: a period switcher, one panel per period, the list (§13).
 
@@ -198,10 +121,11 @@ def dashboard_html(
     (an account's stock, `opening_balance + inflows − outflows`) and this figure
     is the period's flow, not a pool's contents. Server-rendered so every section
     stays Python + CSS with no charting library (§13), and `recent` is the
-    recent-transactions list with per-row delete. Formatted amounts and escaped
-    labels / category names / notes are the only things interpolated — the note
-    is the only user-typed string and `recent_list` escapes it, so nothing
-    reaches the markup unescaped.
+    recent-transactions list with per-row delete and edit; `accounts` is the
+    household's live accounts (§18) the row editor's account `<select>` offers.
+    Formatted amounts and escaped labels / category names / notes are the only
+    things interpolated — the note is the only user-typed string and
+    `recent_list` escapes it, so nothing reaches the markup unescaped.
 
     Why a switcher rather than three stacked sections: the old layout rendered
     Net/Income/Expenses three times over, nine near-identical rows for three
@@ -223,5 +147,5 @@ def dashboard_html(
     return (
         f'<div class="switch" role="tablist" aria-label="Time period">{tabs}</div>'
         + panels
-        + recent_list(recent)
+        + recent_list(recent, accounts)
     )

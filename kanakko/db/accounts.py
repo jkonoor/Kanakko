@@ -96,26 +96,35 @@ def set_account_opening_balance(
     return {"account_id": account_id, "kind": kind, "name": name}
 
 
-def list_accounts(conn: psycopg.Connection, user_id: int) -> list[str]:
-    """Account names offered as the parse schema's `account` enum (§18).
+def household_accounts(conn: psycopg.Connection, user_id: int) -> list[tuple[int, str]]:
+    """`(account_id, name)` of the household's live, user-facing accounts (§13, §18).
 
-    Built per request from the accounts table, never a literal — the household's
-    accounts are the user's own nouns, and the model must not invent one, the
-    same rule §11 applies to categories. `external` is structural (opening
-    balances, adjustments), never something a natural-language message names, so
-    it is excluded. Household-scoped like `account_balances`; a user with no
-    household yet (open-mode signup before `/start`) yields an empty list, which
-    is what keeps `parse_schema` unchanged for that edge case.
+    Same exclusion as `list_accounts` — `external` is structural, never something
+    a user picks — but keeps the id `list_accounts` throws away. The dashboard's
+    per-row account editor (task 974) needs the id to name in `POST /app/edit`;
+    `list_accounts` still calls this and drops it, so the SQL lives in one place.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT name FROM accounts"
+            "SELECT account_id, name FROM accounts"
             " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             "   AND kind <> 'external' AND deleted_at IS NULL"
             " ORDER BY is_default DESC, account_id",
             (user_id,),
         )
-        return [name for (name,) in cur.fetchall()]
+        return cur.fetchall()
+
+
+def list_accounts(conn: psycopg.Connection, user_id: int) -> list[str]:
+    """Account names offered as the parse schema's `account` enum (§18).
+
+    Built per request from the accounts table, never a literal — the household's
+    accounts are the user's own nouns, and the model must not invent one, the
+    same rule §11 applies to categories. Household-scoped like `account_balances`;
+    a user with no household yet (open-mode signup before `/start`) yields an
+    empty list, which is what keeps `parse_schema` unchanged for that edge case.
+    """
+    return [name for _, name in household_accounts(conn, user_id)]
 
 
 def account_balances(conn: psycopg.Connection, user_id: int) -> list[dict]:

@@ -1,18 +1,16 @@
-"""Household-scoped ledger reads and the dashboard's per-row mutations (§6, §16).
+"""Household-scoped ledger reads (§6, §16).
 
 Every read here goes through `active_transactions` (§6) and carries a
 `household_id` predicate so it can never span households (§16). Sums come back as
-`NUMERIC` → `Decimal`, never float (§9). The two dashboard mutations
-(`soft_delete_transaction`, `set_transaction_category`) write an audit row inside
-their own transaction, like the bot-side pair in `pending`.
+`NUMERIC` → `Decimal`, never float (§9). The dashboard's per-row mutations
+(`soft_delete_transaction`, `set_transaction_category`, `edit_transaction_field`)
+are `kanakko.db.edits` — reads and writes are the seam this module split on.
 """
 
 from datetime import date
 from decimal import Decimal
 
 import psycopg
-
-from kanakko.db.audit import _record_event
 
 
 def day_summary(
@@ -95,14 +93,16 @@ def recent_transactions(
     so a soft-deleted row never reappears (§6). `limit` caps the list — the
     dashboard shows a handful, not the whole ledger. Amounts come back as
     `NUMERIC` → `Decimal` (§9). Ordered by `created_at` (when logged) so the list
-    matches the order entries were added. The last two columns are the `from`/`to`
-    account names — `NULL` for every type but `transfer` — joined in here so
-    `recent_list` (§18) can render "Bank → SIP" without a second round trip.
+    matches the order entries were added. Columns 7/8 are the `from`/`to` account
+    names — `NULL` for every type but `transfer` — joined in here so `recent_list`
+    (§18) can render "Bank → SIP" without a second round trip. Column 9 is the
+    row's own `account_id` — `NULL` for a `transfer` (it names two ends, not one,
+    §18), otherwise the account the dashboard's edit control (task 974) pre-selects.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT t.txn_id, t.amount, t.type, t.category, t.note, t.occurred_on,"
-            " fa.name, ta.name"
+            " fa.name, ta.name, t.account_id"
             " FROM active_transactions t"
             " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
             " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"
@@ -111,110 +111,3 @@ def recent_transactions(
             (user_id, limit),
         )
         return cur.fetchall()
-
-
-def soft_delete_transaction(
-    conn: psycopg.Connection,
-    user_id: int,
-    txn_id: int,
-    *,
-    source: str,
-    update_id: int | None,
-) -> dict | None:
-    """Soft-delete one live transaction by id, scoped to `user_id` (§6, §13).
-
-    The dashboard's per-row delete: sets `deleted_at` on the row so the ledger
-    stays recoverable (§6), scoped to `user_id` so one user cannot delete
-    another's row by guessing an id (§1). The row is chosen from
-    `active_transactions`, so deleting an already-deleted (or another user's) row
-    is a no-op returning `None`, not a second write — the subquery yields no
-    `txn_id`, and `WHERE txn_id = NULL` matches nothing. The subquery also carries
-    the user's `household_id`, so like every read of the view it can never span
-    households (§16); here it is defensive (the `user_id` scope already confines to
-    one household). Mirrors `undo_last`'s read-through-the-view pattern. The delete and its audit row (§17) share one
-    `conn.transaction()`; `source`/`update_id` are the correlation id (a Mini App
-    delete carries `source="miniapp"` and no `update_id`, §17 gap 2). Returns the
-    deleted row — `txn_id` plus its amount so the caller can log it (§17) — or
-    `None`. Does not commit — the caller owns the transaction.
-    """
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "UPDATE transactions SET deleted_at = now()"
-            " WHERE txn_id = ("
-            "   SELECT txn_id FROM active_transactions"
-            "   WHERE user_id = %s AND txn_id = %s"
-            "   AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
-            " )"
-            " RETURNING txn_id, amount, type, category, note, occurred_on",
-            (user_id, txn_id, user_id),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        tid, amount, type_, category, note, occurred_on = row
-        before = {
-            "amount": amount,
-            "type": type_,
-            "category": category,
-            "note": note,
-            "occurred_on": occurred_on,
-        }
-        _record_event(cur, txn_id=tid, user_id=user_id, action="delete",
-                      before=before, after=None, source=source, update_id=update_id)
-    return {"txn_id": tid, "amount": amount}
-
-
-def set_transaction_category(
-    conn: psycopg.Connection,
-    user_id: int,
-    txn_id: int,
-    category: str,
-    *,
-    source: str,
-    update_id: int | None,
-) -> dict | None:
-    """Set the category of one live transaction, scoped to `user_id` (§5, §13).
-
-    The dashboard's per-row category change (task 101): corrects the most-often-
-    wrong field on an already-confirmed entry. Scoped to `user_id` so one user
-    cannot relabel another's row by guessing an id (§1); the row is chosen from
-    `active_transactions`, so a deleted or foreign id yields no `txn_id` and the
-    UPDATE matches nothing, returning `None` rather than a stray write. Both reads
-    of the view also carry the user's `household_id` so, like every read, they can
-    never span households (§16 — defensive here, the `user_id` scope already does).
-    The caller validates `category` against the closed set (`categories.py`) before
-    this runs. Mirrors `soft_delete_transaction`.
-
-    Category change history is the audit data §17 names as genuinely missing, so
-    the old category is read with a `SELECT` before the `UPDATE`, in the same
-    transaction — Postgres 16 here has no `RETURNING OLD.*` form — and both flank
-    the audit row's `before`/`after`. `source`/`update_id` are the correlation id.
-    Returns the updated row — `txn_id` plus its amount so the caller can log it
-    (§17) — or `None`. Does not commit — the caller owns the transaction.
-    """
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "SELECT category FROM active_transactions"
-            " WHERE user_id = %s AND txn_id = %s"
-            " AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)",
-            (user_id, txn_id, user_id),
-        )
-        old = cur.fetchone()
-        if old is None:
-            return None
-        (old_category,) = old
-        cur.execute(
-            "UPDATE transactions SET category = %s"
-            " WHERE txn_id = ("
-            "   SELECT txn_id FROM active_transactions"
-            "   WHERE user_id = %s AND txn_id = %s"
-            "   AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
-            " )"
-            " RETURNING txn_id, amount",
-            (category, user_id, txn_id, user_id),
-        )
-        tid, amount = cur.fetchone()
-        _record_event(cur, txn_id=tid, user_id=user_id, action="recategorise",
-                      before={"category": old_category}, after={"category": category},
-                      source=source, update_id=update_id)
-    return {"txn_id": tid, "amount": amount}

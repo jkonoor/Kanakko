@@ -99,6 +99,23 @@ h2 {
   background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
   min-height: 44px; max-width: 45vw;
 }
+/* Same lane as `.del` (44px square, same hint ink) but the note-row's column,
+   which is otherwise empty when a row carries no note — no layout cost. */
+.edit-toggle {
+  grid-row: 2; grid-column: 2; border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
+/* The hidden per-row editor (task 974): amount, date, note, account. `[hidden]`
+   needs restating after `display: flex` below — an attribute selector and a
+   class selector have equal specificity, so without this rule the later
+   `.txn-edit` declaration would win and the panel would never actually hide. */
+.txn-edit { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
+.txn-edit[hidden] { display: none; }
+.txn-edit input, .txn-edit select {
+  font: inherit; color: inherit; background: var(--tg-theme-secondary-bg-color, rgba(128,128,128,.1));
+  border: 0; border-radius: 8px; padding: 8px 10px; min-height: 44px;
+}
 </style>
 </head>
 <body>
@@ -138,6 +155,14 @@ app.addEventListener('click', e => {
   // fragment, so no request and no reload.
   const seg = e.target.closest('.seg');
   if (seg) { period = seg.dataset.period; applyPeriod(); return; }
+  // The edit toggle is a local view change too — it just reveals the hidden
+  // panel `_edit_panel` already rendered for this row, no request either.
+  const editBtn = e.target.closest('.edit-toggle');
+  if (editBtn) {
+    const panel = editBtn.closest('.txn').querySelector('.txn-edit');
+    panel.hidden = !panel.hidden;
+    return;
+  }
   const btn = e.target.closest('.del');
   if (!btn) return;
   fetch('/app/delete', {
@@ -148,11 +173,27 @@ app.addEventListener('click', e => {
 });
 app.addEventListener('change', e => {
   const sel = e.target.closest('.cat-select');
-  if (!sel || !sel.value) return;
-  fetch('/app/category', {
+  if (sel && sel.value) {
+    fetch('/app/category', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
+  // The four row-editor fields (`_edit_panel`) share one dispatch: each carries
+  // `data-edit-field` naming the column `/app/edit` changes, mirroring
+  // `edit_transaction_field` taking one column name rather than four near-
+  // duplicate routes. Empty is a no-op except for `note`, where it means "clear
+  // it" — every other field's native input (date/number/select) already refuses
+  // to go empty on its own.
+  const field = e.target.closest('[data-edit-field]');
+  if (!field) return;
+  if (field.value === '' && field.dataset.editField !== 'note') return;
+  fetch('/app/edit', {
     method: 'POST',
     headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-    body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
+    body: JSON.stringify({id: Number(field.dataset.id), field: field.dataset.editField, value: field.value}),
   }).then(r => { if (r.ok) load(); });
 });
 load();

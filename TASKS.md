@@ -971,11 +971,43 @@ per task:
       ₹7,000.00, got back ₹3,000.00." `HELP_TEXT` documents the new form. Three
       guards verified red-without-fix: opening balance folded into the sum, and
       an exact-case name match, each redden their test.
-- [ ] Editing a row in the dashboard: amount, date, note, category, account.
+- [x] Editing a row in the dashboard: amount, date, note, category, account.
       §13 built the recent-transactions list for exactly this ("correcting older
       entries") and §16 already scopes it — only the member who entered a row may
       edit it. Add `edit` to the audit action CHECK with before/after (§17), or a
       money-changing operation has no trail.
+      **Resolved:** category already had its own control (task 101); this adds
+      amount, date, note, and account. One generic `db.edit_transaction_field`
+      (a closed `EDITABLE_TRANSACTION_FIELDS` column whitelist feeds an f-string,
+      never attacker input) and one `POST /app/edit` route cover all four rather
+      than four near-duplicate functions/routes, mirroring how `field` is
+      dispatched client-side too. `account_id` gets two extra rules an f-string
+      column name can't express: refused on a `transfer` row (it names two ends,
+      not one, §18) and the new id must resolve to *this* household's own live,
+      non-`external` accounts (an `EXISTS` check) — both verified red-without-fix,
+      the second is a real cross-household relocation a forged id would otherwise
+      cause. Migration 013 widens the `transaction_events.action` CHECK to admit
+      `'edit'`; the guard for it is the audit-row test itself, which throws a
+      `CheckViolation` if the migration is reverted (verified). UI: a small
+      pencil toggle reveals a hidden per-row panel (native `<input type=date>`/
+      `type=number`, no picker library, §7) rather than restyling the always-
+      visible summary line, so none of that line's existing layout tests moved.
+      15 new tests, all guards verified red-without-fix. Split `db/reports.py`
+      (reads) from a new `db/edits.py` (the three per-row mutations) and
+      `webapp/render.py` (period panels) from a new `webapp/recent.py` (the list)
+      to stay under CLAUDE.md's 300-line guideline, which this task's own code
+      would otherwise have pushed both past.
+- [ ] `app.py` is 497 lines, well past CLAUDE.md's 300-line guideline (it was
+      already 420 before task 974 added the `/app/edit` route). Unlike the two
+      splits task 974 made, this one is not free: the Mini App routes
+      (`/app/data`, `/app/delete`, `/app/category`, `/app/edit`,
+      `authenticated_user`, `permitted_user`) are the obvious seam to move into
+      `kanakko/webapp/routes.py`, but `tests/test_webapp.py` monkeypatches
+      `kanakko.app.connect` directly (`monkeypatch.setattr(app_module,
+      "connect", ...)`) — moving the routes without also re-threading that
+      indirection would make the patch silently stop applying and every mocked
+      test would try to hit a real `DATABASE_URL`. Needs that wired through
+      first (an `APIRouter`, or a passed-in `connect`), not just a file move.
 - [ ] Refunds, linked and partial (§18): a refund references the transaction it
       refunds, may be less than the original, and **the sum of refunds against a
       transaction can never exceed it** — cause that overflow and watch the guard

@@ -13,10 +13,13 @@ from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM
 from kanakko.db import (
+    EDITABLE_TRANSACTION_FIELDS,
     claim_update,
     connect,
+    edit_transaction_field,
     find_user,
     get_or_create_user,
+    household_accounts,
     month_summary,
     recent_transactions,
     set_transaction_category,
@@ -55,6 +58,7 @@ from kanakko.handlers import (
     handle_transfer,
     handle_undo,
 )
+from kanakko.money import parse_amount
 from kanakko.tg import send_message
 from kanakko.webapp import (
     SHELL_HTML,
@@ -192,6 +196,7 @@ def mini_app_data(request: Request) -> str:
         )
         _, pm_expenses, _ = month_summary(conn, user_id, prev_m_first, first)
         recent = recent_transactions(conn, user_id)
+        accounts = household_accounts(conn, user_id)
     return dashboard_html(
         [
             Period("week", "Week", "this week", w_income, w_expenses, w_top,
@@ -201,6 +206,7 @@ def mini_app_data(request: Request) -> str:
             Period("all", "All", "all time", a_income, a_expenses, a_top),
         ],
         recent,
+        accounts=accounts,
     )
 
 
@@ -284,6 +290,77 @@ async def mini_app_category(request: Request) -> Response:
         raise HTTPException(status_code=404)
     log_event("transaction.recategorised", status="ok", source="miniapp",
               user_id=user_id, duration_ms=ms_since(start),
+              txn_id=updated["txn_id"], amount=updated["amount"])
+    return Response(status_code=204)
+
+
+def _parsed_edit_value(field: str, raw):
+    """`raw` (always a string off the wire) parsed to the type `field`'s column
+    needs (§9, task 974). Raises `ValueError`/`TypeError` on anything unusable,
+    which `mini_app_edit` turns into a 400 — the same contract `parse_amount`
+    already has for the bot's own amount parsing.
+    """
+    if not isinstance(raw, str):
+        raise TypeError(f"edit value must be a string: {raw!r}")
+    if field == "amount":
+        return parse_amount(raw)
+    if field == "occurred_on":
+        return date.fromisoformat(raw)
+    if field == "note":
+        text = raw.strip()
+        return text or None
+    return int(raw)  # account_id
+
+
+@app.post("/app/edit")
+async def mini_app_edit(request: Request) -> Response:
+    """Change one field — amount, date, note, or account — of one of the user's
+    transactions (§5, §13, §16, §18, task 974).
+
+    §5 rejected a field editor in the bot chat but named this Mini App list as
+    the cheaper replacement for anything older than the last entry; category
+    already has its own control (`/app/category`), this covers the rest. The
+    dashboard's per-row edit panel POSTs `{"id": <txn_id>, "field": <name>,
+    "value": <string>}`; `field` must be one of `EDITABLE_TRANSACTION_FIELDS`, so
+    a forged body cannot target an arbitrary column. Like `/app/category` this
+    *mutates state*, so it passes a 24h `max_age` (§13). The row is scoped to the
+    authenticated user, so one user cannot edit another's — §16: "Edit / delete a
+    row: only the member who entered it".
+
+    A body without a usable `id`/`field`, an unknown `field`, or a `value` that
+    fails to parse for that field (a non-numeric amount, an unparsable date) is
+    400; an id matching no live row of this user's — or an `account_id` edit that
+    does not apply (a transfer, or an id outside this household's live,
+    non-`external` accounts) — is 404. Success is 204.
+    """
+    telegram_user_id = authenticated_user(request, max_age=timedelta(hours=24))
+
+    try:
+        body = await request.json()
+        txn_id = int(body["id"])
+        field = body["field"]
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+    if field not in EDITABLE_TRANSACTION_FIELDS:
+        raise HTTPException(status_code=400)
+    try:
+        value = _parsed_edit_value(field, body["value"])
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+
+    start = time.perf_counter()
+    with connect() as conn:
+        user_id = permitted_user(conn, telegram_user_id)
+        updated = edit_transaction_field(conn, user_id, txn_id, field, value,
+                                         source="miniapp", update_id=None)
+    # ponytail: synchronous log write in an async route — see /app/delete above
+    # for the ceiling and upgrade path. No `update_id` (§17 gap 2); 404 is `noop`.
+    if updated is None:
+        log_event("transaction.edited", status="noop", source="miniapp",
+                  user_id=user_id, duration_ms=ms_since(start), field=field)
+        raise HTTPException(status_code=404)
+    log_event("transaction.edited", status="ok", source="miniapp",
+              user_id=user_id, duration_ms=ms_since(start), field=field,
               txn_id=updated["txn_id"], amount=updated["amount"])
     return Response(status_code=204)
 

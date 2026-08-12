@@ -12,6 +12,76 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `b71effc` reconcile reply routes by nudge, not by recency (104d562 review follow-up)
+
+**Status: ⚠️ CHANGES REQUESTED**
+
+Scope: the fix commit for the three `104d562` findings — `TextMessage` gains
+`reply_to_message_id`; `pending_awaiting_reconcile` matches the reply to its
+exact nudge (or refuses to guess with >1 outstanding); receipts name the
+account; `parse_amount` gains `allow_zero` for an emptied account.
+
+### What I checked (and what the commands returned)
+
+- `uv run pytest -q` → **476 passed, 1 warning** (matches the claim; was 473).
+- **Verified the HIGH guard is real:** reverted `kanakko/db/reconcile.py` to its
+  parent (`git show HEAD~1:…`), ran
+  `test_pending_awaiting_reconcile_does_not_misroute_across_two_asks` → **1
+  failed**, restored → passes. The misroute guard fails for the reason it exists.
+- **Verified the zero path is correct, not just accepted:** read
+  `create_adjustment` (`kanakko/db/reconcile.py:186`). Reported `0` on a
+  `spending` account with presented balance ₹1000 → `drift=-1000`, `amount=1000`,
+  from=account→external. Reads go through `active_transactions`; amount stays
+  `Decimal`. `test_a_zero_reply_is_a_real_answer` asserts `amount == 1000.00`. ✓
+- **Verified `allow_zero` still rejects negatives:** `parse_amount("-5",
+  allow_zero=True)` raises (`amount < 0` branch); `"0"` → `Decimal("0.00")`. ✓
+- Confirmed all other `pending_awaiting_reconcile` callers rely on the
+  `reply_to_message_id=None` default, so the signature change is safe.
+- Confirmed the three claimed findings are genuinely resolved (not stubbed):
+  account name interpolated via `household_accounts` (household-scoped, excludes
+  `external`, falls back to `"the account"`); receipts formatted with it.
+
+### Findings
+
+**1. MEDIUM — the one line the whole HIGH fix depends on is untested; silent
+breakage passes green.** `kanakko/handlers.py:118` —
+`reply_to_message_id=(message.get("reply_to_message") or {}).get("message_id")`.
+Everything above it (the db-layer routing, the field default, the app.py
+plumbing) is tested by passing `reply_to_message_id` *directly*; the webhook
+tests monkeypatch `pending_awaiting_reconcile` to a stub. Nothing exercises
+`dispatch` extracting the id from a real Telegram payload. I sabotaged that line
+to hardcode `None` (so replies never carry their nudge id — the exact regression
+the HIGH fix prevents) and ran the full suite: **476 passed**. A typo'd key or
+wrong field here silently defeats the fix and every multi-account reply falls
+through to parsing, with green tests — precisely the "guard that reports safety
+it doesn't provide" this repo flags first. *Fix:* extend
+`test_text_message_is_dispatched_with_its_fields` (or add a sibling) with a
+`reply_to_message: {message_id: 909}` in the update and assert
+`action.reply_to_message_id == 909`. One assertion; it reddens under the sabotage.
+
+**2. MEDIUM — the nudge never tells the user to reply, so the normal §18
+multi-account case silently doesn't reconcile.** `kanakko/jobs/reconcile.py`
+`nudge_text` sends a plain message. Telegram only populates `reply_to_message`
+when the user explicitly taps "Reply"; a user reading a bot message in a 1:1
+chat and typing "42300" sends a bare message with no reply target. §18 is
+explicitly *per account*, so a household with Bank + Card is the ordinary case —
+and for it, `pending_awaiting_reconcile` with `len(rows) > 1` and no
+`reply_to_message_id` returns `None` (correctly refusing to misroute), so the
+reply falls through to the LLM parse path and becomes a spurious pending
+transaction to confirm instead of an adjustment. The fix correctly removes the
+previous *silent wrong adjustment*, but leaves the multi-account happy path
+non-functional for the reply shape users actually send. *Fix:* append a reply
+cue to `nudge_text` (e.g. "Reply to this message with the number"), so the
+`reply_to_message_id` path the fix relies on is the one users are steered into.
+Single-account households are unaffected (bare reply still resolves).
+
+Neither finding is a money-correctness bug — the zero path, the Decimal
+handling, the `active_transactions` reads, and the misroute guard are all
+correct. Both are about the fix being verifiable and complete for the case §18
+actually targets. Fix finding 1 (a one-line test) before finding 2.
+
+---
+
 ## 2026-08-13 — `104d562` reconcile nudge: the weekly send and the reply (Phase 10, split 2/2)
 
 **Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — all three

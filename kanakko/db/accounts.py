@@ -131,14 +131,16 @@ def account_balances(conn: psycopg.Connection, user_id: int) -> list[dict]:
     """Derived balance of every live account in `user_id`'s household (§6, §16, §18).
 
     Balance is `opening_balance + inflows − outflows`, computed from the ledger and
-    never stored (§18). Inflows are income landing in the account and transfers into
-    it; outflows are its expenses and transfers out of it. A `transfer` row touches
-    two accounts and never a total, so it is summed by its endpoint columns, not by
-    `account_id`. Reads `active_transactions`, so a soft-deleted row never counts
-    (§6). Household-scoped: the outer predicate confines the accounts to `user_id`'s
-    household (§16), and each per-account sum keys on `account_id` — an account
-    belongs to exactly one household, so the sum can never span households. Amounts
-    are `NUMERIC` → `Decimal`, never float (§9).
+    never stored (§18). Inflows are income landing in the account, transfers into
+    it, and refunds against one of its expenses (§18: the money physically returns
+    to the account it was spent from — `refunds.create_refund` copies the original
+    row's `account_id`); outflows are its expenses and transfers out of it. A
+    `transfer` row touches two accounts and never a total, so it is summed by its
+    endpoint columns, not by `account_id`. Reads `active_transactions`, so a
+    soft-deleted row never counts (§6). Household-scoped: the outer predicate
+    confines the accounts to `user_id`'s household (§16), and each per-account sum
+    keys on `account_id` — an account belongs to exactly one household, so the sum
+    can never span households. Amounts are `NUMERIC` → `Decimal`, never float (§9).
 
     The returned `balance` is in each account's natural reading: for `credit` it is
     what is *owed* (positive while in debt), the asset figure negated — the §18 sign
@@ -152,6 +154,8 @@ def account_balances(conn: psycopg.Connection, user_id: int) -> list[dict]:
             "     a.opening_balance"
             "     + coalesce((SELECT sum(amount) FROM active_transactions"
             "                 WHERE type = 'income'   AND account_id = a.account_id), 0)"
+            "     + coalesce((SELECT sum(amount) FROM active_transactions"
+            "                 WHERE type = 'refund'   AND account_id = a.account_id), 0)"
             "     - coalesce((SELECT sum(amount) FROM active_transactions"
             "                 WHERE type = 'expense'  AND account_id = a.account_id), 0)"
             "     + coalesce((SELECT sum(amount) FROM active_transactions"

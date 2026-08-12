@@ -1020,12 +1020,57 @@ per task:
       `RuntimeError: DATABASE_URL is not set` (the patch silently stopped
       applying, exactly as this task predicted) — then restored it, 71 passed.
       `app.py` is now 222 lines; `kanakko/webapp/routes.py` is 299.
-- [ ] Refunds, linked and partial (§18): a refund references the transaction it
-      refunds, may be less than the original, and **the sum of refunds against a
-      transaction can never exceed it** — cause that overflow and watch the guard
-      go red before believing it. It reduces the original's category total, never
-      income. `refund 500` lists recent candidates, amount-matched first, and one
-      tap picks the row — reuse `/remove`'s chooser keyboard.
+- [x] Refunds, linked and partial (§18) — schema, guard and write path (split
+      1/2). Split the same way 010/012 split account_id's nullable-then-enforce
+      pair: this half is the money-correctness core (a stub here would be a
+      silent ledger bug, not a deferrable UI gap); the bot-facing `refund <amount>`
+      chooser and the dashboard "Refund" action are the next task (split 2/2,
+      immediately below) — pure UX wiring on top of what this migration and write
+      path already make correct.
+      Migration 014 widens `transactions_type_check` to add `refund`, adds
+      `refund_of_txn_id` (structural CHECK: set iff `type = 'refund'`, mirroring
+      011's transfer-accounts check), and adds this schema's first cross-row
+      guard — every prior guard here is a CHECK or a partial UNIQUE INDEX, neither
+      of which can aggregate across rows, so **the sum-never-exceeds rule is a
+      `BEFORE INSERT OR UPDATE` trigger**, not a CHECK. Verified red-without-fix:
+      commented out the `CREATE TRIGGER` statement, reran
+      `test_refund_sum_cannot_exceed_the_original`, watched
+      `DID NOT RAISE RaiseException`, restored it, green again.
+      `kanakko.db.refunds.create_refund` is the write path: household-scoped (not
+      user-scoped — §16's shared ledger means any member may refund any member's
+      expense, same reach as `recent_transactions`/`month_summary`), refuses
+      anything but a live `expense` row, and copies the original's `account_id`/
+      `category` onto the refund row — the account copy is what returns the money
+      to the account it was spent from, the category copy is what lets
+      `reports.py` net a refund against its category with a plain `GROUP BY`
+      instead of joining back to the original in every report query. Wired the
+      net-out into `day_summary`, `month_summary` (both the total and the
+      per-category breakdown, dropping a category that nets to zero rather than
+      showing a `₹0.00` row) and `account_balances` (a refund is an inflow,
+      alongside income) — three separate query paths, each could have silently
+      forgotten the new type, so each has its own assertion in
+      `test_refund_reduces_category_and_account_but_never_income`. `transaction_events`
+      gets a `refund` action value (013's two-liner pattern). Never touches
+      `INCOME_CATEGORIES` — that is the very next task below, a separate
+      decision about existing rows.
+- [ ] Refunds — the bot-facing UX (§18, split 2/2): `refund 500` lists
+      recent candidates (live expenses only, amount-matched first — extend
+      `recent_transactions` or add a sibling query, `type = 'expense'` and not
+      already fully refunded), one tap picks the row and calls
+      `db.refunds.create_refund`. **The spec text says "reuse `/remove`'s chooser
+      keyboard" — checked, and that's stale: `/remove` (§16, member removal) is a
+      static two-button Keep/Delete confirm, not an N-candidate list.** The
+      actually-reusable shape in this codebase is `categories.py:keyboard`/
+      `confirm.py:account_keyboard` — N buttons built from a list, one callback
+      prefix, tap routes by value straight from the callback data (no label
+      indirection needed, `txn_id` is already the unique key). `refund 500` is
+      not a slash command (no leading `/`), so it needs its own predicate in
+      `app.py`'s `is_parse` exclusion list, the same way `/undo`/`/remove` are
+      excluded from the LLM parser and the daily cap. Catch the trigger's
+      `RaiseException` (an over-refund past what's left) and reply with a plain
+      "already refunded" message rather than a 500. A "Refund" action on the
+      dashboard row (Mini App) covers older entries — same `create_refund` call
+      from `/app/refund` or similar, source="miniapp".
 - [ ] Remove `Refund` from `INCOME_CATEGORIES` (§11, §18) — it inflates income
       and the previous task replaces it. Existing rows carrying it need a
       decision recorded in the commit, not a silent rewrite.

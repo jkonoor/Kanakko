@@ -4,7 +4,7 @@ Plain SQL via psycopg, no ORM (§7). Split by responsibility once §16's househo
 memberships and invites pushed the single `db.py` past 600 lines (CLAUDE.md pins
 the trigger to Phase 9): connection, users + metering, households, invites, the
 confirm flow, household-scoped reads (`reports`), the dashboard's per-row writes
-(`edits`), reminders, and the audit write. The import surface is unchanged —
+(`edits`), refunds, reminders, and the audit write. The import surface is unchanged —
 `from kanakko.db import <name>` still resolves every function, re-exported here.
 """
 
@@ -42,6 +42,7 @@ from kanakko.db.pending import (
     set_pending_category,
     undo_last,
 )
+from kanakko.db.refunds import create_refund
 from kanakko.db.reminders import last_reminder_at, log_reminder, logged_since
 from kanakko.db.reports import (
     day_summary,
@@ -78,6 +79,7 @@ __all__ = [
     "consume_invite",
     "create_household_invite",
     "create_signup_invite",
+    "create_refund",
     "save_pending",
     "confirm_pending",
     "set_pending_category",

@@ -24,7 +24,10 @@ def day_summary(
     `household_members` and scopes on `household_id` — every read carries a
     household scope so it can never span households (§16). Buckets on `occurred_on`
     — when the money moved, not when it was logged — and reads `active_transactions`
-    so a soft-deleted row never re-enters a total. The two sums come back as
+    so a soft-deleted row never re-enters a total. `spent` nets out that day's
+    `refund` rows (§18: "reduces the original's category total, never income") —
+    a refund's own `occurred_on` is when it was refunded, which may fall in a
+    different day than the expense it refunds. The two sums come back as
     `NUMERIC` → `Decimal` (never float, §9); an empty day yields `(0, 0.00, 0.00)`.
     `day` is a plain date the caller computes in `Asia/Kolkata` (§10), keeping the
     timezone boundary in one testable place.
@@ -32,7 +35,8 @@ def day_summary(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*),"
-            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0),"
+            " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
+            "  - coalesce(sum(amount) FILTER (WHERE type = 'refund'), 0),"
             " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0)"
             " FROM active_transactions"
             " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
@@ -54,15 +58,21 @@ def month_summary(
     — when the money moved — so a 23:50 IST entry on the month's last day lands in
     that month (the caller computes both boundaries in `Asia/Kolkata`, §10). Reads
     `active_transactions`, so a soft-deleted row never re-enters the totals (§6).
-    The two sums come back as `NUMERIC` → `Decimal` (never float, §9). Top
-    categories are the month's expense categories with their totals, biggest
-    first — the caller decides how many to show.
+    `expenses` and each category total net out the month's `refund` rows (§18:
+    "reduces the original's category total, never income") — a refund carries its
+    original transaction's category (`refunds.create_refund` copies it at write
+    time), so a plain `GROUP BY category` nets it without joining back to the
+    refunded row. The two sums come back as `NUMERIC` → `Decimal` (never float,
+    §9). Top categories are the month's expense categories with their totals,
+    biggest first, fully-refunded ones dropped — the caller decides how many to
+    show.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT"
             " coalesce(sum(amount) FILTER (WHERE type = 'income'), 0),"
             " coalesce(sum(amount) FILTER (WHERE type = 'expense'), 0)"
+            "  - coalesce(sum(amount) FILTER (WHERE type = 'refund'), 0)"
             " FROM active_transactions"
             " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " AND occurred_on >= %s AND occurred_on < %s",
@@ -70,11 +80,15 @@ def month_summary(
         )
         income, expenses = cur.fetchone()
         cur.execute(
-            "SELECT category, sum(amount) FROM active_transactions"
+            "SELECT category,"
+            " sum(CASE WHEN type = 'expense' THEN amount ELSE -amount END)"
+            " FROM active_transactions"
             " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " AND occurred_on >= %s AND occurred_on < %s"
-            " AND type = 'expense'"
-            " GROUP BY category ORDER BY sum(amount) DESC, category",
+            " AND type IN ('expense', 'refund')"
+            " GROUP BY category"
+            " HAVING sum(CASE WHEN type = 'expense' THEN amount ELSE -amount END) <> 0"
+            " ORDER BY sum(CASE WHEN type = 'expense' THEN amount ELSE -amount END) DESC, category",
             (user_id, first_day, next_first_day),
         )
         top = cur.fetchall()

@@ -15,7 +15,7 @@ import pytest
 from conftest import default_account_of, household_of, join_household
 
 from kanakko.categories import EXPENSE_CATEGORIES, INCOME_CATEGORIES
-from kanakko.db import day_summary, month_summary
+from kanakko.db import account_balances, create_refund, day_summary, month_summary
 from kanakko.migrate import MIGRATIONS, migrate
 from kanakko.money import parse_amount
 
@@ -657,4 +657,92 @@ def test_parse_store_sum_by_category_stays_exact(conn):
 
     assert totals == {food: Decimal("0.60"), groceries: Decimal("30.35")}
     assert all(isinstance(total, Decimal) for total in totals.values())
+    conn.rollback()
+
+
+def test_refund_sum_cannot_exceed_the_original(conn):
+    """The DB-level guard: refunds against one transaction can never sum past it (§18).
+
+    Migration 014's trigger is the first cross-row guard in this schema — every
+    prior one is a CHECK or a partial UNIQUE INDEX, neither of which can aggregate
+    across rows. Seeds a ₹1,000 expense, refunds ₹600 then exactly the remaining
+    ₹400 (both must succeed — a partial refund followed by the exact remainder is
+    the ordinary case, not an edge one), then tries a third refund of even ₹0.01
+    more and asserts Postgres raises rather than silently overshooting. Dropping
+    the trigger, or loosening its `>` to `>=`, reddens the last assertion.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9730) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        acc = default_account_of(conn, hh)
+        cur.execute(
+            "INSERT INTO transactions"
+            " (user_id, household_id, amount, type, category, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05', %s) RETURNING txn_id",
+            (uid, hh, parse_amount("1000.00"), EXPENSE_CATEGORIES[0], acc),
+        )
+        (original,) = cur.fetchone()
+
+        def refund(amount):
+            cur.execute(
+                "INSERT INTO transactions"
+                " (user_id, household_id, amount, type, occurred_on, account_id, refund_of_txn_id)"
+                " VALUES (%s, %s, %s, 'refund', '2026-08-06', %s, %s)",
+                (uid, hh, parse_amount(amount), acc, original),
+            )
+
+        refund("600.00")
+        refund("400.00")  # exactly the remainder — must still succeed
+
+        with pytest.raises(psycopg.errors.RaiseException), conn.transaction():
+            refund("0.01")
+    conn.rollback()
+
+
+def test_refund_reduces_category_and_account_but_never_income(conn):
+    """A refund nets the category total and returns money to its account (§18).
+
+    Seeds a ₹1,000 `Food` expense from the household's default account, then
+    refunds ₹300 of it via `db.refunds.create_refund` — the same write path the
+    (future) `refund <amount>` bot command will call. Asserts the refund is
+    invisible to income, reduces `Food`'s month total and the day's `spent`
+    figure, and restores the ₹300 to the account balance — each is a distinct
+    query path (`month_summary`'s two statements, `day_summary`, `account_balances`)
+    that could individually forget to net the new `refund` type.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9731) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        acc = default_account_of(conn, hh)
+        cur.execute(
+            "INSERT INTO transactions"
+            " (user_id, household_id, amount, type, category, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05', %s) RETURNING txn_id",
+            (uid, hh, parse_amount("1000.00"), EXPENSE_CATEGORIES[0], acc),
+        )
+        (original,) = cur.fetchone()
+
+    refunded = create_refund(
+        conn, uid, original, parse_amount("300.00"), date(2026, 8, 5),
+        source="webhook", update_id=None,
+    )
+    assert refunded is not None
+    assert refunded["category"] == EXPENSE_CATEGORIES[0]
+
+    _, spent, received = day_summary(conn, uid, date(2026, 8, 5))
+    assert spent == Decimal("700.00"), "refund did not net out of the day's spend"
+    assert received == Decimal("0.00"), "refund leaked into income"
+
+    income, expenses, top = month_summary(conn, uid, date(2026, 8, 1), date(2026, 9, 1))
+    assert income == Decimal("0.00"), "refund leaked into month income"
+    assert expenses == Decimal("700.00"), "refund did not net out of the month's expenses"
+    assert dict(top)[EXPENSE_CATEGORIES[0]] == Decimal("700.00"), \
+        "refund did not net out of its category's total"
+
+    balances = {row["account_id"]: row["balance"] for row in account_balances(conn, uid)}
+    assert balances[acc] == Decimal("-700.00"), "refund did not return money to its account"
     conn.rollback()

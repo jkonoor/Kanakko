@@ -12,6 +12,63 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `3bfbf58` — serialize the refund-sum guard against concurrent refunds
+
+**Scope:** the follow-up fix to finding 1 of the `256ba0b` review. Adds
+`FOR UPDATE` to migration 014's trigger `SELECT amount INTO original_amount`,
+plus a two-connection regression test
+(`test_concurrent_refunds_against_the_same_original_do_not_both_commit`) and a
+REVIEWS.md status update. No production code paths touched beyond the trigger.
+
+**Status: ✅ DONE** — no findings. The race is genuinely fixed, the guard fails
+for the reason it exists, and the deferral of finding 2 is honest.
+
+### What I checked
+
+- Read the full diff (`git show HEAD`) and the whole of `migrations/014_refunds.sql`.
+- **Verified the lock is at the right row.** `FOR UPDATE` locks the *original*
+  transaction (`WHERE txn_id = NEW.refund_of_txn_id`), which is the single row
+  every concurrent refund against that original contends on. Under READ
+  COMMITTED, the second refund blocks until the first commits, then its
+  `refunded_so_far` aggregate re-reads the now-committed row and the sum check
+  rejects it. Correct serialization point.
+- **No deadlock risk introduced.** Each `create_refund` transaction takes at
+  most one row lock (the original, via the trigger). `create_refund`
+  (`kanakko/db/refunds.py:50-71`) does an unlocked `SELECT` on
+  `active_transactions` then an `INSERT`; concurrent refunds queue on the same
+  original row rather than forming a lock cycle.
+- **Ran the guard against its own defeat.** `uv run pytest
+  tests/test_migrate.py::test_concurrent_refunds_against_the_same_original_do_not_both_commit -v`
+  → **PASSED**. Temporarily removed `FOR UPDATE` from migration 014 and re-ran →
+  **1 failed** (both ₹600 refunds commit, `got {'a': 'committed', 'b':
+  'committed'}`). Restored the line; `git status` clean. The check fails for the
+  reason it exists.
+- **Full suite.** `uv run pytest -q` → **390 passed, 1 warning** in 15.68s —
+  matches the commit's claim (was 389). Working tree clean afterward.
+- **The test is not order-dependent.** Whichever connection acquires the lock
+  first commits; the other is rejected. The `time.sleep(0.3)` on connection "a"
+  only widens the window to keep the RED case reliable — it does not decide the
+  winner, and the assertion sorts `outcomes` so it accepts either ordering.
+- **Deferral of finding 2 is honest.** Finding 2 (deleting/editing an original
+  that has live refunds) is the delete/edit path, untouched here; correctly
+  carried forward to that task rather than silently dropped.
+- **Spec/conventions.** Money stays `NUMERIC(12,2)`; the sum query keeps its
+  `deleted_at IS NULL` filter; §18's "sum of refunds can never exceed the
+  original" invariant now holds under concurrent writes, which is what makes
+  `refunds.py`'s docstring claim (previously false, per finding 1) actually true.
+- **Editing migration 014 rather than adding 015** is correct here: 014 was
+  introduced in the immediately-preceding commit on this unmerged branch and has
+  never been applied to production (the `256ba0b` review that gated it was
+  ⚠️ CHANGES REQUESTED). Editing an unreleased migration in place is right;
+  the "add a new migration" rule protects already-applied ones.
+
+### Findings
+
+None. The fix is minimal, targets the root cause, and ships a check that is red
+without it.
+
+---
+
 ## 2026-08-12 — `256ba0b` — refund schema, guard trigger and write path (Phase 10, split 1/2)
 
 **Scope:** migration 014 adds a `refund` transaction type, `refund_of_txn_id`,

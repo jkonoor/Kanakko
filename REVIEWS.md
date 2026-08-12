@@ -14,7 +14,31 @@ returned, not what they were assumed to return.
 
 ## 2026-08-13 — `104d562` reconcile nudge: the weekly send and the reply (Phase 10, split 2/2)
 
-**Status: ⚠️ CHANGES REQUESTED**
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — all three
+findings fixed in the follow-up commit on `ralph/phase-10`.
+
+> **RESOLVED.** Finding 1 (HIGH — misroute): `TextMessage` now carries
+> `reply_to_message_id` (Telegram's own `reply_to_message.message_id`, captured
+> in `handlers.dispatch`). `db.pending_awaiting_reconcile(conn, user_id,
+> reply_to_message_id)` matches the reply to its exact nudge by
+> `telegram_message_id` when one is given; with no reply target it only
+> resolves when exactly one ask is outstanding, and returns `None` — falling
+> through to ordinary handling rather than guessing — when more than one is
+> outstanding and the reply doesn't say which. `app.py` passes
+> `action.reply_to_message_id` through. New guard
+> `test_pending_awaiting_reconcile_does_not_misroute_across_two_asks`
+> (`tests/test_reconcile.py`) reproduces the exact two-account (Bank + Card)
+> scenario from this review and asserts the older Bank ask is still reachable
+> by its own message id; reverting the db-layer fix (`git stash` the three
+> touched files) reddens it — confirmed. Finding 2 (LOW — unnamed receipt):
+> `RECONCILE_MATCHED`/`RECONCILE_ADJUSTED` now interpolate the account's name
+> (`db.household_accounts`, already household-scoped the same way
+> `create_adjustment` is). Finding 3 (LOW — zero balance): `money.parse_amount`
+> gained an `allow_zero` keyword (default `False`, so every other caller is
+> unchanged) and `reconcile_flow` passes `allow_zero=True` — a genuinely-empty
+> account can now be reported as `0`. `uv run pytest -q` → **476 passed, 1
+> warning** (was 473; +3 new: the misroute guard, a zero-reply test, and an
+> `allow_zero` unit test). `ruff check kanakko/ tests/` → **All checks passed!**
 
 Lands the other half of §18's reconcile nudge: `kanakko/jobs/reconcile.py` (the
 weekly Sunday-10:00-IST cron fan-out, one nudge per household account), migration

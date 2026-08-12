@@ -76,28 +76,46 @@ def create_reconcile_ask(
     return pending_id
 
 
-def pending_awaiting_reconcile(conn: psycopg.Connection, user_id: int) -> dict | None:
-    """The user's most recent outstanding reconcile ask, or `None` (§18).
+def pending_awaiting_reconcile(
+    conn: psycopg.Connection, user_id: int, reply_to_message_id: int | None = None
+) -> dict | None:
+    """The one outstanding reconcile ask this `TextMessage` is answering, or `None` (§18).
 
     `pending_awaiting_amount`'s counterpart for the reconcile flow — checked
     before routing a `TextMessage`, so the reply lands on `reconcile_flow`
-    instead of a fresh parse. Most-recent-first, same tie-break as every other
-    pending lookup, in case more than one nudge is unusually outstanding at once.
-    Returns `{telegram_message_id, account_id}`, or `None` when nothing is
-    waiting.
+    instead of a fresh parse. A household can have more than one account
+    reconcilable at once, so more than one ask can be outstanding at once — a
+    plain "most recent" pick routes a reply to whichever nudge is newest instead
+    of the one it was typed to answer (QA finding, `104d562` review). So:
+    when the reply is a Telegram "Reply" naming a nudge (`reply_to_message_id`
+    is that nudge's own `telegram_message_id`), that ask and only that ask
+    matches — a reply aimed at an unrelated message returns `None` rather than
+    guessing. A bare message with no reply target only resolves when exactly one
+    ask is outstanding, the case every existing single-account test covers;
+    with more than one outstanding it returns `None` rather than silently
+    picking one, so the reply falls through to ordinary parsing instead of
+    landing on the wrong account. Returns `{telegram_message_id, account_id}`,
+    or `None` when nothing matches.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT telegram_message_id, awaiting_reconcile_account_id"
             " FROM pending_transactions"
             " WHERE user_id = %s AND awaiting_reconcile_account_id IS NOT NULL"
-            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            " ORDER BY created_at DESC, pending_id DESC",
             (user_id,),
         )
-        row = cur.fetchone()
-    if row is None:
+        rows = cur.fetchall()
+    if not rows:
         return None
-    telegram_message_id, account_id = row
+    if reply_to_message_id is not None:
+        for telegram_message_id, account_id in rows:
+            if telegram_message_id == reply_to_message_id:
+                return {"telegram_message_id": telegram_message_id, "account_id": account_id}
+        return None
+    if len(rows) > 1:
+        return None
+    telegram_message_id, account_id = rows[0]
     return {"telegram_message_id": telegram_message_id, "account_id": account_id}
 
 

@@ -74,8 +74,31 @@ def test_a_matching_reply_writes_nothing_and_clears_the_ask(conn, monkeypatch):
     )
 
     assert row is None
-    assert sent == [reconcile_flow.RECONCILE_MATCHED]
+    assert sent == [reconcile_flow.RECONCILE_MATCHED.format(account="Bank")]
     assert pending_awaiting_reconcile(conn, uid) is None  # answered, even with no drift
+    conn.rollback()
+
+
+def test_a_zero_reply_is_a_real_answer_not_a_rejected_amount(conn, monkeypatch):
+    """An emptied account reads as 0, which every other amount in the system
+    refuses — the reconcile reply is the one place §18 lets it through."""
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (830500) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    hh = household_of(conn, uid)
+    bank = _account(conn, hh, uid, kind="spending", name="Bank", opening="1000", is_default=True)
+    create_reconcile_ask(conn, uid, 913, bank)
+
+    sent = []
+    monkeypatch.setattr(reconcile_flow, "send_message", lambda chat_id, text: sent.append(text))
+
+    row = handle_reconcile_reply(
+        conn, TextMessage(chat_id=830500, message_id=1, text="0"), 913, bank
+    )
+
+    assert row is not None and row["amount"] == Decimal("1000.00")
+    assert "Bank" in sent[0]
     conn.rollback()
 
 

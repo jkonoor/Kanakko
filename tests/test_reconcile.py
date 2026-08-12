@@ -291,3 +291,37 @@ def test_reconcile_ask_round_trip(conn):
     assert pending_awaiting_reconcile(conn, uid) is None
     assert clear_reconcile_ask(conn, uid, 9001) is None  # already gone
     conn.rollback()
+
+
+def test_pending_awaiting_reconcile_does_not_misroute_across_two_asks(conn):
+    """`104d562` review finding 1: a household with two outstanding asks (Bank and
+    Card) must never route a reply to "whichever nudge is newest". A reply that
+    names its nudge (`reply_to_message_id`) resolves to that exact ask, even
+    though it's the *older* of the two; a bare reply with no nudge named and
+    more than one ask outstanding resolves to neither, rather than guessing.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (8610) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        bank = _account(cur, hh, uid, kind="spending", name="Bank",
+                        opening="1000", is_default=True)
+        card = _account(cur, hh, uid, kind="credit", name="Card", opening="-500")
+
+    create_reconcile_ask(conn, uid, 9101, bank)  # sent first
+    create_reconcile_ask(conn, uid, 9102, card)  # sent second — the LIFO trap
+
+    # Replying to the Bank nudge specifically must resolve to Bank, not the
+    # newer Card ask a plain "most recent" pick would have returned.
+    assert pending_awaiting_reconcile(conn, uid, reply_to_message_id=9101) == {
+        "telegram_message_id": 9101, "account_id": bank,
+    }
+    assert pending_awaiting_reconcile(conn, uid, reply_to_message_id=9102) == {
+        "telegram_message_id": 9102, "account_id": card,
+    }
+    # A reply aimed at neither nudge matches nothing.
+    assert pending_awaiting_reconcile(conn, uid, reply_to_message_id=404) is None
+    # No reply target and two outstanding asks: refuse to guess.
+    assert pending_awaiting_reconcile(conn, uid) is None
+    conn.rollback()

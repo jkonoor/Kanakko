@@ -183,7 +183,7 @@ async def webhook(request: Request) -> dict[str, bool]:
         # message, since the two "next text message is a reply" states cannot both
         # be answered by the one message that arrives.
         awaiting_reconcile = (
-            pending_awaiting_reconcile(conn, user_id)
+            pending_awaiting_reconcile(conn, user_id, action.reply_to_message_id)
             if isinstance(action, TextMessage) and awaiting_message_id is None
             else None
         )

@@ -55,6 +55,11 @@ class TextMessage:
     `update_id` is what ties every event of one Telegram delivery together, and
     `source` is always `webhook` here. They default so the many test
     construction sites that predate §17 stay valid.
+
+    `reply_to_message_id` is Telegram's own `reply_to_message.message_id` when
+    the user tapped "Reply" on a specific message, `None` for a bare message.
+    It's how a reconcile reply is tied to the nudge it answers (§18) rather than
+    guessed at by recency.
     """
 
     chat_id: int
@@ -63,6 +68,7 @@ class TextMessage:
     from_id: int | None = None
     update_id: int | None = None
     source: str = "webhook"
+    reply_to_message_id: int | None = None
 
     def __post_init__(self) -> None:
         if self.from_id is None:
@@ -109,6 +115,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             text=message["text"],
             from_id=(message.get("from") or {}).get("id"),
             update_id=update_id,
+            reply_to_message_id=(message.get("reply_to_message") or {}).get("message_id"),
         )
 
     callback = update.get("callback_query") or {}

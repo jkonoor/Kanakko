@@ -53,7 +53,18 @@ def test_run_nudges_every_live_non_external_account(conn, monkeypatch):
     assert "what does your card statement say" in texts
     assert "₹500.00" in texts  # the card's derived balance, what is owed
 
-    assert pending_awaiting_reconcile(conn, uid) is not None
+    # Two accounts means two outstanding asks — `pending_awaiting_reconcile`
+    # with no `reply_to_message_id` only resolves a single outstanding ask
+    # (see its docstring), so the "were both marked awaiting" check reads the
+    # rows directly rather than through that ambiguous-on-purpose lookup.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pending_transactions"
+            " WHERE user_id = %s AND awaiting_reconcile_account_id IS NOT NULL",
+            (uid,),
+        )
+        (awaiting_count,) = cur.fetchone()
+    assert awaiting_count == 2
     conn.rollback()
 
 

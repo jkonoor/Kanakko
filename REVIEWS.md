@@ -30,6 +30,18 @@ produce the same prompt cost and the same behaviour as today"* — and the test
 named to assert that requirement asserts the opposite, so the violation ships
 green.
 
+**Resolved 2026-08-12:** `parse_schema` now gates the `account` enum on
+`accounts and len(accounts) > 1` (`kanakko/parse.py:99`) — a one-account
+household gets byte-for-byte the pre-accounts schema. `test_a_household_with
+_one_account_behaves_like_no_accounts_at_all` (`tests/test_parse.py:103`) now
+asserts `parse_schema(accounts=["Bank"]) == parse_schema()` instead of the
+inverted claim; `test_account_enum_is_absent_without_a_real_choice` extends the
+absence check to a single account; a new
+`test_account_enum_appears_only_once_a_second_account_exists` covers the
+two-account case the old test's name promised but never isolated. Verified the
+guard fails for the reason it exists: reverted the gate to `if accounts:`, both
+tests went red, restored it, `uv run pytest -q` → 335 passed.
+
 ### What I checked (commands and results)
 
 - `git show HEAD` — read the whole diff (10 files, +276/−31); scope is the parse

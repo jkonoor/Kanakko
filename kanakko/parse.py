@@ -61,9 +61,10 @@ def parse_schema(accounts: list[str] | None = None) -> dict:
 
     `accounts` is the caller's household's account names, built per request from
     the accounts table (§18) — never a literal, the same rule §11 applies to
-    categories. Omitted (or a household with nothing to offer, e.g. a user with
-    no household yet) leaves the schema exactly as it was before accounts
-    existed: no `account` property, no behaviour change, no added prompt cost.
+    categories. Omitted, empty, or a single account (no household yet, or one
+    that hasn't onboarded a second account) leaves the schema exactly as it was
+    before accounts existed: no `account` property, no behaviour change, no
+    added prompt cost.
     """
     schema = {
         "type": "object",
@@ -95,7 +96,13 @@ def parse_schema(accounts: list[str] | None = None) -> dict:
         "required": ["type", "amount", "category", "date", "note"],
         "additionalProperties": False,
     }
-    if accounts:
+    if accounts and len(accounts) > 1:
+        # A single-account household has no real choice to make — null already
+        # means "the default account" — so the enum only appears once a second
+        # account exists (§18: "accounts become visible only when a second one
+        # exists"). Below that, the schema is byte-for-byte what it was before
+        # accounts existed: no added prompt cost, no behaviour change.
+        #
         # §18: nullable like category — null means "the default account", so the
         # model is never forced to guess when the message names no account.
         schema["properties"]["account"] = {

@@ -75,12 +75,13 @@ def test_amount_is_a_string_not_a_number():
     assert parse_schema()["properties"]["amount"]["type"] == "string"
 
 
-def test_account_enum_is_absent_without_accounts():
-    # §18: no accounts (or none passed) must leave the schema exactly as it was
-    # before accounts existed — same prompt cost, same behaviour, for a caller
-    # (or a user with no household yet) that has nothing to offer.
+def test_account_enum_is_absent_without_a_real_choice():
+    # §18: no accounts, no accounts passed, or exactly one account must all leave
+    # the schema exactly as it was before accounts existed — same prompt cost,
+    # same behaviour, for a caller with nothing (or nothing to choose between).
     assert "account" not in parse_schema()["properties"]
     assert "account" not in parse_schema(accounts=[])["properties"]
+    assert "account" not in parse_schema(accounts=["Bank"])["properties"]
     assert "account" not in parse_schema()["required"]
 
 
@@ -101,13 +102,21 @@ def test_build_request_threads_accounts_into_the_schema():
 
 
 def test_a_household_with_one_account_behaves_like_no_accounts_at_all():
-    # The check the task names explicitly: a single-account household must not
-    # change the prompt's shape from today's (pre-accounts) behaviour beyond the
-    # one extra enum value — same properties, same required keys otherwise.
-    bare = parse_schema()
-    one = parse_schema(accounts=["Bank"])
-    assert one["properties"].keys() - bare["properties"].keys() == {"account"}
-    assert one["required"] == bare["required"] + ["account"]
+    # The check the task names explicitly: a single-account household has no
+    # real choice to make (null already means "the default account"), so its
+    # schema must be byte-for-byte today's (pre-accounts) schema — no `account`
+    # property, no added prompt cost.
+    assert parse_schema(accounts=["Bank"]) == parse_schema()
+
+
+def test_account_enum_appears_only_once_a_second_account_exists():
+    # The enum is real signal only once there is a real choice — §18:
+    # "accounts become visible only when a second one exists".
+    schema = parse_schema(accounts=["Bank", "Card"])
+    account = schema["properties"]["account"]
+    assert {"type": "string", "enum": ["Bank", "Card"]} in account["anyOf"]
+    assert {"type": "null"} in account["anyOf"]
+    assert "account" in schema["required"]
 
 
 def test_model_default_survives_empty_env(monkeypatch):

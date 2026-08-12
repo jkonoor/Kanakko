@@ -12,6 +12,67 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `05f28e5` — recurring-rule dashboard pause/delete (Phase 10, split 2/3)
+
+**Status: ✅ DONE**
+
+Scope: two new Mini App routes (`POST /app/recurring/active`,
+`POST /app/recurring/delete`) in a new `kanakko/webapp/recurring.py`, a
+`recurring_list` renderer + `dashboard_html` wiring in `render.py`, the
+`list_recurring_rules` fetch in `routes.py`, CSS/JS in `shell.py`, router
+registration in `app.py`, and 10 new tests. Both routes call the
+`set_recurring_rule_active`/`delete_recurring_rule` functions that landed and
+were tested directly in `2d6c421` (split 1/2).
+
+### What I checked (and what it returned)
+
+- **Full suite.** `uv run pytest` → **428 passed** (1 deprecation warning),
+  matching the commit message. `tests/test_webapp.py` alone → 90 passed.
+- **The household-scoping guard is real, not a surface-form check.** Temporarily
+  dropped the `AND household_id = (…)` clause from `set_recurring_rule_active`'s
+  UPDATE and reran `test_recurring_active_route_foreign_household_is_404` →
+  **1 failed** (a stranger's toggle returned 204 and flipped `active` instead of
+  404). Restored; `git status` clean, `git diff --stat` empty. The guard fails
+  for the reason it exists — foreign/non-existent `rule_id` resolves to no row,
+  route returns 404.
+- **Auth / replay.** Both routes call `authenticated_user(request,
+  max_age=timedelta(hours=24))` before touching the DB, then `permitted_user`
+  (resolves, never creates). `test_recurring_routes_reject_a_stale_init_data`
+  proves a genuine-but-old `initData` is 401 on both — the §13 mutation rule.
+- **Body validation can't be smuggled past.** `active` is rejected unless it is a
+  real `bool` (explicit `TypeError` before the permissive `int()`/`bool()`
+  coercion); `test_recurring_active_route_rejects_a_bad_body` covers missing
+  `id`, missing `active`, and the string `"false"` → all 400.
+- **No XSS.** `recurring_list` escapes `category` and `account_name` with
+  `html.escape`; `amount` goes through `format_amount` (Decimal), `rule_id` and
+  `day_of_month` are DB ints. Nothing user-typed reaches the markup unescaped.
+- **Money path.** `amount` stays `Decimal` end to end (DB `NUMERIC` →
+  `format_amount`); no float touches it. No confidence score, no ORM, no new
+  dependency. Categories are only displayed here, sourced from the DB row the
+  closed-set-validated `create_recurring_rule` wrote.
+- **JS handler ordering.** `.rule-toggle` and `.rule-del` are matched (and return
+  early) before the existing `.del` handler; `closest('.del')` does not match the
+  single-token `rule-del` class, so no cross-firing. Toggle sends the *opposite*
+  of `data-active` (current state), matching the route contract.
+- **Commit/transaction semantics.** Routes use `with connect() as conn:`; the
+  db functions deliberately don't commit, and psycopg3's connection context
+  manager commits on clean exit — the same pattern the already-shipped
+  `/app/delete` uses, and the household-scoped-pause test confirms the row is
+  actually persisted (`SELECT active … == (False,)`).
+
+### Findings
+
+None blocking. The 10 new tests cover the money-adjacent, auth, scoping, and
+event-log paths that would otherwise fail silently. Marking **✅ DONE**.
+
+Note (not a finding, for split 3/3): `list_recurring_rules` `JOIN accounts`
+without a `deleted_at IS NULL` filter, so a rule pinned to a since-soft-deleted
+account would still render with that account's name. Harmless for display and
+out of this commit's scope (the function shipped in `2d6c421`), but worth a
+glance when the cron send lands and actually acts on a rule's account.
+
+---
+
 ## 2026-08-13 — `2d6c421` — recurring-rule schema, guard and household-scoped CRUD (Phase 10, split 1/2)
 
 **Status: ✅ DONE**

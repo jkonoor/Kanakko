@@ -202,6 +202,28 @@ def test_multi_word_locked_account_name_is_reachable_as_a_query(conn, monkeypatc
     conn.rollback()
 
 
+def test_year_suffixed_locked_account_name_is_reachable_as_a_query(conn, monkeypatch):
+    """F4: a `locked` account auto-created with a name that happens to end in
+    something that parses as an amount ("Goa 2026") must still be queryable —
+    the query lookup runs before the bad-kind heuristic, so an existing account
+    wins over the "cash 500" botched-onboarding guess.
+    """
+    migrate(conn)
+    _seed(conn)
+    sent = _stub_send(monkeypatch)
+    handle_account(conn, _account("/account locked 500"))
+    with conn.cursor() as cur:
+        cur.execute("UPDATE accounts SET name = 'Goa 2026' WHERE name = 'Savings'")
+    sent.clear()
+
+    result = handle_account(conn, _account("/account Goa 2026"))
+
+    assert result is not None and result["name"] == "Goa 2026"
+    assert sent == [(USER_TG,
+                     "Goa 2026 — put in ₹0.00, got back ₹0.00, started with ₹500.00.")]
+    conn.rollback()
+
+
 def test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind(conn, monkeypatch):
     """F1's fix must not swallow the existing "unknown kind" refusal: a
     two-word attempt whose second word looks like an amount ("cash 500") is a

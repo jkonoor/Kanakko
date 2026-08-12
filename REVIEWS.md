@@ -27,6 +27,13 @@ the whole class it named: a plausible subclass of auto-created `locked` names
 still misroutes to the very "unknown kind" message F1 set out to eliminate
 (**F4**).
 
+**F4 resolved:** `handle_account` now looks up `_find_locked_account(conn,
+user_id, arg)` before the bad-kind check; only falls to `ACCOUNT_BAD_KIND` when
+no live `locked` account matches the full argument. "Goa 2026" now resolves as
+a query when that account exists. Added
+`test_year_suffixed_locked_account_name_is_reachable_as_a_query`, confirmed red
+against the pre-fix `handlers.py` (`1 failed`) and green after restoring it.
+
 ### What I checked (commands, and what they returned)
 
 - `uv run pytest -q` → **371 passed, 1 warning** (the pre-existing

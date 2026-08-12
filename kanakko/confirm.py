@@ -27,7 +27,7 @@ ACCOUNT_PREFIX = "acct:"
 # these per card, so an exact match is enough.
 CHANGE_AMOUNT = "change_amount"
 
-# `jobs.recurring`'s `cancel_label` and `handlers.handle_amount_reply`'s
+# `jobs.recurring`'s `cancel_label` and `confirm_flow.handle_amount_reply`'s
 # re-render both need this exact string, so it lives here once rather than in
 # `jobs/recurring.py` where only the cron send used to read it.
 SKIP_LABEL = "⏭️ Skip"
@@ -95,7 +95,7 @@ def confirm_card(
     itself alone. `change_amount_button` adds the third button the spec names
     ("Confirm / Change amount / Skip") on its own row, below Confirm/Skip and
     above the category buttons — `jobs.recurring` is the only caller that
-    passes it, and `handlers.handle_amount_reply` passes it again when
+    passes it, and `confirm_flow.handle_amount_reply` passes it again when
     re-rendering the card so the button survives the edit.
     """
     if txn.type == "transfer":

@@ -1422,7 +1422,7 @@ per task:
       now 728 lines; `uv run pytest` → 457 passed, `ruff check` clean. The
       spine is still 728 lines against the 300-line guideline — filed as a
       follow-up split task below rather than assumed done.
-- [ ] `handlers.py` follow-up split: after all six command slices, the spine
+- [x] `handlers.py` follow-up split: after all six command slices, the spine
       (dispatch/start/text/undo/help/household/confirm core) is still 728
       lines against the 300-line guideline — the six-slice plan didn't get it
       under the line by itself. Look at the confirm-card core
@@ -1431,6 +1431,30 @@ per task:
       next seam — it's the largest cohesive block left and shares no state
       with `dispatch`/`handle_start`/`handle_text`/`handle_undo`/`handle_help`/
       `handle_household`, the same shape the six commands already split on.
+      Done: `kanakko/confirm_flow.py` — a sibling of `kanakko/commands/`, not a
+      member of it, since these handlers answer confirm-card button taps and a
+      typed amount reply, not a slash command. Moved the six functions and the
+      `CHANGE_AMOUNT_PROMPT`/`CHANGE_AMOUNT_RETRY_PROMPT` constants (only used
+      inside them) verbatim; `app.py` now imports them from
+      `kanakko.confirm_flow` instead of `kanakko.handlers`. Dropped
+      `cancel_pending`/`confirm_pending`/`request_amount_change`/
+      `set_pending_account`/`set_pending_amount`/`set_pending_category`,
+      `answer_callback_query`/`delete_message`/`edit_message_text`,
+      `ALL_CATEGORIES`/`CATEGORY_PREFIX`, `ACCOUNT_PREFIX`/`SKIP_LABEL`/
+      `settled_card`, `Transaction` and `parse_amount` from `handlers.py`'s
+      now-stale imports — `list_accounts`/`get_or_create_user`/`confirm_card`/
+      `send_message` stay, still used by `handle_text`. `tests/test_webhook.py`
+      retargeted every `monkeypatch.setattr(handlers, …)` for these six
+      handlers at the new `confirm_flow` module (the ones for `handle_text`/
+      `handle_undo` stay on `handlers`, unaffected). Verified red-without-fix:
+      reverted one retarget back to `handlers` and reran — `AttributeError:
+      <module 'kanakko.handlers'> has no attribute 'answer_callback_query'`
+      (the symbol doesn't exist there any more, an even sharper signal than
+      the "stub never intercepted" failures the six command slices found),
+      restored, green again. `handlers.py` is now 491 lines (still over the
+      300-line guideline — the spine itself may need a further split later,
+      not assumed done here); `kanakko/confirm_flow.py` is 263.
+      `uv run pytest` → 457 passed, `ruff check` clean.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

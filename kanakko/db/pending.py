@@ -271,7 +271,7 @@ def request_amount_change(
 ) -> int | None:
     """Mark the user's pending row `awaiting_amount` (§18).
 
-    `handlers.handle_change_amount_request`'s write, fired by a "Change amount"
+    `confirm_flow.handle_change_amount_request`'s write, fired by a "Change amount"
     tap on a recurring-rule card: the flag is what makes the *next* text message
     this user sends get read as a replacement amount rather than a new
     transaction — `app.py`'s webhook checks `pending_awaiting_amount` before
@@ -316,7 +316,7 @@ def set_pending_amount(
 ) -> Transaction | None:
     """Apply a replacement amount to the user's awaiting pending row (§18).
 
-    `handlers.handle_amount_reply`'s write: "Change amount" only ever asks for a
+    `confirm_flow.handle_amount_reply`'s write: "Change amount" only ever asks for a
     new figure, never a full re-parse, so only `amount` changes — the rest of
     the parsed row (category, account, note, date) survives untouched, the same
     round-trip-through-`Transaction` shape `set_pending_category`/

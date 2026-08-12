@@ -32,6 +32,14 @@ from kanakko.commands.refund import REFUND_PREFIX, _is_refund, handle_refund, ha
 from kanakko.commands.remove import REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice
 from kanakko.commands.transfer import _is_transfer, handle_transfer
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
+from kanakko.confirm_flow import (
+    handle_account_choice,
+    handle_amount_reply,
+    handle_cancel,
+    handle_category,
+    handle_change_amount_request,
+    handle_confirm,
+)
 from kanakko.db import claim_update, connect, get_or_create_user, pending_awaiting_amount
 from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
@@ -44,12 +52,6 @@ from kanakko.handlers import (
     _is_start,
     _is_undo,
     dispatch,
-    handle_account_choice,
-    handle_amount_reply,
-    handle_cancel,
-    handle_category,
-    handle_change_amount_request,
-    handle_confirm,
     handle_help,
     handle_household,
     handle_start,

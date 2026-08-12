@@ -14,7 +14,7 @@ from conftest import household_of
 from fastapi.testclient import TestClient
 
 from kanakko import app as app_module
-from kanakko import db, eventlog, handlers
+from kanakko import confirm_flow, db, eventlog, handlers
 from kanakko.app import WEBHOOK_SECRET_HEADER, app
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
 from kanakko.commands.remove import REMOVE_PREFIX
@@ -685,9 +685,9 @@ def test_handle_confirm_writes_the_ledger_row_and_acknowledges(conn, monkeypatch
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     acked = {}
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
-    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
+    monkeypatch.setattr(confirm_flow, "edit_message_text", lambda *a, **k: None)
 
     txn_id = app_module.handle_confirm(
         conn, ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
@@ -710,9 +710,9 @@ def test_handle_confirm_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     acks = []
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
-    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
+    monkeypatch.setattr(confirm_flow, "edit_message_text", lambda *a, **k: None)
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CONFIRM)
 
     first = app_module.handle_confirm(conn, press)
@@ -737,8 +737,8 @@ def test_handle_confirm_logs_ok_then_noop_on_a_redelivery(conn, monkeypatch):
     """
     migrate(conn)
     _seed_pending(conn, chat_id=12345, card_message_id=909)
-    monkeypatch.setattr(handlers, "answer_callback_query", lambda *a, **k: None)
-    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: None)
+    monkeypatch.setattr(confirm_flow, "answer_callback_query", lambda *a, **k: None)
+    monkeypatch.setattr(confirm_flow, "edit_message_text", lambda *a, **k: None)
     press = ButtonPress(
         chat_id=12345, message_id=909, callback_query_id="c", data=CONFIRM, update_id=7
     )
@@ -1221,10 +1221,10 @@ def test_handle_cancel_discards_the_pending_row_and_acknowledges(conn, monkeypat
     acked = {}
     removed = []
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
     monkeypatch.setattr(
-        handlers, "delete_message", lambda chat_id, message_id: removed.append((chat_id, message_id)) or True
+        confirm_flow, "delete_message", lambda chat_id, message_id: removed.append((chat_id, message_id)) or True
     )
 
     pending_id = app_module.handle_cancel(
@@ -1256,13 +1256,13 @@ def test_handle_cancel_is_idempotent_on_a_redelivered_tap(conn, monkeypatch):
     _seed_pending(conn, chat_id=12345, card_message_id=909)
     acks = []
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acks.append(text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acks.append(text)
     )
     # A redelivered Cancel deletes a card that is already gone: the Bot API
     # answers 400, `delete_message` returns False, and the handler must carry on
     # to the ack rather than raise — a raise here would 500 and make Telegram
     # redeliver the same tap forever.
-    monkeypatch.setattr(handlers, "delete_message", lambda chat_id, message_id: False)
+    monkeypatch.setattr(confirm_flow, "delete_message", lambda chat_id, message_id: False)
     press = ButtonPress(chat_id=12345, message_id=909, callback_query_id="cbq1", data=CANCEL)
 
     first = app_module.handle_cancel(conn, press)
@@ -1287,16 +1287,16 @@ def test_confirm_settles_the_card_and_a_stale_cancel_leaves_the_receipt(conn, mo
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     edits, deletes = [], []
-    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
+    monkeypatch.setattr(confirm_flow, "answer_callback_query", lambda cbq, text=None: None)
     monkeypatch.setattr(
-        handlers,
+        confirm_flow,
         "edit_message_text",
         lambda chat_id, message_id, text, reply_markup=None: edits.append(
             (message_id, text, reply_markup)
         ),
     )
     monkeypatch.setattr(
-        handlers,
+        confirm_flow,
         "delete_message",
         lambda chat_id, message_id: deletes.append((chat_id, message_id)) or True,
     )
@@ -1351,14 +1351,14 @@ def test_handle_category_updates_the_pending_row_and_re_renders_the_card(conn, m
     edited = {}
     acked = {}
     monkeypatch.setattr(
-        handlers,
+        confirm_flow,
         "edit_message_text",
         lambda chat_id, message_id, text, reply_markup=None: edited.update(
             chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
         ),
     )
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
 
     chosen = EXPENSE_CATEGORIES[0]
@@ -1394,9 +1394,9 @@ def test_handle_category_ignores_a_forged_unknown_category(conn, monkeypatch):
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     edits = []
     monkeypatch.setattr(
-        handlers, "edit_message_text", lambda *a, **k: edits.append(a)
+        confirm_flow, "edit_message_text", lambda *a, **k: edits.append(a)
     )
-    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
+    monkeypatch.setattr(confirm_flow, "answer_callback_query", lambda cbq, text=None: None)
 
     result = app_module.handle_category(
         conn,
@@ -1427,14 +1427,14 @@ def test_handle_account_choice_updates_the_pending_row_and_re_renders_the_card(c
     edited = {}
     acked = {}
     monkeypatch.setattr(
-        handlers,
+        confirm_flow,
         "edit_message_text",
         lambda chat_id, message_id, text, reply_markup=None: edited.update(
             chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
         ),
     )
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
 
     result = app_module.handle_account_choice(
@@ -1467,8 +1467,8 @@ def test_handle_account_choice_ignores_an_account_outside_the_household(conn, mo
     migrate(conn)
     user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
     edits = []
-    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: edits.append(a))
-    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
+    monkeypatch.setattr(confirm_flow, "edit_message_text", lambda *a, **k: edits.append(a))
+    monkeypatch.setattr(confirm_flow, "answer_callback_query", lambda cbq, text=None: None)
 
     result = app_module.handle_account_choice(
         conn,
@@ -1499,10 +1499,10 @@ def test_handle_change_amount_request_marks_the_row_and_prompts(conn, monkeypatc
     acked = {}
     prompted = []
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
     monkeypatch.setattr(
-        handlers, "send_message", lambda chat_id, text, reply_markup=None: prompted.append(text)
+        confirm_flow, "send_message", lambda chat_id, text, reply_markup=None: prompted.append(text)
     )
 
     pending_id = app_module.handle_change_amount_request(
@@ -1522,11 +1522,11 @@ def test_handle_change_amount_request_on_a_gone_card_is_a_noop(conn, monkeypatch
     migrate(conn)
     acked = {}
     monkeypatch.setattr(
-        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+        confirm_flow, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
     )
     sent = []
     monkeypatch.setattr(
-        handlers, "send_message", lambda chat_id, text, reply_markup=None: sent.append(text)
+        confirm_flow, "send_message", lambda chat_id, text, reply_markup=None: sent.append(text)
     )
 
     pending_id = app_module.handle_change_amount_request(
@@ -1552,7 +1552,7 @@ def test_handle_amount_reply_updates_the_amount_and_re_renders_the_card(conn, mo
     db.request_amount_change(conn, user_id, 909)
     edited = {}
     monkeypatch.setattr(
-        handlers,
+        confirm_flow,
         "edit_message_text",
         lambda chat_id, message_id, text, reply_markup=None: edited.update(
             chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
@@ -1580,9 +1580,9 @@ def test_handle_amount_reply_to_an_unparseable_reply_leaves_the_row_awaiting(con
     db.request_amount_change(conn, user_id, 909)
     edits = []
     sent = []
-    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: edits.append(a))
+    monkeypatch.setattr(confirm_flow, "edit_message_text", lambda *a, **k: edits.append(a))
     monkeypatch.setattr(
-        handlers, "send_message", lambda chat_id, text, reply_markup=None: sent.append(text)
+        confirm_flow, "send_message", lambda chat_id, text, reply_markup=None: sent.append(text)
     )
 
     txn = app_module.handle_amount_reply(

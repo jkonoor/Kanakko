@@ -12,6 +12,65 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `7210fff` — credit card semantics end to end: transfers, not double spending (Phase 10)
+
+**Scope:** adds a `transfer` transaction type end to end — `parse_schema` gains
+`transfer` + `from_account`/`to_account` (gated on `len(accounts) > 1`),
+`_ACCOUNT_GUIDANCE` teaches bill-payment-as-transfer, `Transaction` gains the two
+endpoints + a model validator mirroring migration 011's CHECK, `confirm_pending`
+writes a transfer with NULL `account_id`/`category` and resolved endpoints,
+`confirm_card`/`settled_card` render "Bank → Card", and `handle_text` skips the
+category picker for transfers. Closes the TASKS.md "Credit card semantics end to
+end" box.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches `TASKS.md`, `kanakko/{confirm,parse,handlers}.py`,
+  `kanakko/db/pending.py`, and four test files. Nothing outside Phase 10's scope.
+- **Spec fit against `docs/DECISIONS.md` §18 and `migrations/011_transfer_type.sql`.**
+  The model validator (`parse.py:344`) reproduces 011's CHECK exactly: a transfer
+  names both ends, every other type names neither, and the two ends must differ.
+  `confirm_pending`'s transfer branch (`db/pending.py:100`) leaves `account_id`
+  and `category` NULL and resolves the two endpoints by name within the
+  household — the row shape 011's CHECK requires.
+- **The double-count is excluded from totals, not just claimed.** `db/reports.py`
+  `month_summary` reads `FROM active_transactions` with
+  `FILTER (WHERE type = 'expense'/'income')` (`reports.py:37-39`), so a `transfer`
+  row is invisible to both totals and the category breakdown by construction. The
+  read goes through the soft-delete view, not `transactions` directly.
+- **End-to-end confirm path.** `handle_confirm` (`handlers.py:974-977`) passes
+  `confirm_pending`'s returned row straight into `settled_card`; the row now
+  carries `from_account`/`to_account`, and `settled_card` reads them only inside
+  its `type == "transfer"` branch — no `KeyError` on the ordinary path.
+- `uv run pytest` → **354 passed** (10 new), 15.2s. Matches the commit claim.
+- **Guards verified red-without-fix (I reverted each and re-ran):**
+  - Reverted `handlers.py:355` to `if txn.category is None:` (dropping the
+    `type != "transfer"` exclusion): `test_handle_text_shows_a_confirm_card_not_a_
+    category_picker_for_a_transfer` **failed**. Restored → passes.
+  - Disabled `confirm_pending`'s transfer branch (`if False and txn.type == ...`):
+    both `test_confirm_writes_a_transfer_with_two_endpoints_and_no_account` and the
+    task's own `test_credit_card_swipe_then_bill_payment_does_not_double_count_
+    spending` **failed**. Restored → both pass.
+  - The parse validator's three refusal tests (missing endpoint, self-transfer,
+    non-transfer carrying an endpoint) each assert a `ValidationError` and a retry
+    (`len(calls) == 2`) — these fail if the `model_validator` is removed.
+- Working tree confirmed clean (`git diff --stat` empty) after all reverts.
+
+### Findings
+
+None blocking.
+
+One non-blocking observation, not a defect: the schema still `required`s
+`category` for a `transfer`, and neither the schema nor the model validator
+forbids a transfer arriving with a *non-null* category. It causes no wrong
+outcome — `confirm_pending` forces `category = None` on the write regardless, and
+both cards ignore category for transfers — so the ledger and every total stay
+correct. Left as-is; flagging only so a future reader knows it was considered.
+
+---
+
 ## 2026-08-12 — `7dd5871` — teach the parse prompt the account vocabulary (Phase 10)
 
 **Status: ✅ DONE**

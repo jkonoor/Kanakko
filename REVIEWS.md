@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `b9675c8` split handlers.py: `/refund` → `kanakko/commands/refund.py` (Phase 10, slice 6/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, the last of the six planned command slices and the same shape
+as 1–5. Moves the `refund` surface — `REFUND_WORD`/`REFUND_PREFIX`/
+`REFUND_USAGE`/`REFUND_BAD_AMOUNT`/`REFUND_NO_CANDIDATES`/`REFUND_GONE`/
+`REFUND_OVER_LIMIT`, `_is_refund`, `_refund_keyboard`, `handle_refund`,
+`handle_refund_choice` — verbatim into a new module; `app.py` reimports them
+from `kanakko.commands.refund`; `handlers.py` drops the now-orphaned
+`create_refund`/`refund_candidates` db imports, `date`/`Decimal`, the
+`InlineKeyboard*` imports, and `kanakko.parse.today`.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — confirmed the moved code is byte-for-byte identical
+  (the removed handlers.py block and the added refund.py block match line for
+  line; no logic changed in the move).
+- `grep` for `handle_refund|_is_refund|REFUND_|refund_candidates|create_refund|_refund_keyboard`
+  across `kanakko/` — the only live (non-docstring, non-`.pyc`) references
+  outside the new module are `kanakko/app.py:31` (import) and its use sites at
+  `app.py:192,226,242` (`is_parse` exclusion, dispatch, callback routing). No
+  stale import of the moved names remains in `handlers.py`.
+- `uv run python -c "import kanakko.app; import kanakko.commands.refund; import kanakko.handlers"`
+  → `imports OK`. `refund.py` imports `TextMessage`/`ButtonPress`/
+  `_command_arg` from `handlers`, and `handlers` no longer imports `refund`,
+  so no import cycle — matches slices 1–5.
+- `uv run ruff check kanakko/ tests/` → `All checks passed!` (no dead imports
+  left behind by the move).
+- `uv run pytest -q` → **457 passed**, 1 unrelated Starlette deprecation
+  warning. Matches the commit claim exactly.
+- `uv run pytest tests/test_refund_ux.py tests/test_webhook.py -q` → **64
+  passed**. The refund UX tests now patch `refund_command.send_message`/
+  `edit_message_text`/`answer_callback_query` and read `refund_command.REFUND_*`/
+  `_is_refund` — i.e. they exercise the new module, so they would have failed
+  (stale-patch `AttributeError` / real-send leak) had the split been wrong,
+  the same red-without-fix class the commit documents.
+
+**Spec fit:** nothing money-related changed. `handle_refund_choice` still
+routes writes through `db.create_refund`, whose over-limit guard is migration
+014's trigger (`RaiseException` caught → `REFUND_OVER_LIMIT` reply, not a 500);
+amounts stay `Decimal` via `parse_amount`; the untrusted-button re-scope by
+presser is unchanged. No `float`, no direct `transactions` read, no new
+dependency, no confidence score introduced.
+
+**Findings:** none blocking.
+
+- (minor, pre-existing, out of scope) Docstrings in `kanakko/webapp/recent.py`,
+  `kanakko/db/refunds.py`, and `kanakko/db/reports.py` still refer to
+  `handlers.handle_refund`/`handlers.handle_refund_choice`, which now live in
+  `kanakko.commands.refund`. Cosmetic only, not introduced by this commit, and
+  the same drift the earlier slices left — worth a sweep when the follow-up
+  spine split lands, not a fix for this iteration.
+
+The follow-up task the commit filed (`handlers.py` still 728 lines vs the
+300-line guideline, confirmed by `wc -l`) is correctly left unchecked in
+`TASKS.md`. The ticked box is real, not a stub.
+
+---
+
 ## 2026-08-13 — `8e5afbf` split handlers.py: `/recurring` → `kanakko/commands/recurring.py` (Phase 10, slice 5/6)
 
 **Status: ✅ DONE**

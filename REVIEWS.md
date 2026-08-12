@@ -12,6 +12,99 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `68e49cf` — per-request account enum in the parse schema
+
+**Scope:** `parse_schema` / `build_request` / `call` / `parse_message` gain an
+`accounts` param; `parse_schema` appends a nullable `account` `anyOf` enum when
+`accounts` is non-empty. New `db.list_accounts(conn, user_id)` (household-scoped
+names, `external` excluded, default-first). `Transaction` gains
+`account: str | None` validated against the caller's accounts via Pydantic
+context. `handlers.handle_text` looks the accounts up and threads them into both
+`build_request` and `parse_message`.
+
+**Status: ⚠️ CHANGES REQUESTED** — the account list is correctly sourced from
+the table (never a literal), validation is wired both first-call and retry, and
+the empty/no-household edge case is safe. But the change violates the one
+requirement the task states explicitly — *"A household with one account must
+produce the same prompt cost and the same behaviour as today"* — and the test
+named to assert that requirement asserts the opposite, so the violation ships
+green.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — read the whole diff (10 files, +276/−31); scope is the parse
+  schema, `list_accounts`, and the `handle_text` wiring.
+- `docs/DECISIONS.md` §18 — the account enum is per-request from the table
+  (implemented correctly), *and* "Accounts become visible only when a second one
+  exists" (§18, onboarding), i.e. one account = daily path unchanged.
+- `TASKS.md` line 74–78 — the ticked task's explicit acceptance line: one-account
+  household → same prompt cost and same behaviour as today.
+- `uv run pytest -q` → **334 passed**.
+- Schema comparison, one-account vs pre-accounts (below) — the daily path's
+  request grows and gains a required field.
+
+### Findings
+
+**1. (blocking) One-account households — i.e. every onboarded user — get a
+larger prompt and a changed schema, which the task forbids.**
+`kanakko/parse.py:98` gates the enum on `if accounts:` (any non-empty list).
+Every household is minted with exactly one usable account, `Bank`
+(`create_default_accounts`, `kanakko/db/accounts.py:36-41`; `external` is
+excluded by `list_accounts`). So `handle_text` calls `parse_message(text,
+["Bank"])` for the ordinary daily user, and the schema now carries an `account`
+property **and lists it in `required`** (strict mode):
+
+```
+$ uv run python -c "...build_request('spent 500 on tea', accounts=['Bank'])..."
+bare request bytes : 1378
+1-acct request bytes: 1469      # +91 bytes on every daily-path request
+account required in 1-acct: True
+```
+
+Failure scenario: input "spent 500 on tea" from a normal single-account user →
+the model is now handed a strictly larger schema and *required* to emit an
+`account` field it never had to before. The task's acceptance line ("same prompt
+cost and the same behaviour as today" for a one-account household) is not met;
+§18's "accounts become visible only when a second one exists" points the same
+way — with one account, `null → default` already covers it and the enum buys
+nothing.
+Suggested fix: gate the enum on a real choice existing, e.g. in `parse_schema`
+`if accounts and len(accounts) > 1:`. Then a one-account household is byte-for-byte
+today's schema; the enum appears only once a second account is onboarded.
+
+**2. (blocking, same root) The guard for that requirement asserts the opposite
+of the requirement — it is green while the requirement is violated.**
+`tests/test_parse.py:461` `test_a_household_with_one_account_behaves_like_no_accounts_at_all`
+is named to certify the one-account case is unchanged, but its body asserts it
+*differs*:
+
+```python
+assert one["properties"].keys() - bare["properties"].keys() == {"account"}
+assert one["required"] == bare["required"] + ["account"]
+```
+
+That is CLAUDE.md's "a guard that reports safety it doesn't provide is worse than
+no guard" — a reader scanning the suite sees a green "one account behaves like no
+accounts at all" and trusts the daily path is untouched, when it isn't. After
+fix #1 this test should assert `one == bare` (no `account` property, unchanged
+`required`), and a separate test should cover the two-account case where the enum
+*does* appear. That flipped test is the one that fails for the reason it exists.
+
+### What is correct (not findings)
+
+- `list_accounts` (`kanakko/db/accounts.py:99`) sources from the table, excludes
+  the structural `external` kind, filters `deleted_at IS NULL`, orders
+  default-first — never a literal (§11/§18). Empty for a user with no household,
+  matching the no-household edge case. Tests cover both.
+- Validation context is passed on both the first call and the single retry
+  (`parse.py:236-247`), and no-context / empty-accounts correctly skips the
+  membership check, so pre-accounts callers are unaffected. An out-of-set account
+  raises `ValidationError` and is retried exactly once — verified by the suite.
+- No `float` on any amount path; no reads of `transactions` bypassing the view;
+  no secret introduced.
+
+---
+
 ## 2026-08-12 — `e54bd61` — show transfers in the dashboard's recent list
 
 **Scope:** `recent_transactions` (`kanakko/db/reports.py`) now `LEFT JOIN`s

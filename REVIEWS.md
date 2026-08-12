@@ -21,7 +21,21 @@ adds `create_refund` (household-scoped write path). `reports.py` nets refunds
 out of `day_summary`, `month_summary` (total + per-category), and
 `accounts.py` counts them as account inflows.
 
-**Status: ⚠️ CHANGES REQUESTED**
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — finding 1
+(the race) fixed in the follow-up commit; finding 2 was explicitly deferred to
+the delete/edit-of-a-refunded-original task, not this one.
+
+> **RESOLVED.** `migrations/014_refunds.sql`'s trigger now takes
+> `SELECT amount INTO original_amount FROM transactions WHERE txn_id = ... FOR
+> UPDATE` — the exact fix this review verified live. That serializes concurrent
+> refunds against the same original: the second connection blocks on the row
+> lock until the first commits, then re-reads the now-committed sum. New guard
+> `test_concurrent_refunds_against_the_same_original_do_not_both_commit`
+> (`tests/test_migrate.py`) opens two real connections, has both insert a ₹600
+> refund against the same ₹1,000 expense before either commits, and asserts
+> exactly one of the two commits — dropping `FOR UPDATE` reddens it (`1 failed`,
+> verified by temporarily reverting the migration and restoring it). `uv run
+> pytest -q` → **390 passed** (was 389).
 
 ### What I checked
 

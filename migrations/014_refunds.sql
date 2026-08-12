@@ -47,8 +47,15 @@ DECLARE
     original_amount NUMERIC(12, 2);
     refunded_so_far NUMERIC(12, 2);
 BEGIN
+    -- FOR UPDATE locks the original row for the rest of this transaction, so a
+    -- second concurrent refund against the same original blocks here until the
+    -- first commits (or rolls back) rather than reading refunded_so_far before
+    -- it exists. Without this lock, READ COMMITTED lets two concurrent inserts
+    -- each read "0 refunded so far" and both pass — verified live in review of
+    -- 256ba0b: two ₹600 refunds against a ₹1,000 expense both committed.
     SELECT amount INTO original_amount
-        FROM transactions WHERE txn_id = NEW.refund_of_txn_id;
+        FROM transactions WHERE txn_id = NEW.refund_of_txn_id
+        FOR UPDATE;
     IF original_amount IS NULL THEN
         RAISE EXCEPTION 'refund_of_txn_id % does not exist', NEW.refund_of_txn_id;
     END IF;

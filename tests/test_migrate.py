@@ -7,6 +7,8 @@ against a virgin database, and `migrate()` commits, so a persistent DSN would
 pass once and then fail on every later run.
 """
 
+import threading
+import time
 from datetime import date
 from decimal import Decimal
 
@@ -699,6 +701,84 @@ def test_refund_sum_cannot_exceed_the_original(conn):
         with pytest.raises(psycopg.errors.RaiseException), conn.transaction():
             refund("0.01")
     conn.rollback()
+
+
+def test_concurrent_refunds_against_the_same_original_do_not_both_commit(conn):
+    """Two real connections racing the guard trigger — the regression from the
+    256ba0b review (§18).
+
+    `test_refund_sum_cannot_exceed_the_original` proves the trigger rejects an
+    over-limit refund on one connection; it cannot prove anything about two
+    connections racing it, because a single connection can't hold a row open
+    while another one reads it. Under READ COMMITTED, a plain `SELECT` inside
+    the trigger cannot see another transaction's uncommitted insert, so two
+    connections each inserting a ₹600 refund against the same ₹1,000 expense
+    can each read "₹0 refunded so far" and both pass — verified live during
+    review, before the trigger's `SELECT ... FOR UPDATE` locked the original
+    row. This test holds connection A's refund open past the point B attempts
+    its own, so B must either block on A's lock (the fix) or race past it (the
+    bug) — dropping `FOR UPDATE` from migration 014 reddens it.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9733) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        acc = default_account_of(conn, hh)
+        cur.execute(
+            "INSERT INTO transactions"
+            " (user_id, household_id, amount, type, category, occurred_on, account_id)"
+            " VALUES (%s, %s, %s, 'expense', %s, '2026-08-05', %s) RETURNING txn_id",
+            (uid, hh, parse_amount("1000.00"), EXPENSE_CATEGORIES[0], acc),
+        )
+        (original,) = cur.fetchone()
+    conn.commit()  # the two side connections below only see committed rows
+
+    dsn = conn.info.dsn
+    ready = threading.Barrier(2)
+    outcomes = {}
+
+    def refund_from_own_connection(name, hold_seconds):
+        with psycopg.connect(dsn) as side_conn, side_conn.transaction():
+            ready.wait()  # both connections start their INSERT at the same time
+            try:
+                with side_conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO transactions"
+                        " (user_id, household_id, amount, type, occurred_on, account_id,"
+                        "  refund_of_txn_id)"
+                        " VALUES (%s, %s, %s, 'refund', '2026-08-06', %s, %s)",
+                        (uid, hh, parse_amount("600.00"), acc, original),
+                    )
+                time.sleep(hold_seconds)  # hold the lock so the other connection must wait
+                outcomes[name] = "committed"
+            except psycopg.errors.RaiseException:
+                outcomes[name] = "rejected"
+
+    threads = [
+        threading.Thread(target=refund_from_own_connection, args=("a", 0.3)),
+        threading.Thread(target=refund_from_own_connection, args=("b", 0)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert sorted(outcomes.values()) == ["committed", "rejected"], (
+        f"exactly one of two concurrent ₹600 refunds against a ₹1,000 original may "
+        f"commit, got {outcomes}"
+    )
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM transactions WHERE txn_id = %s OR refund_of_txn_id = %s",
+            (original, original),
+        )
+        cur.execute("DELETE FROM household_members WHERE user_id = %s", (uid,))
+        cur.execute("DELETE FROM accounts WHERE household_id = %s", (hh,))
+        cur.execute("DELETE FROM households WHERE household_id = %s", (hh,))
+        cur.execute("DELETE FROM users WHERE user_id = %s", (uid,))
+    conn.commit()
 
 
 def test_refund_reduces_category_and_account_but_never_income(conn):

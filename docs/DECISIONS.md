@@ -708,6 +708,169 @@ project whose §7 and §8 are largely about what was left out.
 
 ---
 
+## 18. Accounts: money has a location
+
+Decided 2026-08-12, after working through how savings, credit cards and family
+money actually behave.
+
+**The problem.** A transaction has a type (`expense` | `income`) and no location.
+That is enough to answer "what did I spend last month" and nothing else. Three
+things break on it at once:
+
+- **Money that isn't spent.** An SIP debit, an FD, a chit instalment leaves the
+  bank without leaving your net worth. Logged as an expense it inflates spending
+  and hides savings; not logged at all, income minus expenses no longer explains
+  what is in the bank.
+- **Money that comes back.** FD maturity, a chit payout, redeeming a fund, a
+  friend repaying a loan. Logged as income, the month reads as a windfall and
+  every average is wrong. A chit payout is overwhelmingly *your own money
+  returning*; only the forgone discount was ever a cost.
+- **Credit cards.** A swipe is spending but no cash moves; paying the bill moves
+  cash but is not spending. With one undifferentiated pool, both count, and every
+  card user's spending is roughly doubled.
+
+**Decided: an account is a named pool of money with a kind and an opening
+balance.** Not double-entry — no debits, no credits, no chart of accounts. Four
+kinds cover everything above:
+
+| Kind | Examples | Balance behaviour |
+|---|---|---|
+| `spending` | Bank, Cash | Falls when you spend. **UPI is not a kind** — it is a rail that pulls from the bank |
+| `credit` | HDFC card | You *owe*. A swipe increases the debt; paying the bill is a transfer from a `spending` account |
+| `pot` | SIP, FD, Chit, RD, "Lent — cousin" | Money parked. Contributions in, maturity out. **Contributions only, never market value** |
+| `virtual` | Opening balance, Adjustment | The counterparty for money with no real origin (below) |
+
+**A `pot` never carries a market value.** It knows what you put in and what came
+back, both of which are facts. What an SIP is *worth today* needs NAV feeds, unit
+counts and cost bases — a different product, and one the user's broker already
+provides. Stating this limit is the decision, not an omission.
+
+**A fourth transaction type: `transfer`,** carrying `from_account` and
+`to_account`. It is **excluded from every spending and income total** — the rule
+every mature tracker converged on independently ([Monarch](https://help.monarch.com/hc/en-us/articles/360048393292-Transfers-and-Credit-Card-Payments):
+transfers are "excluded from your budget, cash flow, and spending totals because
+they aren't new spending"; [Copilot](https://help.copilot.money/en/articles/3971267-transaction-types):
+Internal Transfers are "excluded from your spending budgets";
+[Firefly III](https://docs.firefly-iii.org/references/firefly-iii/transaction-types/):
+a transfer structurally cannot carry a budget).
+
+One mechanism then answers six separate features, which is why it is worth the
+schema change:
+
+| The thing | Is just |
+|---|---|
+| SIP / FD / chit contribution | transfer, Bank → pot |
+| FD maturity, chit payout, loan repaid to you | transfer, pot → Bank |
+| ATM withdrawal | transfer, Bank → Cash |
+| Credit card bill payment | transfer, Bank → card |
+| Sending money to a family member | transfer between two accounts in the household |
+| Opening balance | transfer, `virtual` → the account |
+
+**The ATM case is the one that proves the rule.** Without transfers, people log
+the withdrawal *and* the cash spending, double-counting every rupee they take
+out.
+
+### Rules that fall out, and must not be re-litigated in code
+
+**Opening balance is not income.** It is a transfer from the `virtual` account.
+Income means money that arrived from outside; a starting figure is a position,
+not an event. Leaking it into income puts a fake windfall in month one.
+
+**For a `credit` account the opening balance is what you owe,** not what you
+have. Same column, different question at onboarding — a card asking "how much is
+in it?" is nonsense.
+
+**Every user gets a default account,** created at onboarding, and a transaction
+that names no account lands there. This is what keeps the daily path unchanged:
+"spent 500 on tea" must never gain a tap. Accounts become visible only when a
+second one exists.
+
+**Show the account, never ask for it.** The confirm card displays the account the
+parse chose, with one tap to change — the pattern §3 and §5 already use for
+category. "Swiped 2000 on dinner", "paid cash", "put 5000 in SIP" carry the
+answer; asking every time taxes the 80% case to serve the 20%.
+
+**The account enum in the parse schema is per-user, built per request.** This is
+a deliberate departure from §11, where the closed category set is declared once
+and derives everything. Accounts are the user's own nouns, so the schema handed
+to the model is assembled from *that household's* accounts at request time. §11's
+reasoning still holds for what it governs — the model must not invent an account
+any more than it may invent a category — but "defined once" becomes "derived once
+per request", and the general prohibition on a second source of truth is
+unchanged: the account list comes from the accounts table, never a literal.
+
+**Accounts belong to the household, and each names an owning member.** §16's
+shared ledger already means everyone sees everything, so this needs no new
+visibility rule. Member-to-member money is a transfer between two of the
+household's accounts — no separate feature, no separate concept.
+
+**Balance is derived, never stored:** `opening_balance + inflows − outflows`,
+computed from the ledger. A stored running total is a second source of truth that
+drifts silently, which is the one failure mode a money app cannot survive.
+
+### Refunds are negative spending, linked to what they refund
+
+A refund is not income. Returning a ₹2,000 shirt is ₹2,000 of `Shopping`
+un-spent, not ₹2,000 earned; booked as income it inflates both sides of the
+ledger and corrupts the savings rate.
+
+**A refund references the transaction it refunds and may be partial** — an amount
+up to, not necessarily equal to, the original. The constraint that makes it
+trustworthy: **the sum of refunds against a transaction can never exceed it.**
+That guard must be caused to fail before it is believed (CLAUDE.md).
+
+Linking is by choosing, not by parsing. `refund 500` lists recent candidates —
+amount-matched first — and one tap picks the row, reusing the chooser keyboard
+`/remove` already has. A Refund action on the dashboard row covers older entries.
+
+**`Refund` is removed from the income category list** (§11), where it currently
+sits and quietly inflates income.
+
+### Recurring debits ask, they do not fire silently
+
+A recurring rule (amount, category, account, day of month, active) is the answer
+to auto-debits, which are the worst case for a manual tracker: the money moves
+and *nothing prompts the user*, because they never saw it happen.
+
+**On the day, the cron sends the ordinary confirm card** — "SIP ₹5,000 today?"
+— with Confirm / Change amount / Skip. Not a silent insert. Three reasons: it
+reuses the entire §4 confirm machinery rather than building a second write path;
+**a chit instalment changes every month** as the dividend reduces it, so a fixed
+auto-entry is wrong nearly every time; and a silently wrong row is worse than a
+missing one, because nobody knows to look for it.
+
+### Reconciliation is a nudge and a visible adjustment
+
+Nothing is connected to a bank, so the ledger drifts, and a ledger you stop
+trusting is one you stop feeding. Weekly, per account: *"I think your Bank has
+₹42,300 — what does your bank say?"* A different figure writes an **adjustment**
+row against the `virtual` account.
+
+**The adjustment is a visible ledger row, never a silent correction.** A number
+quietly rewritten to match is how a ledger starts lying.
+
+**Rejected:**
+
+- *A third `type` (`saved`) instead of accounts.* It answers exactly one of the
+  three problems above. Credit cards, cash, per-account reconciliation, opening
+  balances and family transfers would each arrive as another flag, another
+  migration, another special case — accounts, built badly, one at a time.
+- *Double-entry.* Correct and far too much ceremony for a chat bot. A pool with
+  an opening balance gets every number this product shows.
+- *Portfolio value.* See `pot` above.
+- *Per-member privacy inside a household.* It makes every total ambiguous — "is
+  this everything, or everything I may see?" — for a case that already has an
+  escape hatch: `/invite_signup` gives anyone their own household.
+- *Statement upload, now.* Formats vary by bank with no standard and PDFs are
+  commonly password-protected, and matching parsed rows against logged ones is a
+  second problem on top of parsing. The reconcile nudge buys most of the same
+  trust for a fraction of the work; revisit only if drift persists after it
+  ships. **India's regulated account-aggregator framework may be the better route
+  than parsing files at all — UNVERIFIED, nobody has checked what it takes for an
+  individual developer to use it.**
+
+---
+
 ## Deliberately deferred
 
 Each gets a `ponytail:` comment in the code naming its ceiling and upgrade path.
@@ -718,6 +881,9 @@ Each gets a `ponytail:` comment in the code naming its ceiling and upgrade path.
 | Cheaper model | ~1,000 users (~₹25k/mo on Opus 5) | OpenRouter config change |
 | Telegram send throughput | ~50,000 users | Rate-limited send loop or paid broadcasts — **not** a task queue |
 | User-defined categories | Repeatedly forcing entries into `Other` | Category table per user |
+| Bank statement import | Drift persists *after* §18's reconcile nudge ships | CSV for the two or three banks testers actually use — not PDF, not "all banks". Check the account-aggregator route first |
+| Portfolio / market value | Never, by decision (§18) | The user's broker already does it |
+| Loan EMI principal/interest split | A user asks why their loan balance never moves | An amortisation schedule per loan; until then the whole EMI is an expense |
 | Alembic | Schema churns weekly | SQLAlchemy Core + Alembic |
 | Charting library | A view genuinely needs one | Decide then; CSS bars until |
 | APScheduler / queue | Sidecar cron proves awkward | In-process scheduler (mind the replica hazard) |

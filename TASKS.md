@@ -633,4 +633,141 @@ means transactions with no home. Each task leaves the tree green and deployable.
 
 ---
 
+## Phase 10 — Accounts, transfers, and the things that hang off them
+
+Implements [`docs/DECISIONS.md`](docs/DECISIONS.md) **§18**. Read it first — it
+settles every question this phase would otherwise re-argue, including the ones
+deliberately answered "no" (portfolio value, per-member privacy, statement
+upload).
+
+**Ordered so the model lands before everything that sits on it.** 10.1–10.4 are
+the account model; nothing after them makes sense without it, and retrofitting an
+account onto a ledger of untagged rows means guessing where each old row came
+from. Do not reorder.
+
+**Four things §18 assumes that the code does not currently provide.** Walked on
+2026-08-12 before any of this was written, listed once rather than rediscovered
+per task:
+
+1. **`transactions.type` is a two-value CHECK** (`expense` | `income`,
+   `migrations/001_init.sql:18`) and the amount is positive with direction in the
+   type. A transfer needs two account references and belongs to neither
+   direction, so this is a schema change, not a new enum value alone.
+2. **The parse schema's `category` enum is static** — `categories.schema_enum()`
+   feeds `build_request` once (§11). The account enum cannot be: it is per
+   household, so `build_request` must take the caller's accounts. This is the
+   §18 departure from §11 and the one place the two specs deliberately differ.
+3. **Every report filters `type = 'expense'`** (`db/reports.py:37,66,78`). Each
+   of those is a place a transfer would silently become spending, and a refund
+   would silently not reduce it.
+4. **The audit action CHECK is closed** — `confirm` | `undo` | `delete` |
+   `recategorise` (`migrations/003_transaction_events.sql`). Edit, refund,
+   transfer and adjustment each mutate money and each needs a value there, or
+   §17's trail has holes exactly where the new money paths are.
+
+### The account model — nothing else works until this is done
+
+- [ ] Add `migrations/009_accounts.sql`: `accounts` (household_id, owner
+      user_id, `kind` CHECK in `spending`/`credit`/`pot`/`virtual`, name,
+      `opening_balance NUMERIC(12,2)` — signed, since a `credit` account's is
+      what is owed — `is_default BOOLEAN`, created_at, deleted_at). One default
+      per household enforced by a partial UNIQUE index, not by application code.
+      Every household gets a `virtual` account at creation — §18 makes it the
+      counterparty for opening balances and adjustments, so it is structural, not
+      optional. No transaction changes yet; this task is the table and its
+      constraints, proven against a real server.
+- [ ] Add `account_id` to `transactions`, nullable, with the backfill: every
+      existing row belongs to its household's default account. Then `SET NOT
+      NULL` in the same idempotent style as 007/008 — a three-step migration
+      because the column cannot be NOT NULL before the backfill runs. `db/`
+      writes and reads keep working unchanged; this task must not alter a single
+      report number, and the check that proves it is a before/after comparison of
+      `month_summary` across the migration.
+- [ ] Add the `transfer` type: extend the `type` CHECK, add
+      `from_account_id`/`to_account_id` (both NULL except on transfers, and both
+      NOT NULL when the type *is* transfer — a CHECK, so the invariant is
+      structural). **Exclude transfers from every expense and income total**
+      (`db/reports.py:37,66,78`). The guard: a transfer of ₹5,000 between two of
+      a household's accounts must move neither the spend nor the income figure,
+      and it must fail if any one of those three filters is missed — assert the
+      totals, not the SQL text (CLAUDE.md).
+- [ ] Derive balances: `opening_balance + inflows − outflows` per account, as a
+      view or one query. **Never a stored running total** (§18) — a second source
+      of truth that drifts silently is the one failure a money app cannot
+      survive. `credit` accounts read as what is owed, so the sign convention is
+      part of this task and needs its own check, not a comment.
+
+### Onboarding, parsing, and the confirm card
+
+- [ ] Ask for accounts at onboarding: which kinds they have, and an opening
+      balance for each. **A `credit` account is asked "how much do you currently
+      owe", not "what is in it"** (§18) — same column, different question, and a
+      card asking the wrong one is nonsense on screen. Everyone gets a default
+      `spending` account whether or not they answer, so an abandoned onboarding
+      still leaves a working bot.
+- [ ] Make the parse schema's account enum per-request: `build_request` takes the
+      household's accounts and emits them as the `account` enum. §18 says this
+      departs from §11 deliberately — the list still comes from the accounts
+      table and never from a literal. A household with one account must produce
+      the same prompt cost and the same behaviour as today.
+- [ ] Show the account on the confirm card with one tap to change it — the §3/§5
+      pattern, never a question. **The daily path must not gain a tap:** "spent
+      500 on tea" with one account still confirms in one tap, and that is the
+      check. Reuse the category keyboard's shape rather than inventing a second
+      chooser.
+- [ ] Teach the parse prompt the account vocabulary: "swiped", "on card", "paid
+      cash", "UPI" (→ the bank account, **never its own account** — §18: UPI is a
+      rail, not a pool), "put 5000 in SIP", "FD 1 lakh", "paid chit". Wrong-pool
+      is a new error class, so the confirm card showing the account is what makes
+      it recoverable.
+
+### The things accounts make possible
+
+- [ ] Credit card semantics end to end: a swipe is an expense on the `credit`
+      account and increases what is owed; paying the bill is a transfer from a
+      `spending` account and **is not spending a second time**. The guard is the
+      double-count itself — swipe ₹2,000, pay the bill, and the month's spending
+      must read ₹2,000, not ₹4,000.
+- [ ] Investment pots: auto-create a `pot` on first mention ("put 5000 in SIP" →
+      "new pot 'SIP'?", one tap), contributions and maturities as transfers,
+      and a per-pot total of what went in and what came back. **No market value,
+      ever** (§18) — the pot reports contributions, which are facts.
+- [ ] Editing a row in the dashboard: amount, date, note, category, account.
+      §13 built the recent-transactions list for exactly this ("correcting older
+      entries") and §16 already scopes it — only the member who entered a row may
+      edit it. Add `edit` to the audit action CHECK with before/after (§17), or a
+      money-changing operation has no trail.
+- [ ] Refunds, linked and partial (§18): a refund references the transaction it
+      refunds, may be less than the original, and **the sum of refunds against a
+      transaction can never exceed it** — cause that overflow and watch the guard
+      go red before believing it. It reduces the original's category total, never
+      income. `refund 500` lists recent candidates, amount-matched first, and one
+      tap picks the row — reuse `/remove`'s chooser keyboard.
+- [ ] Remove `Refund` from `INCOME_CATEGORIES` (§11, §18) — it inflates income
+      and the previous task replaces it. Existing rows carrying it need a
+      decision recorded in the commit, not a silent rewrite.
+- [ ] Recurring rules for auto-debits: amount, category, account, day of month,
+      active. **On the day the cron sends the ordinary confirm card** — Confirm /
+      Change amount / Skip — never a silent insert (§18: a chit instalment
+      changes monthly, so a fixed auto-entry is wrong nearly every time). Reuse
+      the §4 confirm path rather than building a second write path. Pause and
+      delete live in the dashboard, consistent with the edit task above.
+- [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
+      ₹42,300 — what does your bank say?" A different figure writes a **visible
+      adjustment row** against the `virtual` account. The guard is that the
+      adjustment appears in the ledger and in the audit trail — a silent
+      correction is the failure mode, so a test that only checks the balance
+      afterwards would pass on the broken version.
+
+### After the code
+
+- [ ] Add a Phase 10 section to `docs/TESTING.md` — the double-count case (swipe
+      then pay the bill), an FD round trip, a partial refund and an attempt to
+      over-refund, the daily path still being one tap, and a reconcile that
+      leaves a visible row.
+- [ ] `[human]` Re-run the manual QA that Phase 10 touches, and set opening
+      balances on your own accounts before demoing.
+
+---
+
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

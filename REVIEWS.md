@@ -12,6 +12,66 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `bb51f4a` — gate the account enum on a real choice, not just non-empty
+
+**Status: ✅ DONE**
+
+Scope: `git show HEAD` — `kanakko/parse.py` (+11/−4), `tests/test_parse.py`
+(rewrites two tests, adds one), `REVIEWS.md` (resolution note). Fixes the
+⚠️ CHANGES REQUESTED I raised on `68e49cf`: the `account` enum was gated on
+`if accounts:`, so a one-account household — every onboarded user — got the
+extra property and required key, growing the daily-path prompt and violating the
+task's acceptance line.
+
+### What I checked (commands and results)
+
+- Read the whole diff and the full `kanakko/parse.py`. The gate is now
+  `if accounts and len(accounts) > 1:` (`kanakko/parse.py:99`). A one-account or
+  empty/omitted `accounts` returns the byte-for-byte pre-accounts schema.
+- **Spec fit:** `docs/DECISIONS.md:783-786` §18 — *"Every user gets a default
+  account … a transaction that names no account lands there. … Accounts become
+  visible only when a second one exists."* The gate on `len > 1` is exactly this
+  rule; the prior truthy gate contradicted it. Task acceptance line
+  (`TASKS.md:820`) — *"A household with one account must produce the same prompt
+  cost and the same behaviour as today"* — is now met.
+- `uv run pytest -q` → **335 passed** (matches the commit message).
+- **Verified the guard fails for the reason it exists.** Reverted the gate to
+  `if accounts:` and ran `uv run pytest tests/test_parse.py -q`:
+  `test_account_enum_is_absent_without_a_real_choice` and
+  `test_a_household_with_one_account_behaves_like_no_accounts_at_all` both went
+  **red** (2 failed, 22 passed). Restored → 24 passed. The old test asserted the
+  inverted claim (`one - bare == {"account"}`), which is why the regression
+  shipped green; the flip to `parse_schema(accounts=["Bank"]) == parse_schema()`
+  is a real equality check that a one-account schema must satisfy.
+- The new `test_account_enum_appears_only_once_a_second_account_exists`
+  (`tests/test_parse.py:114`) covers the two-account case the old test's *name*
+  promised but never isolated — asserts the `anyOf` enum, the null branch, and
+  `account` in `required`.
+- **Blast radius:** grepped every `parse_schema` caller — only `build_request`
+  (`kanakko/parse.py:159`), which threads `accounts` from
+  `handlers.handle_text:318`. Nothing relies on a one-account enum. The Pydantic
+  `_account_is_known` validator still receives `context={"accounts": [...]}` for
+  a one-account household, but the schema now omits `account` +
+  `additionalProperties: false`, so the model can't return one; `account` stays
+  `None` → the default account. Consistent, no dead path.
+
+Money paths, timezone bucketing, and `active_transactions` are untouched by this
+commit; nothing to check there.
+
+### Findings
+
+None blocking. One minor, non-blocking note:
+
+- **Stale prose (not code):** `TASKS.md:826-831` still describes the enum
+  appearing "only when `accounts` is truthy" and cites the old test name
+  `test_account_enum_is_absent_without_accounts` (renamed to
+  `…_without_a_real_choice`). The behaviour and tests it documents are now the
+  superseded ones. Not a correctness issue — the box is correctly ticked and the
+  work is done — but the Done: annotation now misdescribes the shipped gate.
+  Worth a one-line fix next time this file is touched.
+
+---
+
 ## 2026-08-12 — `68e49cf` — per-request account enum in the parse schema
 
 **Scope:** `parse_schema` / `build_request` / `call` / `parse_message` gain an

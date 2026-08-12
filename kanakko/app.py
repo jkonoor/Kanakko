@@ -35,6 +35,7 @@ from kanakko.handlers import (
     _is_household,
     _is_invite,
     _is_invite_signup,
+    _is_recurring,
     _is_refund,
     _is_remove,
     _is_start,
@@ -52,6 +53,7 @@ from kanakko.handlers import (
     handle_household,
     handle_invite,
     handle_invite_signup,
+    handle_recurring,
     handle_refund,
     handle_refund_choice,
     handle_remove,
@@ -193,6 +195,7 @@ async def webhook(request: Request) -> dict[str, bool]:
             or _is_remove(action.text)
             or _is_transfer(action.text)
             or _is_account(action.text)
+            or _is_recurring(action.text)
             or _is_refund(action.text)
         )
         if is_parse and not within_daily_cap(conn, user_id):
@@ -225,6 +228,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_transfer(conn, action)
                 elif _is_account(action.text):
                     handle_account(conn, action)
+                elif _is_recurring(action.text):
+                    handle_recurring(conn, action)
                 elif _is_refund(action.text):
                     handle_refund(conn, action)
                 else:

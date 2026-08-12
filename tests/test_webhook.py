@@ -1058,6 +1058,37 @@ def test_webhook_routes_account_to_handle_account_and_never_meters_it(monkeypatc
     assert claims == [None]  # unmetered — never counts against the daily cap
 
 
+def test_webhook_routes_recurring_to_handle_recurring_and_never_meters_it(monkeypatch):
+    """`/recurring` sets up an auto-debit rule, not a transaction, so it must
+    never be metered.
+
+    Same two silent failures as `/account` above: a routing miss would feed
+    "/recurring 5000 5 Food Bank" to `handle_text` (an LLM call and a junk
+    pending card), and a metering miss would burn a daily-cap unit per rule
+    set up. Asserts it routes to `handle_recurring` and the claim is unmetered
+    (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
+    recurred, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_recurring", lambda conn, msg: recurred.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 300, "message": {"message_id": 1, "chat": {"id": 42},
+                                          "text": "/recurring 5000 5 Food Bank"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(recurred) == 1 and texted == []  # routed to recurring setup, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
 def test_webhook_routes_refund_to_handle_refund_and_never_meters_it(monkeypatch):
     """`refund 500` lists candidates, not a transaction, so it must never be metered.
 

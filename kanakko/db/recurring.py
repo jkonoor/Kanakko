@@ -7,9 +7,10 @@ card... not a silent insert." `create_recurring_rule`/`list_recurring_rules`/
 household-scoped like `accounts.py` and `refunds.py` (§16's shared ledger means
 any member may manage a rule, not just the one who made it). `due_rules_today`
 is the cron's read: `kanakko.jobs.recurring` calls it, builds a confirm card
-per row, and threads the rule id through `db.pending.save_pending` (§18) —
-the actual creation surface for a rule (a bot command or a dashboard form) is
-still undecided and is a separate task.
+per row, and threads the rule id through `db.pending.save_pending` (§18).
+`create_recurring_rule`'s caller is `handlers.handle_recurring` — the
+`/recurring <amount> <day> <category> <account>` command, the creation
+surface this module's CRUD was originally built ahead of.
 """
 
 from decimal import Decimal

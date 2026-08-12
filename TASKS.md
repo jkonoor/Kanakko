@@ -1248,9 +1248,49 @@ per task:
       awaiting (temporarily dropped the `AND awaiting_amount` clause, watched
       `test_set_pending_amount_refuses_a_row_that_is_not_awaiting_one` fail).
       `uv run pytest` → 446 passed (17 new).
-- [ ] Recurring rules for auto-debits — the creation surface (a bot command in
+- [x] Recurring rules for auto-debits — the creation surface (a bot command in
       the `/account`/`/invite` shape, or a dashboard form). Undecided; belongs
       to its own task, not the schema, dashboard, or cron-send splits above.
+      Done: a bot command, the `/account` shape — `/recurring <amount> <day>
+      <category> <account>`, e.g. `/recurring 5000 5 Bills & Utilities Bank`.
+      `amount` and `day` anchor the front of the command since both are
+      unambiguous (a number, then 1-31); `category`+`account` share the rest of
+      the text with no delimiter between them, since either is a closed set
+      that can be more than one word ("Bills & Utilities", "Kids Fund") — a
+      positional split would misparse the moment both sides aren't exactly one
+      word. `_match_category_and_account` resolves this by brute force: try
+      every `EXPENSE_CATEGORIES` entry (recurring rules are always an expense —
+      `jobs.recurring` hardcodes `type="expense"`) as a candidate prefix of the
+      trailing text, and check what's left against the caller's own
+      `household_accounts` (never a literal, same rule §18 already applies to
+      the parse-schema account enum). `handle_recurring` calls
+      `db.recurring.create_recurring_rule` (task 1125's CRUD, previously
+      uncalled outside its own tests) and always creates the rule active — the
+      dashboard's pause/delete (task 1161 split 2/3) is where that changes
+      after creation. Two guards verified red-without-fix, green-with-fix: the
+      brute-force category/account split (temporarily replaced it with a
+      naive first-word-is-category positional split, watched the multi-word
+      category test fail with `TypeError: 'NoneType' object is not
+      subscriptable`) and the webhook wiring (temporarily dropped the
+      `_is_recurring` routing branch in `app.py`, watched the routing/metering
+      test fail). `/recurring` also joins the `is_parse` exclusion list (never
+      an LLM call, never metered, same as `/account`) and `HELP_TEXT`/
+      `test_help.py`'s undiscoverable-command guard. `uv run pytest` → 457
+      passed (11 new).
+- [ ] `handlers.py` is 1541 lines, already 1409 before this task and far past
+      CLAUDE.md's 300-line guideline — the guideline's one deliberately-left
+      exception is `db.py` (426 lines, "17 small functions doing one job"),
+      and this file is neither that shape nor that size. `app.py`/`routes.py`
+      each got their own split task the moment they crossed the line (tasks
+      1000, 1082, 1161); this file crossed it long ago and has no task. Likely
+      the same seam `app.py` used — seven or so command handlers
+      (`handle_account`, `handle_transfer`, `handle_remove`, `handle_invite*`,
+      `handle_recurring`, `handle_refund`) each carry their own constants and
+      predicate, and could each move to their own module the way
+      `webapp/refund.py` and `webapp/recurring.py` split off `webapp/routes.py`
+      — but `dispatch`/`TextMessage`/`ButtonPress` and the confirm/cancel core
+      are the shared spine every module would need, so the split needs its own
+      design pass, not a guess made in passing here.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

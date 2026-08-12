@@ -12,6 +12,98 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `2fd6537` reconciliation adjustments: the write path (Phase 10, split 1/2)
+
+**Status: ✅ DONE**
+
+Lands `kanakko/db/reconcile.py::create_adjustment` — the money-correctness core
+of the §18 reconcile nudge. Compares a reported balance against the account's
+derived figure and, on a mismatch, writes an ordinary `transfer` against the
+household's `external` account plus an `action="adjustment"` audit row (never a
+silent balance rewrite). Migration `018` only widens
+`transaction_events.action` to admit `'adjustment'`. No caller yet, by design —
+the weekly cron send and the free-text reply are the still-unticked split 2/2.
+The math, the sign convention, the household scoping, and the named guard all
+hold. One non-blocking maintainability finding (formula duplication) below.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` / `--stat` — scope is exactly the four files claimed plus the
+  `TASKS.md` tick: new `reconcile.py`, migration `018`, `test_reconcile.py`, one
+  export line in `db/__init__.py`. No money-path code elsewhere is touched.
+- `uv run pytest -q` → **463 passed, 1 warning** (the pre-existing Starlette
+  deprecation). Matches the commit's claimed count; `test_reconcile.py -q` → **6
+  passed** on its own.
+- **The named guard is real, verified independently.** Blanked migration `018`
+  (`printf '-- reverted' > 018_…sql`), reran `test_reconcile.py` →
+  **3 failed, 3 passed**, all three failures a `CheckViolation` on
+  `transaction_events_action_check` at the `_record_event` INSERT — i.e. the
+  three write-path tests can only pass if the audit row is actually written, not
+  if only the balance moved. Restored the file; suite green again. The three
+  no-write tests (matching report, foreign account, external account) stay green
+  because they assert `None` + unchanged row counts, which is correct.
+- **Sign convention traced by hand and confirmed against the tests.** Credit
+  card, opening `-500` (owes ₹500 presented), reports owing ₹700: `drift =
+  700 − 500 = 200`, `sign = −1`, `delta_raw = −200` → transfer *card → external*
+  ₹200, deepening the debt the same direction a swipe would. Recomputed
+  presented balance after: `−1·(−500 − 200) = 700` = reported. Spending account
+  ₹1000 → reports ₹1200: `delta_raw = +200` → *external → Bank* ₹200,
+  recomputes to ₹1200. Both directions match `account_balances`, and the tests
+  assert the post-write balance equals the reported figure via
+  `account_balances` — so a wrong-signed transfer would fail loudly.
+- **Money stays `Decimal`.** `drift = reported_balance − presented_balance`
+  (both `Decimal`, `presented_balance` from `NUMERIC(12,2)`), `sign` is a Python
+  `int`, `int · Decimal → Decimal`, `abs(Decimal) → Decimal`. No float anywhere
+  on the amount path. `drift == 0` short-circuits to `None` (no zero-value row).
+- **Schema/CHECK preserved.** `018` drops+re-adds
+  `transaction_events_action_check` as `('confirm','undo','delete',
+  'recategorise','edit','refund','adjustment')` — a superset of the post-014
+  set (`…,'refund'`), so no previously-valid action is dropped. `migrate.py`
+  discovers it by `sorted(glob('*.sql'))`, so it applies with no runner change
+  (confirmed by the full suite passing with the new action in use).
+- **Transfer INSERT column shape matches the existing write path.** Sets
+  `from_account_id`/`to_account_id`, leaves `account_id` NULL — exactly what
+  `011`'s `transactions_transfer_accounts_check` and `012`'s
+  `account_id IS NOT NULL OR type = 'transfer'` require, and what
+  `pending.confirm_pending` does for a transfer. `category` defaults NULL
+  (correct — transfers carry none and are excluded from every total).
+- **Reads go through `active_transactions`** in the balance recompute (§6); the
+  write targets base `transactions` (correct). Household scoping is the same
+  `household_id = (SELECT … FROM household_members WHERE user_id = %s)` predicate
+  `account_balances` uses, and the account lookup additionally requires
+  `kind <> 'external' AND deleted_at IS NULL` — the two `None`-return tests
+  (foreign account, `external` itself) confirm both refusals with unchanged row
+  counts.
+
+**Findings**
+
+1. **Non-blocking (maintainability / future silent-drift risk) —
+   `kanakko/db/reconcile.py:44-58` duplicates the entire balance formula from
+   `kanakko/db/accounts.py:153-165`, credit-sign `CASE` and all.** This is the
+   "second copy is a warning" case CLAUDE.md names ("One definition per thing…
+   two places that must agree will eventually disagree"). It is **correct
+   today** — I diffed the two blocks and they are byte-for-byte the same
+   arithmetic. The risk is prospective: if `account_balances` ever gains a new
+   balance-affecting term (a new transaction type, a rule change), `reconcile`'s
+   recompute silently diverges and `create_adjustment` writes a *wrong-sized*
+   transfer — a silent money error, not a crash. The tests guard the tested
+   scenarios (they assert the post-write balance via `account_balances`) but
+   not a newly-added term. Suggested fix when split 2/2 or any balance change
+   lands: have `create_adjustment` reuse `account_balances(conn, user_id)` (pick
+   the row for `account_id`, read its `balance`/`kind`) plus a one-line lookup
+   for `external_account_id`, so the formula lives in exactly one place — or
+   promote the formula to a real SQL `VIEW` both query. Not blocking because the
+   code is correct and covered as shipped; flagging so the third copy never
+   arrives.
+
+**Verdict:** the write path does what §18 and the task asked — a visible ledger
+row plus a distinguishable audit row, correct sign convention, household-scoped,
+zero-drift no-op, `external` refused. The tick is honest (a complete, tested
+function, no stub), and the split boundary matches how 014/015 shipped
+refunds/recurring. ✅ DONE.
+
+---
+
 ## 2026-08-13 — `734faf5` split handlers.py: confirm-card core → `kanakko/confirm_flow.py` (Phase 10 follow-up)
 
 **Status: ✅ DONE**

@@ -11,6 +11,8 @@ corrects the same account rather than minting a second one.
 
 from decimal import Decimal
 
+from conftest import household_of
+
 from kanakko import handlers
 from kanakko.db import account_balances, create_household_of_one, get_or_create_user
 from kanakko.handlers import TextMessage, handle_account
@@ -127,7 +129,9 @@ def test_repeat_call_updates_the_same_account_not_a_duplicate(conn, monkeypatch)
 
 def test_bare_name_reports_a_locked_accounts_contributions_and_payouts(conn, monkeypatch):
     """`/account <name>` — one bare word — is the read side (§18): gross in/out,
-    matched case-insensitively against a `locked` account's name.
+    matched case-insensitively against a `locked` account's name, plus the
+    opening balance it was onboarded with, so "put in ₹0.00" doesn't read as
+    the starting ₹1,000 having vanished.
     """
     migrate(conn)
     _seed(conn)
@@ -137,6 +141,27 @@ def test_bare_name_reports_a_locked_accounts_contributions_and_payouts(conn, mon
 
     result = handle_account(conn, _account("/account savings"))  # lowercase, matches "Savings"
     assert result["name"] == "Savings"
+    assert sent == [(USER_TG,
+                     "Savings — put in ₹0.00, got back ₹0.00, started with ₹1,000.00.")]
+    conn.rollback()
+
+
+def test_bare_name_with_no_opening_balance_omits_the_started_with_clause(conn, monkeypatch):
+    migrate(conn)
+    user_id = _seed(conn)
+    hh = household_of(conn, user_id)
+    with conn.cursor() as cur:
+        # Standing in for an auto-created pool (`new_locked_account`), which is
+        # minted with no opening balance — only `/account locked <amount>`
+        # onboarding ever sets one.
+        cur.execute(
+            "INSERT INTO accounts (household_id, owner, kind, name)"
+            " VALUES (%s, %s, 'locked', 'Savings')",
+            (hh, user_id),
+        )
+    sent = _stub_send(monkeypatch)
+
+    handle_account(conn, _account("/account savings"))
     assert sent == [(USER_TG, "Savings — put in ₹0.00, got back ₹0.00.")]
     conn.rollback()
 
@@ -150,4 +175,63 @@ def test_bare_name_with_no_matching_locked_account_is_refused(conn, monkeypatch)
 
     assert result is None
     assert sent == [(USER_TG, handlers.ACCOUNT_NOT_LOCKED.format(name="SIP"))]
+    conn.rollback()
+
+
+def test_multi_word_locked_account_name_is_reachable_as_a_query(conn, monkeypatch):
+    """F1: a `locked` account auto-created with a multi-word name (an escape
+    valve `new_locked_account` offers, e.g. "Kids Fund") must still be
+    queryable — the first word alone ("Kids") isn't `credit`/`locked`, so the
+    whole argument, not just the first word, is read as the account name.
+    """
+    migrate(conn)
+    _seed(conn)
+    sent = _stub_send(monkeypatch)
+    handle_account(conn, _account("/account locked 500"))
+    # Rename the minted account to a multi-word name, standing in for one
+    # `confirm_pending`'s get-or-create would mint from natural language.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE accounts SET name = 'Kids Fund' WHERE name = 'Savings'")
+    sent.clear()
+
+    result = handle_account(conn, _account("/account Kids Fund"))
+
+    assert result is not None and result["name"] == "Kids Fund"
+    assert sent == [(USER_TG,
+                     "Kids Fund — put in ₹0.00, got back ₹0.00, started with ₹500.00.")]
+    conn.rollback()
+
+
+def test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind(conn, monkeypatch):
+    """F1's fix must not swallow the existing "unknown kind" refusal: a
+    two-word attempt whose second word looks like an amount ("cash 500") is a
+    botched onboarding call, not a query for an account literally named
+    "cash 500".
+    """
+    migrate(conn)
+    user_id = _seed(conn)
+    sent = _stub_send(monkeypatch)
+
+    result = handle_account(conn, _account("/account cash 500"))
+
+    assert result is None
+    assert sent == [(USER_TG, handlers.ACCOUNT_BAD_KIND)]
+    assert {a["kind"] for a in account_balances(conn, user_id)} == {"spending", "external"}
+    conn.rollback()
+
+
+def test_credit_or_locked_with_no_amount_is_a_usage_hint_not_a_query(conn, monkeypatch):
+    """F3: `/account credit` (amount forgotten) must fall through to the usage
+    hint, not be read as a query for a `locked` account literally named
+    "credit" — the pre-F1 behaviour this regressed when the query path first
+    landed.
+    """
+    migrate(conn)
+    _seed(conn)
+    sent = _stub_send(monkeypatch)
+
+    result = handle_account(conn, _account("/account credit"))
+
+    assert result is None
+    assert sent == [(USER_TG, handlers.ACCOUNT_USAGE)]
     conn.rollback()

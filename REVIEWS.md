@@ -14,6 +14,14 @@ returned, not what they were assumed to return.
 
 ## 2026-08-12 — `285b835` — per-account contribution/payout totals for locked accounts (Phase 10)
 
+**Resolved 2026-08-12:** F1 and F2 fixed, F3 fixed as a side effect of F1's own
+fix (see below); the optional F3 wording was going to change regardless once
+F1 stopped treating every single-word arg as a query. F2 was resolved by
+adding the "surface the opening position as a third line" option the review
+itself offered, rather than folding it into `contributed` — `contributed`/
+`paid_out` keep meaning exactly what they meant before. Details in the
+implementer commit that follows this entry.
+
 **Scope:** `db.locked_account_totals` (gross transfer-in / transfer-out per
 `locked` account) and the read side of `/account <name>` in `handlers.py`,
 delegated to a new `_handle_account_query`.

@@ -899,18 +899,33 @@ def _is_account(text: str) -> bool:
     return bool(words) and words[0].split("@", 1)[0].lower() == ACCOUNT_COMMAND
 
 
+def _looks_like_amount(text: str) -> bool:
+    """True when `text` parses as a ₹ amount — used to tell a botched onboarding
+    kind ("cash 500") apart from a genuine multi-word `locked` account name
+    ("Kids Fund") in `handle_account`."""
+    try:
+        parse_amount(text)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _handle_account_query(
     conn: psycopg.Connection, msg: TextMessage, user_id: int, name: str, start: float
 ) -> dict | None:
     """`/account <name>` — the gross in/out a `locked` account has seen (§18).
 
-    Split off from the two-argument onboarding form: one bare word after
-    `/account` that isn't `credit`/`locked`-plus-amount is read as a query for
-    that account's name, case-insensitively — the parse layer's account names
+    Split off from the two-argument onboarding form: text after `/account` that
+    doesn't open with `credit`/`locked` is read as a query for that account's
+    name (possibly several words — an auto-created pool's name is free text, see
+    `new_locked_account`), case-insensitively — the parse layer's account names
     are the user's own nouns, so matching should not demand exact case. Reports
     `locked_account_totals`' two ledger sums, never a balance (§18: "never
-    carries a market value"). A name that doesn't match a live `locked` account
-    — wrong spelling, or a `spending`/`credit` account, which have no
+    carries a market value"), plus the opening balance the account was onboarded
+    with when it is nonzero — otherwise a pool set up with `/account locked
+    20000` and never touched since reports "put in ₹0.00", which reads as if
+    the starting balance were lost. A name that doesn't match a live `locked`
+    account — wrong spelling, or a `spending`/`credit` account, which have no
     contribution/maturity story — is refused the same way.
     """
     match = next(
@@ -922,10 +937,14 @@ def _handle_account_query(
         log_event("account.query", status="noop", update_id=msg.update_id,
                   source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
+    started = (
+        f", started with {format_amount(match['opening_balance'])}"
+        if match["opening_balance"] else ""
+    )
     send_message(
         msg.chat_id,
         f"{match['name']} — put in {format_amount(match['contributed'])}, "
-        f"got back {format_amount(match['paid_out'])}.",
+        f"got back {format_amount(match['paid_out'])}{started}.",
     )
     log_event("account.query", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id, duration_ms=ms_since(start),
@@ -946,10 +965,17 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     (`create_household_of_one`), so this command is only for the other two kinds,
     and an abandoned onboarding still leaves a working bot. Running it twice
     corrects a typo rather than minting a duplicate account. `/account <name>` —
-    one bare word — is the read side, delegated to `_handle_account_query`. Does
-    not commit — the caller owns the transaction. Returns the account row on
-    success, or `None` on a usage/validation/query refusal — including a sender
-    with no household yet (open signup mode, before their first `/start`).
+    everything else, one word or several — is the read side, delegated to
+    `_handle_account_query`; only text that *opens* with `credit`/`locked`
+    enters onboarding, so a multi-word `locked` account name (an auto-created
+    pool, see `new_locked_account`) is still reachable as a query. A two-word
+    onboarding attempt with an unrecognised kind ("cash 500") is refused with
+    `ACCOUNT_BAD_KIND` rather than read as a query for the account literally
+    named "cash 500" — the second word parsing as an amount is what tells the
+    two apart from a genuine multi-word name. Does not commit — the caller owns
+    the transaction. Returns the account row on success, or `None` on a
+    usage/validation/query refusal — including a sender with no household yet
+    (open signup mode, before their first `/start`).
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.from_id)
@@ -961,15 +987,23 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
         log_event("account.set_up", status="noop", update_id=msg.update_id,
                   source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
-    if len(parts) == 1:
-        return _handle_account_query(conn, msg, user_id, parts[0], start)
 
-    kind, amount_text = parts[0].lower(), parts[1]
+    kind = parts[0].lower()
     if kind not in {"credit", "locked"}:
-        send_message(msg.chat_id, ACCOUNT_BAD_KIND)
+        if len(parts) == 2 and _looks_like_amount(parts[1]):
+            send_message(msg.chat_id, ACCOUNT_BAD_KIND)
+            log_event("account.set_up", status="noop", update_id=msg.update_id,
+                      source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+            return None
+        return _handle_account_query(conn, msg, user_id, arg, start)
+
+    if len(parts) == 1:
+        send_message(msg.chat_id, ACCOUNT_USAGE)
         log_event("account.set_up", status="noop", update_id=msg.update_id,
                   source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
+
+    amount_text = parts[1]
     try:
         amount = parse_amount(amount_text)
     except (TypeError, ValueError):

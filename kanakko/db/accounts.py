@@ -174,17 +174,20 @@ def locked_account_totals(conn: psycopg.Connection, user_id: int) -> list[dict]:
     Split off from `account_balances`: a `locked` account "never carries a market
     value... it knows what you put in and what came back, both of which are
     facts" — two sums from the ledger, not a balance and not `opening_balance`
-    (a starting position, not a contribution event). Contributions are `transfer`
-    rows landing on the account (`to_account_id`); maturities/payouts are
-    `transfer` rows leaving it (`from_account_id`) — the same two subqueries
-    `account_balances` already sums, just not netted against each other or the
-    opening balance. Reads `active_transactions` (§6) and is household-scoped via
-    `household_members` (§16), same as `account_balances`. Amounts are `NUMERIC`
-    → `Decimal` (§9).
+    (a starting position, not a contribution event, so it is never folded into
+    `contributed`). Contributions are `transfer` rows landing on the account
+    (`to_account_id`); maturities/payouts are `transfer` rows leaving it
+    (`from_account_id`) — the same two subqueries `account_balances` already
+    sums, just not netted against each other or the opening balance. `opening_balance`
+    is still returned alongside the two sums — a caller reporting "put in ₹0.00" for
+    a pool onboarded with a starting balance would otherwise mislead — but kept as
+    its own field rather than merged into either sum. Reads `active_transactions`
+    (§6) and is household-scoped via `household_members` (§16), same as
+    `account_balances`. Amounts are `NUMERIC` → `Decimal` (§9).
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT a.account_id, a.name,"
+            "SELECT a.account_id, a.name, a.opening_balance,"
             "  coalesce((SELECT sum(amount) FROM active_transactions"
             "            WHERE type = 'transfer' AND to_account_id = a.account_id), 0),"
             "  coalesce((SELECT sum(amount) FROM active_transactions"
@@ -196,6 +199,12 @@ def locked_account_totals(conn: psycopg.Connection, user_id: int) -> list[dict]:
             (user_id,),
         )
         return [
-            {"account_id": account_id, "name": name, "contributed": contributed, "paid_out": paid_out}
-            for account_id, name, contributed, paid_out in cur.fetchall()
+            {
+                "account_id": account_id,
+                "name": name,
+                "opening_balance": opening_balance,
+                "contributed": contributed,
+                "paid_out": paid_out,
+            }
+            for account_id, name, opening_balance, contributed, paid_out in cur.fetchall()
         ]

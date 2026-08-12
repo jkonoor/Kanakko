@@ -12,6 +12,62 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `734faf5` split handlers.py: confirm-card core → `kanakko/confirm_flow.py` (Phase 10 follow-up)
+
+**Status: ✅ DONE**
+
+Pure refactor, the follow-up split after the six command slices. Moves the six
+confirm-card handlers (`handle_confirm`/`handle_cancel`/`handle_category`/
+`handle_account_choice`/`handle_change_amount_request`/`handle_amount_reply`)
+plus the two `CHANGE_AMOUNT*` prompt constants out of `handlers.py` into a new
+sibling module `kanakko/confirm_flow.py`. `app.py` imports them from
+`confirm_flow` now; `handlers.py` drops the imports only those handlers needed
+(`cancel_pending`/`confirm_pending`/`set_pending_*`/`request_amount_change`,
+`answer_callback_query`/`delete_message`/`edit_message_text`,
+`ALL_CATEGORIES`/`CATEGORY_PREFIX`/`ACCOUNT_PREFIX`/`SKIP_LABEL`/`settled_card`,
+`Transaction`/`parse_amount`). Three docstring/comment cross-references
+(`confirm.py`, `db/pending.py`, `commands/__init__.py`) retargeted from
+`handlers.` to `confirm_flow.`. No behaviour change: no money math, no
+timezone/boundary logic, no SQL, no auth surface is touched — only where code
+lives.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — the diff is a move plus import/reference bookkeeping,
+  nothing else.
+- **Verbatim move proven**, not assumed: extracted the six functions from
+  `HEAD~1:handlers.py` (from `def handle_confirm`, line 514 to EOF) and from
+  `confirm_flow.py` (line 49 to EOF) and `diff`'d them → **exit 0, identical**.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!** (this is the real
+  guard here — it would flag any dropped import still referenced by the code
+  that stayed, or any unused import left behind; both would be silent otherwise).
+- `uv run pytest -q` → **457 passed**, same count as the pre-split baseline
+  recorded in `TASKS.md`.
+- **Red-without-fix verified independently.** The moved handlers call
+  `answer_callback_query`/`edit_message_text`/`delete_message`/`send_message`,
+  which the tests monkeypatch. If a patch stayed on `handlers` it would be a
+  silent no-op *only if the symbol still existed there* — so I confirmed those
+  symbols are **gone** from `handlers.py` (`grep` → no matches), then reverted
+  one retarget (`confirm_flow` → `handlers`) in
+  `test_handle_confirm_writes_the_ledger_row_and_acknowledges` and reran:
+  `AttributeError: <module 'kanakko.handlers'> has no attribute
+  'answer_callback_query'` at `test_webhook.py:687`. Restored via
+  `git checkout`; tree clean. So the retarget is load-bearing, not cosmetic —
+  a stale patch fails loudly rather than passing while the real network call
+  fired.
+- No import cycle: `confirm_flow` imports `ButtonPress`/`TextMessage` from
+  `handlers`, and `handlers` does not import `confirm_flow`; `app.py` imports
+  both. Confirmed the module graph loads (the whole suite imports `app`).
+- `handlers.py` 728 → 491 lines; `confirm_flow.py` 263. Still over the 300-line
+  guideline for the spine, which the commit message and `TASKS.md` both state
+  openly rather than claim done — not a finding.
+
+**Findings:** none. `TASKS.md` ticks the follow-up-split box, which now matches
+reality: the confirm core lives in its own module, the tests exercise it there,
+and the box's own note keeps the "spine still > 300 lines" caveat visible.
+
+---
+
 ## 2026-08-13 — `b9675c8` split handlers.py: `/refund` → `kanakko/commands/refund.py` (Phase 10, slice 6/6)
 
 **Status: ✅ DONE**

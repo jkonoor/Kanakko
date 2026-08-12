@@ -1277,20 +1277,61 @@ per task:
       an LLM call, never metered, same as `/account`) and `HELP_TEXT`/
       `test_help.py`'s undiscoverable-command guard. `uv run pytest` → 457
       passed (11 new).
-- [ ] `handlers.py` is 1541 lines, already 1409 before this task and far past
-      CLAUDE.md's 300-line guideline — the guideline's one deliberately-left
-      exception is `db.py` (426 lines, "17 small functions doing one job"),
-      and this file is neither that shape nor that size. `app.py`/`routes.py`
-      each got their own split task the moment they crossed the line (tasks
-      1000, 1082, 1161); this file crossed it long ago and has no task. Likely
-      the same seam `app.py` used — seven or so command handlers
-      (`handle_account`, `handle_transfer`, `handle_remove`, `handle_invite*`,
-      `handle_recurring`, `handle_refund`) each carry their own constants and
-      predicate, and could each move to their own module the way
-      `webapp/refund.py` and `webapp/recurring.py` split off `webapp/routes.py`
-      — but `dispatch`/`TextMessage`/`ButtonPress` and the confirm/cancel core
-      are the shared spine every module would need, so the split needs its own
-      design pass, not a guess made in passing here.
+- [x] `handlers.py` split, design pass + slice 1/6 (`/transfer`). Design: the
+      shared spine every command module needs — `dispatch`, `TextMessage`/
+      `ButtonPress`, `_command_arg`, `handle_start`/`handle_text`/`handle_undo`/
+      `handle_help`/`handle_household`, and the confirm-card core
+      (`handle_confirm`/`handle_cancel`/`handle_category`/`handle_account_choice`/
+      `handle_change_amount_request`/`handle_amount_reply`) — stays in
+      `handlers.py`. The six standalone commands (`handle_transfer`,
+      `handle_account`, `handle_remove`(+choice), `handle_invite`+
+      `handle_invite_signup`, `handle_recurring`, `handle_refund`(+choice)) each
+      move to their own module under a new `kanakko/commands/` package, one per
+      iteration — mirroring `webapp/refund.py`/`webapp/recurring.py`'s split off
+      `webapp/routes.py`, and matching this file's own count: still seven-ish
+      pieces, just one file each instead of one 1541-line file. `app.py`'s
+      import block and `is_parse` exclusion list move with each handler.
+      This slice: `kanakko/commands/transfer.py` (94 lines) — the smallest and
+      only one with no `test_webhook.py` dependents, so it proved the pattern at
+      the lowest risk. **The gotcha every remaining slice must repeat**: a test
+      that `monkeypatch.setattr(handlers, "send_message", ...)` for a handler
+      that has moved silently stops applying — the patch binds the unqualified
+      name where the call executes, not where the test imports it from (same
+      class of bug task 1000's `connect`/`app_module` note already recorded).
+      Verified red-without-fix: left `tests/test_transfer.py` patching
+      `handlers.send_message` after moving `handle_transfer`, reran, 4 failed
+      and 1 errored on a real `InFailedSqlTransaction` (the stub never
+      intercepted the send) instead of a clean assertion failure — restargeted
+      it at `kanakko.commands.transfer` and all 5 passed. `handlers.py` is now
+      1462 lines; `uv run pytest` → 457 passed, `ruff check` clean.
+- [ ] `handlers.py` split, slice 2/6: `kanakko/commands/account.py`
+      (`handle_account` + its three helpers). Retarget
+      `tests/test_account_command.py`'s `handlers.send_message` patch and
+      `handlers.ACCOUNT_*`/`handlers._is_account` reads at the new module, move
+      the `app.py` import, and repeat the red-without-fix check slice 1/6 did.
+- [ ] `handlers.py` split, slice 3/6: `kanakko/commands/remove.py`
+      (`handle_remove` + `handle_remove_choice`). `tests/test_member_removal.py`
+      and `tests/test_webhook.py`'s `REMOVE_PREFIX`-routed callback tests both
+      patch `handlers` directly — check `test_webhook.py`'s patches
+      (`send_message`/`edit_message_text`/`answer_callback_query`) against
+      *which* handler each specific test exercises before retargeting, since
+      that file spans many commands in one module.
+- [ ] `handlers.py` split, slice 4/6: `kanakko/commands/invite.py`
+      (`handle_invite` + `handle_invite_signup`, both `/invite*` commands share
+      the same shape). Retarget `tests/test_invite.py` and
+      `tests/test_invite_signup.py`.
+- [ ] `handlers.py` split, slice 5/6: `kanakko/commands/recurring.py`
+      (`handle_recurring` + `_match_category_and_account`). Retarget
+      `tests/test_recurring_command.py`.
+- [ ] `handlers.py` split, slice 6/6: `kanakko/commands/refund.py`
+      (`handle_refund` + `handle_refund_choice`). Retarget
+      `tests/test_refund_ux.py` and check `test_webhook.py`'s
+      `REFUND_PREFIX`-routed tests the same way slice 3/6 must. After this
+      slice, re-measure `handlers.py`'s line count against the 300-line
+      guideline — the spine (dispatch/start/text/undo/help/household/confirm
+      core) will likely still be ~700+ lines, which may need its own follow-up
+      split (e.g. the confirm-card core into its own module) rather than being
+      assumed done once the six commands are out.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

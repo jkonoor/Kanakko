@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 from kanakko import __version__, configure_logging
 from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import CATEGORY_PREFIX
+from kanakko.commands.transfer import _is_transfer, handle_transfer
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
 from kanakko.db import claim_update, connect, get_or_create_user, pending_awaiting_amount
 from kanakko.eventlog import log_event, ms_since
@@ -39,7 +40,6 @@ from kanakko.handlers import (
     _is_refund,
     _is_remove,
     _is_start,
-    _is_transfer,
     _is_undo,
     dispatch,
     handle_account,
@@ -60,7 +60,6 @@ from kanakko.handlers import (
     handle_remove_choice,
     handle_start,
     handle_text,
-    handle_transfer,
     handle_undo,
 )
 from kanakko.tg import send_message

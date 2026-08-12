@@ -12,6 +12,47 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `4f2646e` 9.6's manual-test money check reworked as a delta
+
+**Scope:** docs-only. Reworks `docs/TESTING.md` row 9.6 and the money-path callout
+below the §9 table from an absolute total ("Exactly ₹2,000") to a delta ("rises by
+exactly ₹2,000 across 9.4–9.5"). Also appends a `RESOLVED` block to the prior
+review in `REVIEWS.md`. This fixes finding 1 from the `6a398e6` review below.
+
+**Status:** ✅ DONE — the fix is correct, and it is the right *kind* of fix
+(robust delta, not a patched-up absolute).
+
+### What I checked
+
+- `git show HEAD` — the diff touches only `docs/TESTING.md` (row 9.6 + the callout
+  prose) and `REVIEWS.md`. No code.
+- Read the full §9 flow (`docs/TESTING.md:342–369`) to trace what spending exists
+  before 9.6. 9.1 confirms `spent 40 on tea`; 9.3 sends tea again (its expected
+  column checks the *card display*, so whether the tester confirms it is left
+  ambiguous). Either way, an absolute total at 9.6 is ≥ ₹2,000 + at least one
+  ₹40 tea — so the old "Exactly ₹2,000" would fail a *correct* implementation.
+  The finding it fixes was real. The reworded delta sidesteps the ambiguity: the
+  rise from a baseline taken after 9.3 is +₹2,000 (swipe) + ₹0 (transfer) = ₹2,000
+  regardless of what the baseline was.
+- Verified the load-bearing behavioural claim against the implementation. In
+  `kanakko/db/reports.py:70–81`, `month_summary` sums `type = 'expense'` (net of
+  `refund`) and reads `active_transactions` — a `transfer` row (type `'transfer'`)
+  is excluded, and the swipe (an `expense`, regardless of which account it hits)
+  is included. So 9.4's swipe adds ₹2,000 to this-month spending and 9.5's bill
+  payment (a transfer) adds nothing. The delta of exactly ₹2,000 holds.
+- `uv run pytest -q` → **477 passed** in 20.79s. Docs-only, so nothing code-side
+  could have moved; run to confirm the tree is green, not to guard the doc.
+
+### Findings
+
+None. The commit message's own arithmetic (`₹2,040`) reads 9.3 as unconfirmed
+(one tea, not two); if 9.3 *is* confirmed the absolute would be `₹2,080`. That
+discrepancy lives only in the commit message and is exactly the fragility the
+delta rewrite removes — the doc itself no longer asserts any absolute, so it is
+correct under either reading. Not a finding.
+
+---
+
 ## 2026-08-13 — `6a398e6` Phase 10 manual-test section (§9) for accounts, transfers, reconciliation
 
 **Scope:** docs-only. Adds `## 9` (rows 9.1–9.18) to `docs/TESTING.md`, a Summary

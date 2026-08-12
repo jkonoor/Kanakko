@@ -1053,24 +1053,46 @@ per task:
       gets a `refund` action value (013's two-liner pattern). Never touches
       `INCOME_CATEGORIES` — that is the very next task below, a separate
       decision about existing rows.
-- [ ] Refunds — the bot-facing UX (§18, split 2/2): `refund 500` lists
-      recent candidates (live expenses only, amount-matched first — extend
-      `recent_transactions` or add a sibling query, `type = 'expense'` and not
-      already fully refunded), one tap picks the row and calls
-      `db.refunds.create_refund`. **The spec text says "reuse `/remove`'s chooser
-      keyboard" — checked, and that's stale: `/remove` (§16, member removal) is a
-      static two-button Keep/Delete confirm, not an N-candidate list.** The
-      actually-reusable shape in this codebase is `categories.py:keyboard`/
-      `confirm.py:account_keyboard` — N buttons built from a list, one callback
-      prefix, tap routes by value straight from the callback data (no label
-      indirection needed, `txn_id` is already the unique key). `refund 500` is
-      not a slash command (no leading `/`), so it needs its own predicate in
-      `app.py`'s `is_parse` exclusion list, the same way `/undo`/`/remove` are
-      excluded from the LLM parser and the daily cap. Catch the trigger's
-      `RaiseException` (an over-refund past what's left) and reply with a plain
-      "already refunded" message rather than a 500. A "Refund" action on the
-      dashboard row (Mini App) covers older entries — same `create_refund` call
-      from `/app/refund` or similar, source="miniapp".
+- [x] Refunds — the bot-facing UX (§18, split 2/3, was "split 2/2" — the
+      Mini App dashboard action is carved off below as its own task; it's UX
+      wiring on a separate surface with its own 300-line file-size constraint,
+      not the money-correctness core). `refund <amount>` (`handlers._is_refund`
+      — deliberately not a slash command, so it gets its own predicate in
+      `app.py`'s `is_parse` exclusion list, same as `/undo`/`/remove`) lists
+      live, not-fully-refunded expenses via `db.refunds.refund_candidates` —
+      a sibling query to `recent_transactions`, `amount`-matched first, both
+      sides of its join reading `active_transactions` (§6) rather than the base
+      table (`test_read_paths.py`'s existing bypass guard caught the first
+      draft joining raw `transactions` for the refund side — the guard failing
+      for the reason it exists, not a new check). One tap
+      (`handlers.handle_refund_choice`) picks a candidate and calls
+      `create_refund`; the spec's "reuse `/remove`'s chooser keyboard" is stale
+      (that's a static two-button Keep/Delete, not an N-candidate list) —
+      reused the actual shape instead, `categories.py:keyboard`/
+      `confirm.py:account_keyboard`'s N-buttons-from-a-list-one-prefix pattern,
+      one button per row since a candidate's label (amount, category, date) is
+      longer than a category name. The trigger's `RaiseException` on an
+      over-limit tap (a second member refunding the same expense between the
+      list and the tap, or a stale button) is caught and answered rather than
+      left to 500 — `test_handle_refund_choice_over_limit_is_caught_not_500`
+      also asserts the connection is still usable afterward, since `create_refund`
+      takes its own savepoint (`conn.transaction()`), not the whole transaction.
+      `refund` (bare word) is now in `HELP_TEXT` and `test_help.py`'s
+      undiscoverable-command guard.
+- [ ] Refunds — the Mini App dashboard action (§18, split 3/3): a "Refund"
+      button on a dashboard row, alongside the existing Delete/category-select/
+      edit controls, POSTing to a new `/app/refund` route (`{"id": <txn_id>,
+      "amount": <string>}`) that calls `db.refunds.create_refund` the same way
+      `/app/edit` calls `edit_transaction_field` — 24h `max_age` (state-mutating,
+      §13), catch the trigger's `RaiseException` the same way the bot side now
+      does. `kanakko/webapp/routes.py` is already at 299 lines (the docstring
+      on it says as much — it was split from `app.py` for exactly this reason),
+      so this route pushes it over CLAUDE.md's 300-line guideline; either a
+      further split (mutations vs. reads) or a sibling module is due here, not
+      a silent overshoot. Frontend: `kanakko/webapp/render.py`'s per-row markup
+      and whatever client-side JS drives `/app/delete` today need the same
+      shape for `/app/refund` — read that JS before adding a fourth near-copy
+      of the same fetch-and-refresh call.
 - [ ] Remove `Refund` from `INCOME_CATEGORIES` (§11, §18) — it inflates income
       and the previous task replaces it. Existing rows carrying it need a
       decision recorded in the commit, not a silent rewrite.

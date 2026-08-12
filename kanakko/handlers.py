@@ -15,6 +15,8 @@ import secrets
 import string
 import time
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 
 import httpx
 import psycopg
@@ -31,11 +33,13 @@ from kanakko.db import (
     consume_invite,
     create_household_invite,
     create_household_of_one,
+    create_refund,
     create_signup_invite,
     get_or_create_user,
     household_roster,
     list_accounts,
     locked_account_totals,
+    refund_candidates,
     remove_member,
     save_pending,
     set_account_opening_balance,
@@ -47,7 +51,7 @@ from kanakko.db import (
 )
 from kanakko.eventlog import log_event, ms_since
 from kanakko.money import format_amount, parse_amount
-from kanakko.parse import Transaction, build_request, parse_message, resolve_model
+from kanakko.parse import Transaction, build_request, parse_message, resolve_model, today
 from kanakko.tg import (
     answer_callback_query,
     delete_message,
@@ -178,7 +182,8 @@ HELP_TEXT = (
     "/transfer <name> — hand over ownership\n"
     "/account credit <amount> — add a credit card, what you currently owe\n"
     "/account locked <amount> — add an FD/SIP/chit, what's already in it\n"
-    "/account <name> — what an FD/SIP/chit has received and paid out\n\n"
+    "/account <name> — what an FD/SIP/chit has received and paid out\n"
+    "refund <amount> — get money back on something you spent, no leading /\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went."
 )
 
@@ -1044,6 +1049,137 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
               source=msg.source, user_id=user_id, duration_ms=ms_since(start),
               account_id=account["account_id"], kind=kind, amount=amount)
     return account
+
+
+REFUND_WORD = "refund"
+REFUND_PREFIX = "rf:"
+
+REFUND_USAGE = 'Say how much to refund — e.g. "refund 500".'
+REFUND_BAD_AMOUNT = 'That doesn\'t look like an amount — try "refund 500".'
+REFUND_NO_CANDIDATES = "I can't find a live expense that could take a refund like that."
+REFUND_GONE = "That expense is gone — nothing to refund."
+REFUND_OVER_LIMIT = "That's more than's left to refund on that expense."
+
+
+def _is_refund(text: str) -> bool:
+    """True when `text` opens with the bare word `refund` — deliberately not a
+    slash command (§18): "refund 500" needs a predicate in `app.py`'s `is_parse`
+    exclusion list, the same shape `/undo`/`/remove` already carve out of the
+    LLM parse path and the daily cap, but with no leading `/` to match on."""
+    words = text.split()
+    return bool(words) and words[0].lower() == REFUND_WORD
+
+
+def _refund_keyboard(candidates: list[dict], amount: Decimal) -> InlineKeyboardMarkup:
+    """One button per candidate, the reusable shape `categories.keyboard` and
+    `confirm.account_keyboard` already use: N buttons from a list, one callback
+    prefix, the tap routes on the value straight from `callback_data` — no label
+    indirection needed, since `txn_id` is already the unique key. `amount` (the
+    refund the user typed) rides along in the callback data because the tap is
+    the only later signal `handle_refund_choice` gets; one button per row, unlike
+    those two-per-row keyboards, because a candidate's label — amount, category,
+    date — is longer than a category or account name.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{format_amount(c['amount'])} · {c['category']} · {c['occurred_on'].isoformat()}",
+            callback_data=f"{REFUND_PREFIX}{c['txn_id']}:{amount}",
+        )]
+        for c in candidates
+    ])
+
+
+def handle_refund(conn: psycopg.Connection, msg: TextMessage) -> list[dict] | None:
+    """`refund <amount>` — list live, not-fully-refunded expenses to refund `amount`
+    against, amount-matched first (§18).
+
+    Linking is by choosing, not by parsing (§18): the amount is the only thing
+    this message commits to, and the button tap (`handle_refund_choice`) commits
+    the rest. A bad or missing amount is refused with a usage hint, matching
+    `handle_account`'s `ACCOUNT_BAD_AMOUNT`/`ACCOUNT_USAGE` split. No live
+    candidate — a fresh household, or every expense already fully refunded —
+    is refused too, rather than showing an empty chooser. Does not commit — the
+    caller owns the transaction. Returns the candidate list shown, or `None` on
+    a refusal.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    amount_text = _command_arg(msg.text)
+    try:
+        amount = parse_amount(amount_text)
+    except (TypeError, ValueError):
+        send_message(msg.chat_id, REFUND_BAD_AMOUNT if amount_text else REFUND_USAGE)
+        log_event("refund.listed", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+
+    candidates = refund_candidates(conn, user_id, amount)
+    if not candidates:
+        send_message(msg.chat_id, REFUND_NO_CANDIDATES)
+        log_event("refund.listed", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+                  amount=amount)
+        return None
+
+    send_message(msg.chat_id, f"Refund {format_amount(amount)} against which expense?",
+                 reply_markup=_refund_keyboard(candidates, amount))
+    log_event("refund.listed", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+              amount=amount)
+    return candidates
+
+
+def handle_refund_choice(conn: psycopg.Connection, press: ButtonPress) -> dict | None:
+    """Act on an `rf:<txn_id>:<amount>` tap `handle_refund`'s chooser offered (§18).
+
+    The button is untrusted the same way `handle_remove_choice`'s is: `create_refund`
+    re-runs the full §16 household scope keyed by the *presser*, not the button,
+    and only a live `expense` row is refundable — a stale or forged `txn_id` gets
+    `None` back rather than a write. Migration 014's trigger is the guard that
+    actually stops a refund from exceeding what's left (§18); `RaiseException` is
+    caught here and turned into a plain reply rather than a 500 that would make
+    Telegram redeliver the same tap forever — the race window this closes is a
+    second refund landing between `handle_refund` listing the candidate and this
+    tap being pressed. Does not commit — the caller owns the transaction. Returns
+    the stored refund row, or `None` when refused.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, press.from_id)
+    txn_id_str, _, amount_str = press.data.removeprefix(REFUND_PREFIX).partition(":")
+    try:
+        txn_id = int(txn_id_str)
+        amount = parse_amount(amount_str)
+    except (TypeError, ValueError):
+        answer_callback_query(press.callback_query_id, "That button's expired")
+        log_event("refund.created", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+
+    try:
+        refunded = create_refund(conn, user_id, txn_id, amount,
+                                 date.fromisoformat(today()),
+                                 source=press.source, update_id=press.update_id)
+    except psycopg.errors.RaiseException:
+        answer_callback_query(press.callback_query_id, REFUND_OVER_LIMIT)
+        log_event("refund.created", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start),
+                  outcome="over_limit")
+        return None
+    if refunded is None:
+        answer_callback_query(press.callback_query_id, REFUND_GONE)
+        log_event("refund.created", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+
+    edit_message_text(
+        press.chat_id, press.message_id,
+        f"✅ Refunded {format_amount(amount)} — {refunded['category']}",
+    )
+    answer_callback_query(press.callback_query_id, "Refunded")
+    log_event("refund.created", status="ok", update_id=press.update_id,
+              source=press.source, user_id=user_id, duration_ms=ms_since(start),
+              txn_id=refunded["txn_id"], amount=amount)
+    return refunded
 
 
 def handle_confirm(conn: psycopg.Connection, press: ButtonPress) -> int | None:

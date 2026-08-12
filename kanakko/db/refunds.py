@@ -78,3 +78,49 @@ def create_refund(
         _record_event(cur, txn_id=txn_id, user_id=user_id, action="refund",
                       before=None, after=stored, source=source, update_id=update_id)
     return {"txn_id": txn_id, **stored}
+
+
+def refund_candidates(
+    conn: psycopg.Connection, user_id: int, amount: Decimal, limit: int = 10
+) -> list[dict]:
+    """Live, not-fully-refunded expenses in `user_id`'s household, `amount`-matched first (§18).
+
+    The chooser `handlers.handle_refund` shows after `refund <amount>`: household-scoped
+    like `reports.recent_transactions` (any member may refund any member's expense, §16),
+    `type = 'expense'` only, and `remaining` — the same "original minus live refunds against
+    it" aggregate migration 014's trigger enforces — excludes anything already refunded down
+    to zero via a `HAVING` on that same expression, so a fully-settled expense never appears
+    as a candidate only to have the trigger reject the tap. Both sides of the join read
+    `active_transactions` (§6), never the base `transactions` table, so a soft-deleted refund
+    can't understate `remaining` any more than a soft-deleted expense can reappear as a
+    candidate. Ordered so an expense whose own amount equals `amount` sorts first (the common
+    case: "refund 500" after a ₹500 purchase), then newest first. Does not filter on
+    `remaining >= amount` — a partial refund against a smaller remainder is a legitimate tap
+    that `create_refund` accepts; an over-limit tap is caught by the trigger's
+    `RaiseException` at write time instead (`handlers.handle_refund_choice`).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.txn_id, t.amount, t.category, t.occurred_on,"
+            " t.amount - coalesce(sum(r.amount), 0) AS remaining"
+            " FROM active_transactions t"
+            " LEFT JOIN active_transactions r ON r.refund_of_txn_id = t.txn_id"
+            " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " AND t.type = 'expense'"
+            " GROUP BY t.txn_id, t.amount, t.category, t.occurred_on, t.created_at"
+            " HAVING t.amount - coalesce(sum(r.amount), 0) > 0"
+            " ORDER BY (t.amount = %s) DESC, t.created_at DESC"
+            " LIMIT %s",
+            (user_id, amount, limit),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "txn_id": txn_id,
+            "amount": amount_,
+            "category": category,
+            "occurred_on": occurred_on,
+            "remaining": remaining,
+        }
+        for txn_id, amount_, category, occurred_on, remaining in rows
+    ]

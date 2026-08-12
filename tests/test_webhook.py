@@ -1039,6 +1039,35 @@ def test_webhook_routes_account_to_handle_account_and_never_meters_it(monkeypatc
     assert claims == [None]  # unmetered — never counts against the daily cap
 
 
+def test_webhook_routes_refund_to_handle_refund_and_never_meters_it(monkeypatch):
+    """`refund 500` lists candidates, not a transaction, so it must never be metered.
+
+    Same two silent failures as `/account` above, but `refund` carries no leading
+    `/` — a routing miss here would feed "refund 500" to `handle_text`, which
+    would try to parse it as an expense rather than list refund candidates.
+    Asserts it routes to `handle_refund` and the claim is unmetered
+    (`metered_user is None`).
+    """
+    _set_secret(monkeypatch)
+    monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
+    refunded, texted, claims = [], [], []
+    monkeypatch.setattr(app_module, "handle_refund", lambda conn, msg: refunded.append(msg))
+    monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: texted.append(msg))
+    monkeypatch.setattr(
+        app_module, "claim_update", lambda conn, uid, metered: claims.append(metered) or True
+    )
+
+    body = {"update_id": 301, "message": {"message_id": 1, "chat": {"id": 42},
+                                          "text": "refund 500"}}
+    client.post("/webhook", json=body, headers=AUTH)
+
+    assert len(refunded) == 1 and texted == []  # routed to the chooser, not the parser
+    assert claims == [None]  # unmetered — never counts against the daily cap
+
+
 def test_handle_undo_soft_deletes_the_last_row_and_confirms(conn, monkeypatch):
     """`/undo` removes the newest confirmed row and replies naming it (§5, §6).
 

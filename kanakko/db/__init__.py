@@ -42,7 +42,7 @@ from kanakko.db.pending import (
     set_pending_category,
     undo_last,
 )
-from kanakko.db.refunds import create_refund
+from kanakko.db.refunds import create_refund, refund_candidates
 from kanakko.db.reminders import last_reminder_at, log_reminder, logged_since
 from kanakko.db.reports import (
     day_summary,
@@ -80,6 +80,7 @@ __all__ = [
     "create_household_invite",
     "create_signup_invite",
     "create_refund",
+    "refund_candidates",
     "save_pending",
     "confirm_pending",
     "set_pending_category",

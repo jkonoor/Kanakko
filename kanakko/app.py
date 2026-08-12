@@ -23,6 +23,7 @@ from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
+    REFUND_PREFIX,
     REMOVE_PREFIX,
     TextMessage,
     _is_account,
@@ -31,6 +32,7 @@ from kanakko.handlers import (
     _is_household,
     _is_invite,
     _is_invite_signup,
+    _is_refund,
     _is_remove,
     _is_start,
     _is_transfer,
@@ -45,6 +47,8 @@ from kanakko.handlers import (
     handle_household,
     handle_invite,
     handle_invite_signup,
+    handle_refund,
+    handle_refund_choice,
     handle_remove,
     handle_remove_choice,
     handle_start,
@@ -172,6 +176,7 @@ async def webhook(request: Request) -> dict[str, bool]:
             or _is_remove(action.text)
             or _is_transfer(action.text)
             or _is_account(action.text)
+            or _is_refund(action.text)
         )
         if is_parse and not within_daily_cap(conn, user_id):
             send_message(action.chat_id, CAP_REACHED)
@@ -201,6 +206,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_transfer(conn, action)
                 elif _is_account(action.text):
                     handle_account(conn, action)
+                elif _is_refund(action.text):
+                    handle_refund(conn, action)
                 else:
                     handle_text(conn, action)
             elif action.data == CONFIRM:
@@ -213,6 +220,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                 handle_account_choice(conn, action)
             elif action.data.startswith(REMOVE_PREFIX):
                 handle_remove_choice(conn, action)
+            elif action.data.startswith(REFUND_PREFIX):
+                handle_refund_choice(conn, action)
         except Exception:
             log_event("update.handled", status="error", update_id=update_id,
                       source="webhook", duration_ms=ms_since(start))

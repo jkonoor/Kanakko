@@ -997,7 +997,7 @@ per task:
       `webapp/render.py` (period panels) from a new `webapp/recent.py` (the list)
       to stay under CLAUDE.md's 300-line guideline, which this task's own code
       would otherwise have pushed both past.
-- [ ] `app.py` is 497 lines, well past CLAUDE.md's 300-line guideline (it was
+- [x] `app.py` is 497 lines, well past CLAUDE.md's 300-line guideline (it was
       already 420 before task 974 added the `/app/edit` route). Unlike the two
       splits task 974 made, this one is not free: the Mini App routes
       (`/app/data`, `/app/delete`, `/app/category`, `/app/edit`,
@@ -1008,6 +1008,18 @@ per task:
       indirection would make the patch silently stop applying and every mocked
       test would try to hit a real `DATABASE_URL`. Needs that wired through
       first (an `APIRouter`, or a passed-in `connect`), not just a file move.
+      Resolved by moving `connect` (and every dependency the four routes use)
+      into `kanakko/webapp/routes.py` alongside the routes themselves, as an
+      `APIRouter` included by `app.py`. `connect` is now looked up unqualified
+      from *that* module at call time, so `tests/test_webapp.py`'s
+      `monkeypatch.setattr(app_module, "connect", ...)` keeps working once its
+      one import line points `app_module` at `kanakko.webapp.routes` instead of
+      `kanakko.app` — no per-test-site change needed. Verified the indirection
+      actually matters, not just plausible: reverted that one import line,
+      reran `tests/test_webapp.py`, and 19 of the mocked tests failed with
+      `RuntimeError: DATABASE_URL is not set` (the patch silently stopped
+      applying, exactly as this task predicted) — then restored it, 71 passed.
+      `app.py` is now 222 lines; `kanakko/webapp/routes.py` is 299.
 - [ ] Refunds, linked and partial (§18): a refund references the transaction it
       refunds, may be less than the original, and **the sum of refunds against a
       transaction can never exceed it** — cause that overflow and watch the guard

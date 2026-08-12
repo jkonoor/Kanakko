@@ -16,7 +16,6 @@ import pytest
 from conftest import default_account_of, household_of
 from fastapi.testclient import TestClient
 
-from kanakko import app as app_module
 from kanakko import eventlog
 from kanakko.app import app
 from kanakko.migrate import migrate
@@ -33,6 +32,7 @@ from kanakko.webapp import (
     user_id_from_init_data,
     validate_init_data,
 )
+from kanakko.webapp import routes as app_module
 
 TOKEN = "123456:AA-test-token"
 

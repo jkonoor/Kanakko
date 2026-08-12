@@ -26,11 +26,12 @@ uv run python -m kanakko.migrate           # apply pending migrations (needs DAT
 
 ```
 kanakko/
-  app.py            FastAPI app: webhook + Mini App routes
+  app.py            FastAPI app: webhook, Mini App shell, health check
+  webapp/           Mini App: initData auth, rendering, and the data routes
   parse.py          OpenRouter call, JSON schema, validation, retry
   categories.py     THE category list — single source of truth
   money.py          Decimal helpers
-  db.py             psycopg connection + queries (plain SQL)
+  db/               psycopg connection + queries (plain SQL)
   jobs/             one module per scheduled job
 migrations/         numbered .sql, applied in order, never edited once applied
 prompts/            Ralph loop prompts (not application code)

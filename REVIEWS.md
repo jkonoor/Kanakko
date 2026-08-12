@@ -18,8 +18,21 @@ returned, not what they were assumed to return.
 table row, and folds 9.6/9.13 into the "stops a release" money-path callout; ticks
 the "Add a Phase 10 section to `docs/TESTING.md`" task in `TASKS.md`.
 
-**Status:** ⚠️ CHANGES REQUESTED — one arithmetic error on the section's own
-load-bearing money check (9.6).
+**Status:** ⚠️ CHANGES REQUESTED → ✅ RESOLVED (see the block below) — the 9.6
+arithmetic error fixed in the follow-up commit on `ralph/phase-10`.
+
+> **RESOLVED.** Finding 1 (MEDIUM — 9.6's "Exactly ₹2,000" ignored the 9.1/9.3
+> tea spending already in the same sequential flow): reworded 9.6 to a delta
+> check — "rises by exactly ₹2,000 across 9.4–9.5 (the swipe) — the bill
+> payment adds nothing" — measured from the total noted after 9.3, not an
+> absolute figure. Updated the money-path callout below the table to say the
+> same. No code changed; this section has no `pytest` surface (the doc says so
+> itself), so there is no automated guard to add — the check here is the
+> cross-read against the implementing code that this same review already did
+> for 9.6 (`kanakko/db` totals: tea is Food spending on Bank, the swipe is Food
+> spending on the credit card, the bill payment is a transfer excluded from
+> both totals) and that a delta, unlike an absolute figure, holds regardless of
+> what ran earlier in the manual script.
 
 ### What I checked
 

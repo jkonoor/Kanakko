@@ -346,7 +346,7 @@ account).
 | 9.3 | Send `spent 40 on tea` again | Card now shows an **Account: Bank** line with a button to change it | ⬜ | |
 | 9.4 | Send `swiped 2000 on dinner`, confirm | Card's account is the credit card, not Bank; category Food | ⬜ | |
 | 9.5 | Send `paid the credit card bill 2000`, confirm | Card shows **Bank → \<card name\>**, no category line, no category buttons | ⬜ | |
-| 9.6 | Open the dashboard, check this month's spending | **Exactly ₹2,000** from 9.4 — the bill payment in 9.5 does **not** add a second ₹2,000 | ⬜ | |
+| 9.6 | Note the spending total after 9.3, then open the dashboard and check this month's spending after 9.4–9.5 | Rises by **exactly ₹2,000** across 9.4–9.5 (the swipe) — the bill payment in 9.5 adds **nothing**, not a second ₹2,000 | ⬜ | |
 | 9.7 | Send `put 5000 in FD`, confirm | Card asks `New savings account "FD"?` over Confirm/Cancel; confirming creates the `locked` account and moves ₹5,000 out of Bank | ⬜ | |
 | 9.8 | Check this month's spending again | **Unchanged** by 9.7 — a contribution to a locked account is not spending | ⬜ | |
 | 9.9 | Send `FD matured 5500`, confirm | A transfer FD → Bank, not income | ⬜ | |
@@ -361,7 +361,9 @@ account).
 | 9.18 | In a household with two accounts, reply to a reconcile nudge **without** using Telegram's Reply function | Falls through to an ordinary parse (or a rephrase prompt) rather than misfiling as an adjustment on the wrong account | ⬜ | |
 
 **9.6 is the money check for this section** — it is the double-count §18 exists
-to prevent, the same weight 1.6 and 2.4 carry above. **9.13 is the second one**:
+to prevent, the same weight 1.6 and 2.4 carry above; check the *rise* across
+9.4–9.5, not an absolute total, since 9.1/9.3 already added tea spending
+earlier in the flow. **9.13 is the second one**:
 a refund exceeding what remains is a silent over-refund if it is ever allowed
 through. **9.1 is the regression check**: every account feature in this section
 must leave the single-account daily path exactly as it was.

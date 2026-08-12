@@ -16,7 +16,11 @@ from kanakko.db.households import (
     remove_member,
     transfer_ownership,
 )
-from kanakko.db.invites import consume_invite, create_household_invite
+from kanakko.db.invites import (
+    consume_invite,
+    create_household_invite,
+    create_signup_invite,
+)
 from kanakko.db.pending import (
     cancel_pending,
     confirm_pending,
@@ -56,6 +60,7 @@ __all__ = [
     "transfer_ownership",
     "consume_invite",
     "create_household_invite",
+    "create_signup_invite",
     "save_pending",
     "confirm_pending",
     "set_pending_category",

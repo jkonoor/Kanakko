@@ -223,6 +223,29 @@ third for the "other member" cases.
 | 6a.5 | Open an expired code | Refused, and says so distinctly from "already used" | ⬜ | |
 | 6a.6 | Send `/start garbage_payload` | Refused cleanly; no half-created household | ⬜ | |
 
+### 6a-i. Issuing a signup invite (`/invite_signup`)
+
+Needs `ADMIN_TELEGRAM_IDS` set to your own Telegram id on `kanakko-web`. **Run
+6a-i.1 before setting it** — the refusal is the point of the feature, and once
+the variable is set you cannot see it again from your own account.
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 6a-i.1 | *(before setting the env var)* Send `/invite_signup ravi` | Refused — "only the operator". **No link, and no row in `invites`** | ⬜ | |
+| 6a-i.2 | Set `ADMIN_TELEGRAM_IDS` to your id, redeploy, send `/invite_signup ravi` | A single-use link `https://t.me/<bot>?start=s-…` | ⬜ | |
+| 6a-i.3 | Send bare `/invite_signup` | Asks for a label. **No row in `invites`** | ⬜ | |
+| 6a-i.4 | From a second account **that has never used the bot**, open the 6a-i.2 link | Welcome; that account can log an expense immediately | ⬜ | |
+| 6a-i.5 | From that second account, send `/household` | **Only them.** They are in their own household, not yours — the whole point of the signup kind | ⬜ | |
+| 6a-i.6 | From a third account, open the **same** link | Refused as already used | ⬜ | |
+| 6a-i.7 | From the second account (admitted, not an admin), send `/invite_signup priya` | Refused. An admitted tester must not be able to admit more people | ⬜ | |
+| 6a-i.8 | *(operator)* `select code, kind, household_id, label, used_by from invites` | The `s-…` row is `kind = 'signup'` with `household_id` NULL; `/invite` rows are `household` with an id | ⬜ | |
+| 6a-i.9 | Log an expense from your own account and from the second account, then compare each `/household` and dashboard | Neither sees the other's money | ⬜ | |
+| 6a-i.10 | Send `/help` | `/invite_signup` is **not** listed — it is operator-only, and the "/" menu is the user manual | ⬜ | |
+
+6a-i.7 is the guard that matters most: the gate is `ADMIN_TELEGRAM_IDS`, not "owns
+a household". If it ever reverts to the ownership check `/invite` uses, every
+tester becomes an admitter and the closed beta opens itself one account at a time.
+
 **6a.7–6a.9 are a real defect that was found and fixed before the merge, so
 re-run them after any change to the Mini App routes.** The routes resolved their
 caller with `get_or_create_user`, which *created* a row for whoever opened the

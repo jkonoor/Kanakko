@@ -76,12 +76,20 @@ pg = api(f"postgres.one?postgresId={POSTGRES}")
 dsn = (f"postgresql://{pg['databaseUser']}:{pg['databasePassword']}"
        f"@{pg['appName']}:5432/{pg['databaseName']}")
 
+# `application.update` **replaces** the whole env, so anything set in the Dokploy
+# UI and absent here is silently dropped on the next push. Every key the app reads
+# therefore belongs in this dict; the optional ones ride along from .env when they
+# have a value, and are simply left out when they don't (the code defaults them).
+OPTIONAL = ("ADMIN_TELEGRAM_IDS", "SIGNUP_MODE", "DAILY_MESSAGE_CAP",
+            "LOG_DIR", "TRACE_MODE", "TRACE_KEEP")
+
 web_env = {
     "DATABASE_URL": dsn,
     "TELEGRAM_BOT_TOKEN": env["TELEGRAM_BOT_TOKEN"],
     "TELEGRAM_WEBHOOK_SECRET": secret,
     "OPENROUTER_API_KEY": env["OPENROUTER_API_KEY"],
     "OPENROUTER_MODEL": env.get("OPENROUTER_MODEL", ""),
+    **{k: env[k] for k in OPTIONAL if env.get(k)},
 }
 # cron sends summaries, so it needs the bot token; it never parses, so it does
 # not get the OpenRouter key. TZ is load-bearing (DECISIONS §10).

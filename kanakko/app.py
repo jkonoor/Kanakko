@@ -32,6 +32,7 @@ from kanakko.handlers import (
     _is_help,
     _is_household,
     _is_invite,
+    _is_invite_signup,
     _is_remove,
     _is_start,
     _is_transfer,
@@ -43,6 +44,7 @@ from kanakko.handlers import (
     handle_help,
     handle_household,
     handle_invite,
+    handle_invite_signup,
     handle_remove,
     handle_remove_choice,
     handle_start,
@@ -360,6 +362,7 @@ async def webhook(request: Request) -> dict[str, bool]:
             or _is_help(action.text)
             or _is_greeting(action.text)
             or _is_invite(action.text)
+            or _is_invite_signup(action.text)
             or _is_household(action.text)
             or _is_remove(action.text)
             or _is_transfer(action.text)
@@ -380,6 +383,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_undo(conn, action)
                 elif _is_help(action.text) or _is_greeting(action.text):
                     handle_help(conn, action)
+                elif _is_invite_signup(action.text):
+                    handle_invite_signup(conn, action)
                 elif _is_invite(action.text):
                     handle_invite(conn, action)
                 elif _is_household(action.text):

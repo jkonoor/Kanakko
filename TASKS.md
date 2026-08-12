@@ -1533,10 +1533,15 @@ per task:
 
 ### After the code
 
-- [ ] Add a Phase 10 section to `docs/TESTING.md` — the double-count case (swipe
+- [x] Add a Phase 10 section to `docs/TESTING.md` — the double-count case (swipe
       then pay the bill), an FD round trip, a partial refund and an attempt to
       over-refund, the daily path still being one tap, and a reconcile that
       leaves a visible row.
+      Done: new `## 9. Accounts, transfers, and reconciliation` (18 rows,
+      9.1–9.18), plus a `Summary` table row and its two money-path callouts
+      (9.6 double-count, 9.13 over-refund) added to the closing "stops a
+      release" line, matching how 1.6/2.4/3.6/8.3/8.4 are already called out.
+      Manual-test doc only — no code, no `pytest` surface to run.
 - [ ] `[human]` Re-run the manual QA that Phase 10 touches, and set opening
       balances on your own accounts before demoing.
 

@@ -332,6 +332,42 @@ survives.
 
 ---
 
+## 9. Accounts, transfers, and reconciliation
+
+Phase 10, §18. Needs at least one household with a second Telegram-visible
+signal you can check off-app (a real bank balance figure works fine — the
+reconcile checks below only need *a* number to compare against, not a real
+account).
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 9.1 | With only the default account, send `spent 40 on tea`, confirm | **One tap, same as §1** — no Account line on the card, no extra button. Accounts only become visible once a second one exists | ⬜ | |
+| 9.2 | Send `/account credit 0` | A credit card account is created, owing ₹0 | ⬜ | |
+| 9.3 | Send `spent 40 on tea` again | Card now shows an **Account: Bank** line with a button to change it | ⬜ | |
+| 9.4 | Send `swiped 2000 on dinner`, confirm | Card's account is the credit card, not Bank; category Food | ⬜ | |
+| 9.5 | Send `paid the credit card bill 2000`, confirm | Card shows **Bank → \<card name\>**, no category line, no category buttons | ⬜ | |
+| 9.6 | Open the dashboard, check this month's spending | **Exactly ₹2,000** from 9.4 — the bill payment in 9.5 does **not** add a second ₹2,000 | ⬜ | |
+| 9.7 | Send `put 5000 in FD`, confirm | Card asks `New savings account "FD"?` over Confirm/Cancel; confirming creates the `locked` account and moves ₹5,000 out of Bank | ⬜ | |
+| 9.8 | Check this month's spending again | **Unchanged** by 9.7 — a contribution to a locked account is not spending | ⬜ | |
+| 9.9 | Send `FD matured 5500`, confirm | A transfer FD → Bank, not income | ⬜ | |
+| 9.10 | Check this month's income | **Unchanged** by 9.9 | ⬜ | |
+| 9.11 | Send `/account FD` | Reports what went in and came back — "put in ₹5,000.00, got back ₹5,500.00" | ⬜ | |
+| 9.12 | Log an expense, e.g. `spent 500 on shoes`, confirm; then send `refund 500` | A candidate list; tapping the shoes row records a **partial or full** refund | ⬜ | |
+| 9.13 | Refund the shoes row for ₹200, then send `refund 500` again and try to refund **more than ₹300 remains** | Refused — the sum of refunds against one transaction can never exceed it | ⬜ | |
+| 9.14 | Check the category total for 9.12–9.13 | Reduced by the refunded amount only, never turned into income | ⬜ | |
+| 9.15 | *(operator)* Run `python -m kanakko.jobs.reconcile` in `kanakko-cron` | Each of your accounts (except `external`) gets its own message quoting the app's current figure and asking what the real one is | ⬜ | |
+| 9.16 | Reply to that message with a **different** figure | A visible adjustment transaction appears (dashboard, `/undo` names it), against the `external` account — never a silent rewrite | ⬜ | |
+| 9.17 | *(operator)* Run the reconcile job again, reply with the **same** figure the app now shows | "No changes needed" — no new row written | ⬜ | |
+| 9.18 | In a household with two accounts, reply to a reconcile nudge **without** using Telegram's Reply function | Falls through to an ordinary parse (or a rephrase prompt) rather than misfiling as an adjustment on the wrong account | ⬜ | |
+
+**9.6 is the money check for this section** — it is the double-count §18 exists
+to prevent, the same weight 1.6 and 2.4 carry above. **9.13 is the second one**:
+a refund exceeding what remains is a silent over-refund if it is ever allowed
+through. **9.1 is the regression check**: every account feature in this section
+must leave the single-account daily path exactly as it was.
+
+---
+
 ## Summary
 
 | Section | Pass | Fail | Blocked |
@@ -345,6 +381,7 @@ survives.
 | 6. Access control and households | | | |
 | 7. Security | | | |
 | 8. Recovery | | | |
+| 9. Accounts, transfers, reconciliation | | | |
 
-**Anything ❌ on the money path (1.6, 2.4, 3.6, 8.3, 8.4) stops a release.** The
-rest is judgement.
+**Anything ❌ on the money path (1.6, 2.4, 3.6, 8.3, 8.4, 9.6, 9.13) stops a
+release.** The rest is judgement.

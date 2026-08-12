@@ -28,6 +28,7 @@ from kanakko.commands.invite import (
     handle_invite_signup,
 )
 from kanakko.commands.recurring import _is_recurring, handle_recurring
+from kanakko.commands.refund import REFUND_PREFIX, _is_refund, handle_refund, handle_refund_choice
 from kanakko.commands.remove import REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice
 from kanakko.commands.transfer import _is_transfer, handle_transfer
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
@@ -36,12 +37,10 @@ from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
-    REFUND_PREFIX,
     TextMessage,
     _is_greeting,
     _is_help,
     _is_household,
-    _is_refund,
     _is_start,
     _is_undo,
     dispatch,
@@ -53,8 +52,6 @@ from kanakko.handlers import (
     handle_confirm,
     handle_help,
     handle_household,
-    handle_refund,
-    handle_refund_choice,
     handle_start,
     handle_text,
     handle_undo,

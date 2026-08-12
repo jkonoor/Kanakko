@@ -13,16 +13,15 @@ from decimal import Decimal
 
 from conftest import default_account_of, household_of, join_household
 
-from kanakko import handlers
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.db import create_refund, get_or_create_user, refund_candidates
-from kanakko.handlers import (
+from kanakko.commands import refund as refund_command
+from kanakko.commands.refund import (
     REFUND_PREFIX,
-    ButtonPress,
-    TextMessage,
     handle_refund,
     handle_refund_choice,
 )
+from kanakko.db import create_refund, get_or_create_user, refund_candidates
+from kanakko.handlers import ButtonPress, TextMessage
 from kanakko.migrate import migrate
 
 OWNER_TG = 111
@@ -32,16 +31,16 @@ OTHER_TG = 333
 
 def _stub_send(monkeypatch):
     sent = []
-    monkeypatch.setattr(handlers, "send_message",
+    monkeypatch.setattr(refund_command, "send_message",
                         lambda chat_id, text, reply_markup=None: sent.append((chat_id, text, reply_markup)))
     return sent
 
 
 def _stub_taps(monkeypatch):
     edits, acks = [], []
-    monkeypatch.setattr(handlers, "edit_message_text",
+    monkeypatch.setattr(refund_command, "edit_message_text",
                         lambda chat_id, message_id, text, reply_markup=None: edits.append(text))
-    monkeypatch.setattr(handlers, "answer_callback_query",
+    monkeypatch.setattr(refund_command, "answer_callback_query",
                         lambda cbq, text=None: acks.append(text))
     return edits, acks
 
@@ -173,7 +172,7 @@ def test_handle_refund_bare_is_a_usage_hint(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
 
     assert handle_refund(conn, _msg(OWNER_TG, "refund")) is None
-    assert sent[-1][:2] == (OWNER_TG, handlers.REFUND_USAGE)
+    assert sent[-1][:2] == (OWNER_TG, refund_command.REFUND_USAGE)
     conn.rollback()
 
 
@@ -183,7 +182,7 @@ def test_handle_refund_bad_amount(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
 
     assert handle_refund(conn, _msg(OWNER_TG, "refund lots")) is None
-    assert sent[-1][:2] == (OWNER_TG, handlers.REFUND_BAD_AMOUNT)
+    assert sent[-1][:2] == (OWNER_TG, refund_command.REFUND_BAD_AMOUNT)
     conn.rollback()
 
 
@@ -193,7 +192,7 @@ def test_handle_refund_no_candidates(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
 
     assert handle_refund(conn, _msg(OWNER_TG, "refund 500")) is None
-    assert sent[-1][:2] == (OWNER_TG, handlers.REFUND_NO_CANDIDATES)
+    assert sent[-1][:2] == (OWNER_TG, refund_command.REFUND_NO_CANDIDATES)
     conn.rollback()
 
 
@@ -230,7 +229,7 @@ def test_handle_refund_choice_over_limit_is_caught_not_500(conn, monkeypatch):
     result = handle_refund_choice(conn, _tap(OWNER_TG, txn_id, "600.00"))
 
     assert result is None
-    assert acks[-1] == handlers.REFUND_OVER_LIMIT
+    assert acks[-1] == refund_command.REFUND_OVER_LIMIT
     assert edits == []  # no card was edited — nothing was stored
     # The connection must still be usable — a poisoned transaction would raise here.
     assert refund_candidates(conn, uid, Decimal("500.00"))[0]["remaining"] == Decimal("500.00")
@@ -243,7 +242,7 @@ def test_handle_refund_choice_gone_expense(conn, monkeypatch):
     edits, acks = _stub_taps(monkeypatch)
 
     assert handle_refund_choice(conn, _tap(OWNER_TG, 999999, "500.00")) is None
-    assert acks[-1] == handlers.REFUND_GONE
+    assert acks[-1] == refund_command.REFUND_GONE
     conn.rollback()
 
 
@@ -257,7 +256,7 @@ def test_handle_refund_choice_reauthorizes_a_forged_household(conn, monkeypatch)
     edits, acks = _stub_taps(monkeypatch)
 
     assert handle_refund_choice(conn, _tap(OWNER_TG, stranger_txn, "500.00")) is None
-    assert acks[-1] == handlers.REFUND_GONE
+    assert acks[-1] == refund_command.REFUND_GONE
     conn.rollback()
 
 
@@ -277,9 +276,9 @@ def test_handle_refund_choice_malformed_button(conn, monkeypatch):
 # --- predicate ----------------------------------------------------------------
 
 def test_is_refund_recognises_the_bare_word():
-    assert handlers._is_refund("refund 500")
-    assert handlers._is_refund("REFUND 500")
-    assert handlers._is_refund("refund")
-    assert not handlers._is_refund("refunded 500")
-    assert not handlers._is_refund("I want a refund")
-    assert not handlers._is_refund("")
+    assert refund_command._is_refund("refund 500")
+    assert refund_command._is_refund("REFUND 500")
+    assert refund_command._is_refund("refund")
+    assert not refund_command._is_refund("refunded 500")
+    assert not refund_command._is_refund("I want a refund")
+    assert not refund_command._is_refund("")

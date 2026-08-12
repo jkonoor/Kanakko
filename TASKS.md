@@ -1392,7 +1392,7 @@ per task:
       intercepted, the real send path ran), same failure class slices 1-4
       found. `handlers.py` is now 864 lines; `uv run pytest` → 457 passed,
       `ruff check` clean.
-- [ ] `handlers.py` split, slice 6/6: `kanakko/commands/refund.py`
+- [x] `handlers.py` split, slice 6/6: `kanakko/commands/refund.py`
       (`handle_refund` + `handle_refund_choice`). Retarget
       `tests/test_refund_ux.py` and check `test_webhook.py`'s
       `REFUND_PREFIX`-routed tests the same way slice 3/6 must. After this
@@ -1401,6 +1401,36 @@ per task:
       core) will likely still be ~700+ lines, which may need its own follow-up
       split (e.g. the confirm-card core into its own module) rather than being
       assumed done once the six commands are out.
+      Done: moved `REFUND_WORD`/`REFUND_PREFIX`/`REFUND_USAGE`/`REFUND_BAD_AMOUNT`/
+      `REFUND_NO_CANDIDATES`/`REFUND_GONE`/`REFUND_OVER_LIMIT`, `_is_refund`,
+      `_refund_keyboard`, `handle_refund` and `handle_refund_choice` verbatim
+      into the new module; `app.py` now imports them from
+      `kanakko.commands.refund`. Dropped `create_refund`/`refund_candidates`
+      (db), `date`/`Decimal`, `InlineKeyboardButton`/`InlineKeyboardMarkup` and
+      `kanakko.parse.today` from `handlers.py`'s now-stale imports — none had
+      another caller left. `tests/test_refund_ux.py` retargeted its
+      `handlers.send_message`/`edit_message_text`/`answer_callback_query`
+      patches and `handlers.REFUND_*`/`handlers._is_refund` reads at the new
+      `refund_command` module, same pattern as slices 1-5;
+      `test_webhook.py`'s `REFUND_PREFIX`-routed test patches
+      `app_module.handle_refund` directly and imports no `REFUND_PREFIX`, so
+      it needed no change. Verified red-without-fix: patched
+      `refund_command._stale_send_message` instead of `refund_command.send_message`
+      and reran — 5 of 15 tests failed (an `AttributeError` on the stale patch
+      target itself, plus a real-write leak once the stub stopped intercepting
+      `send_message`), same failure class slices 1-5 found. `handlers.py` is
+      now 728 lines; `uv run pytest` → 457 passed, `ruff check` clean. The
+      spine is still 728 lines against the 300-line guideline — filed as a
+      follow-up split task below rather than assumed done.
+- [ ] `handlers.py` follow-up split: after all six command slices, the spine
+      (dispatch/start/text/undo/help/household/confirm core) is still 728
+      lines against the 300-line guideline — the six-slice plan didn't get it
+      under the line by itself. Look at the confirm-card core
+      (`handle_confirm`/`handle_cancel`/`handle_change_amount_request`/
+      `handle_amount_reply`/`handle_account_choice`/`handle_category`) as the
+      next seam — it's the largest cohesive block left and shares no state
+      with `dispatch`/`handle_start`/`handle_text`/`handle_undo`/`handle_help`/
+      `handle_household`, the same shape the six commands already split on.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

@@ -18,6 +18,7 @@ from kanakko.db import (
     account_balances,
     create_household_of_one,
     list_accounts,
+    locked_account_totals,
     set_account_opening_balance,
 )
 from kanakko.migrate import migrate
@@ -201,6 +202,54 @@ def test_list_accounts_excludes_external_and_orders_default_first(conn):
     names = list_accounts(conn, uid)
     assert names[0] == "Bank"  # the default account, ordered first
     assert set(names) == {"Bank", "Savings"}  # no "External"
+    conn.rollback()
+
+
+def test_locked_account_totals_are_gross_sums_not_a_balance(conn):
+    """§18: a `locked` account "knows what you put in and what came back" — two
+    ledger sums, not `opening_balance + inflows − outflows`. Seeds a pool with a
+    nonzero opening balance (from `/account locked <amount>` onboarding), two
+    contributions and one payout, plus a second household's pool that must not
+    leak in (§16) and a soft-deleted contribution that must not count (§6).
+    Dropping the opening balance from the sum, or summing net rather than gross,
+    would both pass a balance-only assertion — this checks `contributed` and
+    `paid_out` separately so either bug reddens it.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7501) RETURNING user_id")
+        (uid,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7502) RETURNING user_id")
+        (other,) = cur.fetchone()
+        hh = household_of(conn, uid)
+        hh_other = household_of(conn, other)
+
+        bank = _account(cur, hh, uid, kind="spending", name="Bank",
+                        opening="10000", is_default=True)
+        sip = _account(cur, hh, uid, kind="locked", name="SIP", opening="1000")
+        _account(cur, hh_other, other, kind="locked", name="SIP", opening="0")
+
+        def transfer(amount, frm, to, deleted=False):
+            cur.execute(
+                "INSERT INTO transactions"
+                " (user_id, household_id, amount, type, occurred_on,"
+                "  from_account_id, to_account_id, deleted_at)"
+                " VALUES (%s, %s, %s, 'transfer', '2026-08-12', %s, %s, %s)",
+                (uid, hh, parse_amount(amount), frm, to,
+                 "2026-08-12" if deleted else None),
+            )
+
+        transfer("5000", bank, sip)      # contribution
+        transfer("2000", bank, sip)      # a second contribution
+        transfer("3000", sip, bank)      # a partial maturity/payout
+        transfer("9999", bank, sip, deleted=True)  # must not count (§6)
+
+    totals = {t["name"]: t for t in locked_account_totals(conn, uid)}
+    assert set(totals) == {"SIP"}  # the other household's pool never appears (§16)
+    # 5000 + 2000, excluding the 1000 opening balance and the deleted 9999.
+    assert totals["SIP"]["contributed"] == Decimal("7000.00")
+    assert totals["SIP"]["paid_out"] == Decimal("3000.00")
+    assert isinstance(totals["SIP"]["contributed"], Decimal)  # never float (§9)
     conn.rollback()
 
 

@@ -11,6 +11,7 @@ function, re-exported here.
 from kanakko.db.accounts import (
     account_balances,
     list_accounts,
+    locked_account_totals,
     set_account_opening_balance,
 )
 from kanakko.db.connection import connect
@@ -55,6 +56,7 @@ __all__ = [
     "connect",
     "account_balances",
     "list_accounts",
+    "locked_account_totals",
     "set_account_opening_balance",
     "get_or_create_user",
     "find_user",

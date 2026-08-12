@@ -35,6 +35,7 @@ from kanakko.db import (
     get_or_create_user,
     household_roster,
     list_accounts,
+    locked_account_totals,
     remove_member,
     save_pending,
     set_account_opening_balance,
@@ -176,7 +177,8 @@ HELP_TEXT = (
     "/remove <name> — remove a member, or /remove on its own to leave\n"
     "/transfer <name> — hand over ownership\n"
     "/account credit <amount> — add a credit card, what you currently owe\n"
-    "/account locked <amount> — add an FD/SIP/chit, what's already in it\n\n"
+    "/account locked <amount> — add an FD/SIP/chit, what's already in it\n"
+    "/account <name> — what an FD/SIP/chit has received and paid out\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went."
 )
 
@@ -888,6 +890,8 @@ ACCOUNT_BAD_AMOUNT = "That doesn't look like an amount — try `/account credit 
 
 ACCOUNT_NO_HOUSEHOLD = "Send /start first — I need your household set up before I can add an account."
 
+ACCOUNT_NOT_LOCKED = 'I don\'t have a locked account named "{name}" — set one up with `/account locked <amount>`.'
+
 
 def _is_account(text: str) -> bool:
     """True when `text` is the `/account` command — bare or `/account@bot`."""
@@ -895,8 +899,43 @@ def _is_account(text: str) -> bool:
     return bool(words) and words[0].split("@", 1)[0].lower() == ACCOUNT_COMMAND
 
 
+def _handle_account_query(
+    conn: psycopg.Connection, msg: TextMessage, user_id: int, name: str, start: float
+) -> dict | None:
+    """`/account <name>` — the gross in/out a `locked` account has seen (§18).
+
+    Split off from the two-argument onboarding form: one bare word after
+    `/account` that isn't `credit`/`locked`-plus-amount is read as a query for
+    that account's name, case-insensitively — the parse layer's account names
+    are the user's own nouns, so matching should not demand exact case. Reports
+    `locked_account_totals`' two ledger sums, never a balance (§18: "never
+    carries a market value"). A name that doesn't match a live `locked` account
+    — wrong spelling, or a `spending`/`credit` account, which have no
+    contribution/maturity story — is refused the same way.
+    """
+    match = next(
+        (t for t in locked_account_totals(conn, user_id) if t["name"].lower() == name.lower()),
+        None,
+    )
+    if match is None:
+        send_message(msg.chat_id, ACCOUNT_NOT_LOCKED.format(name=name))
+        log_event("account.query", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    send_message(
+        msg.chat_id,
+        f"{match['name']} — put in {format_amount(match['contributed'])}, "
+        f"got back {format_amount(match['paid_out'])}.",
+    )
+    log_event("account.query", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start),
+              account_id=match["account_id"])
+    return match
+
+
 def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
-    """Set up a credit card or locked-savings account with its opening balance (§18).
+    """Set up a credit card or locked-savings account with its opening balance,
+    or query a `locked` account's contributions and payouts (§18).
 
     `/account credit <amount>` and `/account locked <amount>` are the onboarding
     ask `WELCOME` points to: `amount` is always what the user reports positively —
@@ -906,23 +945,26 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
     Everyday spending already has a default account minted at household creation
     (`create_household_of_one`), so this command is only for the other two kinds,
     and an abandoned onboarding still leaves a working bot. Running it twice
-    corrects a typo rather than minting a duplicate account. Does not commit —
-    the caller owns the transaction. Returns the account row on success, or
-    `None` on a usage/validation refusal — including a sender with no
-    household yet (open signup mode, before their first `/start`).
+    corrects a typo rather than minting a duplicate account. `/account <name>` —
+    one bare word — is the read side, delegated to `_handle_account_query`. Does
+    not commit — the caller owns the transaction. Returns the account row on
+    success, or `None` on a usage/validation/query refusal — including a sender
+    with no household yet (open signup mode, before their first `/start`).
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.from_id)
     arg = _command_arg(msg.text)
     parts = arg.split(maxsplit=1) if arg else []
-    kind = parts[0].lower() if parts else None
-    amount_text = parts[1] if len(parts) == 2 else None
 
-    if kind is None or amount_text is None:
+    if not parts:
         send_message(msg.chat_id, ACCOUNT_USAGE)
         log_event("account.set_up", status="noop", update_id=msg.update_id,
                   source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
+    if len(parts) == 1:
+        return _handle_account_query(conn, msg, user_id, parts[0], start)
+
+    kind, amount_text = parts[0].lower(), parts[1]
     if kind not in {"credit", "locked"}:
         send_message(msg.chat_id, ACCOUNT_BAD_KIND)
         log_event("account.set_up", status="noop", update_id=msg.update_id,

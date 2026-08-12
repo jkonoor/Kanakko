@@ -123,3 +123,31 @@ def test_repeat_call_updates_the_same_account_not_a_duplicate(conn, monkeypatch)
     assert len(credit_accounts) == 1
     assert credit_accounts[0]["balance"] == Decimal("4500.00")
     conn.rollback()
+
+
+def test_bare_name_reports_a_locked_accounts_contributions_and_payouts(conn, monkeypatch):
+    """`/account <name>` — one bare word — is the read side (§18): gross in/out,
+    matched case-insensitively against a `locked` account's name.
+    """
+    migrate(conn)
+    _seed(conn)
+    sent = _stub_send(monkeypatch)
+    handle_account(conn, _account("/account locked 1000"))  # mints "Savings"
+    sent.clear()
+
+    result = handle_account(conn, _account("/account savings"))  # lowercase, matches "Savings"
+    assert result["name"] == "Savings"
+    assert sent == [(USER_TG, "Savings — put in ₹0.00, got back ₹0.00.")]
+    conn.rollback()
+
+
+def test_bare_name_with_no_matching_locked_account_is_refused(conn, monkeypatch):
+    migrate(conn)
+    _seed(conn)
+    sent = _stub_send(monkeypatch)
+
+    result = handle_account(conn, _account("/account SIP"))
+
+    assert result is None
+    assert sent == [(USER_TG, handlers.ACCOUNT_NOT_LOCKED.format(name="SIP"))]
+    conn.rollback()

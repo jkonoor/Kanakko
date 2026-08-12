@@ -166,3 +166,36 @@ def account_balances(conn: psycopg.Connection, user_id: int) -> list[dict]:
             }
             for account_id, name, kind, is_default, balance in cur.fetchall()
         ]
+
+
+def locked_account_totals(conn: psycopg.Connection, user_id: int) -> list[dict]:
+    """Gross contributions in and maturities out per `locked` account (§18).
+
+    Split off from `account_balances`: a `locked` account "never carries a market
+    value... it knows what you put in and what came back, both of which are
+    facts" — two sums from the ledger, not a balance and not `opening_balance`
+    (a starting position, not a contribution event). Contributions are `transfer`
+    rows landing on the account (`to_account_id`); maturities/payouts are
+    `transfer` rows leaving it (`from_account_id`) — the same two subqueries
+    `account_balances` already sums, just not netted against each other or the
+    opening balance. Reads `active_transactions` (§6) and is household-scoped via
+    `household_members` (§16), same as `account_balances`. Amounts are `NUMERIC`
+    → `Decimal` (§9).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.account_id, a.name,"
+            "  coalesce((SELECT sum(amount) FROM active_transactions"
+            "            WHERE type = 'transfer' AND to_account_id = a.account_id), 0),"
+            "  coalesce((SELECT sum(amount) FROM active_transactions"
+            "            WHERE type = 'transfer' AND from_account_id = a.account_id), 0)"
+            " FROM accounts a"
+            " WHERE a.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            "   AND a.kind = 'locked' AND a.deleted_at IS NULL"
+            " ORDER BY a.account_id",
+            (user_id,),
+        )
+        return [
+            {"account_id": account_id, "name": name, "contributed": contributed, "paid_out": paid_out}
+            for account_id, name, contributed, paid_out in cur.fetchall()
+        ]

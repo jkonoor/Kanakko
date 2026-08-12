@@ -952,7 +952,7 @@ per task:
       account (a `CheckViolation` without it — a silent NULL `to_account_id` on a
       transfer is refused at the DB, not just wrong). `uv run pytest` → 364 passed
       (10 new).
-- [ ] Investment accounts: a per-account total of what a `locked` account has
+- [x] Investment accounts: a per-account total of what a `locked` account has
       received (contributions) and paid out (maturities) — split off the bullet
       above. **No market value, ever** (§18): this reports two sums from the
       ledger, not a balance and not what the pool is worth today — `locked`
@@ -961,6 +961,16 @@ per task:
       what you put in and what came back, both of which are facts"). Undecided
       and left to that task: where it surfaces — a bot command (`/account`
       already exists as a light command surface) or a dashboard section.
+      **Resolved:** the bot command, since `account_balances` itself has zero
+      consumers today — no account UI exists anywhere yet, so a dashboard section
+      would be new surface on top of new surface. `db.locked_account_totals`
+      sums `transfer` rows by endpoint per `locked` account (excluding
+      `opening_balance` — a starting position, not a ledger event) and
+      `/account <name>` — one bare word, previously an unused shape that fell
+      through to the usage hint — reports it case-insensitively: "SIP — put in
+      ₹7,000.00, got back ₹3,000.00." `HELP_TEXT` documents the new form. Three
+      guards verified red-without-fix: opening balance folded into the sum, and
+      an exact-case name match, each redden their test.
 - [ ] Editing a row in the dashboard: amount, date, note, category, account.
       §13 built the recent-transactions list for exactly this ("correcting older
       entries") and §16 already scopes it — only the member who entered a row may

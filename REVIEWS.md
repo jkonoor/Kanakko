@@ -12,6 +12,55 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `7dd5871` — teach the parse prompt the account vocabulary (Phase 10)
+
+**Status: ✅ DONE**
+
+**Scope.** Prompt-only change: `_ACCOUNT_GUIDANCE` in `kanakko/parse.py` is
+appended to the system prompt in `build_request`, gated on
+`accounts and len(accounts) > 1`. Maps spending vocabulary onto account *kinds*
+("swiped"/"on card" → credit, "UPI"/"paid cash" → spending, "SIP"/"FD"/"chit" →
+locked) so the model routes to the right pool. Plus one new test and a `TASKS.md`
+tick.
+
+**What I checked.**
+
+- `git show HEAD` — the whole diff is the guidance string, the two-line gate in
+  `build_request`, one test, and doc updates. No money path, no SQL, no
+  timezone code touched.
+- **Gate matches the schema exactly.** `build_request`'s
+  `if accounts and len(accounts) > 1` (`kanakko/parse.py:168`) is the same
+  condition `parse_schema` uses to add the `account` enum
+  (`kanakko/parse.py:117`). Guidance appears iff the enum does — a
+  single-account or no-account household's prompt is byte-for-byte unchanged,
+  as claimed.
+- **Spec fit (§18).** The three kind mappings match the §18 table (SIP/FD/chit →
+  locked, credit swipe → credit, everyday spend → spending). "UPI is a payment
+  rail, not a pool of money, so never invent or pick an account named after it"
+  is exactly §18's rule. Guidance teaches by kind, not literal account name, so
+  it composes with the per-request enum (§18: "the account list comes from the
+  accounts table, never a literal") — no second source of truth.
+- **Tests.** `uv run pytest tests/test_parse.py -q` → 25 passed;
+  `uv run pytest -q` → **344 passed** (matches the claimed count, 1 new).
+- **The guard is real.** Removed the gate (made the append unconditional) and
+  reran the new test:
+  `test_account_vocabulary_guidance_appears_only_with_a_real_account_choice`
+  → **1 failed** on the one-account assertion. Restored with
+  `git checkout`. The test also asserts the positive direction (guidance present
+  with two accounts), so it pins the gate in both directions — it fails for the
+  reason it exists.
+
+**Findings.** None blocking.
+
+- *(nit, not a finding)* "paid cash" maps to "the everyday spending account",
+  but §18's ATM example implies a household may hold a distinct `Cash` account
+  (also `spending` kind). The guidance can't disambiguate two spending accounts —
+  but the enum carries the literal names, this is guidance not a constraint, and
+  a wrong guess is one tap to fix on the confirm card (§18). Acceptable by
+  design; noting only so it isn't rediscovered as a surprise.
+
+---
+
 ## 2026-08-12 — `bb51f4a` — gate the account enum on a real choice, not just non-empty
 
 **Status: ✅ DONE**

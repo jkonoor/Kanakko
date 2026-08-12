@@ -12,6 +12,77 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `2d6c421` — recurring-rule schema, guard and household-scoped CRUD (Phase 10, split 1/2)
+
+**Status: ✅ DONE**
+
+Scope: `migrations/015_recurring_rules.sql` (the `recurring_rules` table +
+two indexes), `kanakko/db/recurring.py` (create/list/pause-resume/delete,
+household-scoped), the `kanakko/db/__init__.py` re-exports, three new tests in
+`tests/test_migrate.py`, and the split of the TASKS.md recurring-rules entry
+into 1/2 (this) and 2/2 (cron send + dashboard controls, still unchecked).
+
+### What I checked
+
+- **Full suite, live.** `uv run pytest -q` → **418 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation, unrelated). `uv run pytest
+  tests/test_migrate.py -q` → **20 passed**. Matches the commit message's
+  claim of 418 (3 new).
+- **Migration auto-discovery.** `migrate.py` globs `migrations/*.sql` in name
+  order, so `015` is picked up without a registry edit; the migration tests
+  run `migrate(conn)` end-to-end, so the DDL actually applies.
+- **Account-resolution guard is red-without-fix (verified, not trusted).** I
+  temporarily weakened the `create_recurring_rule` join to
+  `JOIN accounts a ON a.account_id = %s` (dropping the household match, the
+  `kind <> 'external'` and `deleted_at IS NULL` filters), reran
+  `test_recurring_rule_account_must_belong_to_the_caller_household` → **FAILED**,
+  then restored the file (`git status` clean, test green again). The guard
+  genuinely refuses a foreign-household account, the structural `external`
+  account, and a soft-deleted account — it mirrors `edit_transaction_field`'s
+  `EXISTS` shape (`kanakko/db/edits.py:115`).
+- **CHECK constraints do the work at the DB, not in Python.**
+  `test_recurring_rule_amount_and_day_of_month_are_checked` inserts `amount=-5`
+  and `day_of_month=32` via raw SQL (bypassing the module) and asserts
+  `psycopg.errors.CheckViolation` — so the guard is the column constraint
+  itself (`migrations/015_recurring_rules.sql:33-34`), not an app-side check
+  that a raw insert could sidestep.
+- **Household-scoping on pause/resume/delete/list.**
+  `test_recurring_rules_are_scoped_and_can_be_paused_and_deleted` confirms a
+  housemate (not the creator) can pause/delete, a stranger in another household
+  gets `None`/`[]` from every operation, and `list_recurring_rules` never leaks
+  a foreign household's rules. The scalar subquery
+  `(SELECT household_id FROM household_members WHERE user_id = %s)` is safe:
+  `household_members.user_id` is `UNIQUE` (`migrations/006_households.sql:24`),
+  so exactly one row — same pattern refunds/edits already use.
+- **Spec fit (§18, §16, §9).** Fields are exactly amount/category/account/
+  day-of-month/active. `amount` is `NUMERIC(12,2) CHECK (amount > 0)` and
+  carried as `Decimal` through the module — no `float` touches it. `category`
+  carries no CHECK, matching the convention that `categories.py` is the one
+  place category strings live (CLAUDE.md), same as `transactions.category`.
+  Delete is a real `DELETE` (a rule is a standing instruction, not a §6 ledger
+  row); nothing references a `rule_id` yet, so there is nothing to orphan.
+  Household-scoped, not creator-scoped — correct per §16's shared ledger, and
+  consistent with `refunds.py`.
+- **No caller yet** — this is split 1/2, the same shape `create_refund` landed
+  in 014. The task box is ticked for the schema + write path only; the cron
+  send and dashboard controls are a separate unchecked 2/2 entry, not a stub
+  hidden under a tick.
+
+### Findings
+
+None blocking.
+
+**Note for split 2/2 (not a defect in this commit):**
+`list_recurring_rules` (`kanakko/db/recurring.py:63`) joins `accounts`
+*without* a `deleted_at IS NULL` filter, so a rule whose account is
+soft-deleted *after* creation still lists (and stays `active`). That is correct
+for a pause/delete surface — you must see the rule to remove it. But the cron
+in 2/2 must not blindly debit a rule pointing at a soft-deleted account; it
+should skip or surface it. Flagging so the money path in the next task doesn't
+inherit this silently.
+
+---
+
 ## 2026-08-13 — `590c740` — remove `Refund` from `INCOME_CATEGORIES` (Phase 10, §11/§18)
 
 **Status: ✅ DONE**

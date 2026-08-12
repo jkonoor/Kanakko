@@ -12,6 +12,76 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `b14eeeb` — edit a dashboard row: amount, date, note, account (Phase 10)
+
+**Scope:** adds the four remaining editable fields (amount, date, note, account)
+to the recent-transactions list — category already had task 101's control. One
+generic `db.edit_transaction_field` behind a closed `EDITABLE_TRANSACTION_FIELDS`
+whitelist, one `POST /app/edit` route, a hidden per-row edit panel, migration 013
+widening the audit `action` CHECK to admit `'edit'`, and two file splits
+(`db/edits.py` off `reports.py`, `webapp/recent.py` off `render.py`).
+
+**Status: ✅ DONE** — no blocking findings. The money path stays `Decimal`, every
+mutation is user-scoped and audited, both new guards fail red without the fix, and
+the ticked task is real work with tests.
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **387 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the commit's "15 new tests; 387 passed".
+- **Cross-household account guard, red-without-fix:** temporarily replaced the
+  `EXISTS` account-membership clause in `edit_transaction_field` with an empty
+  string and reran the edit tests →
+  `test_edit_route_rejects_an_account_id_outside_the_caller_household` **FAILED**
+  (a forged `account_id` naming another household's account relocated the row);
+  the transfer-refusal test stayed green because it is guarded separately by the
+  `type_ == "transfer"` short-circuit. Restored the file. The guard defends a real
+  behaviour (cross-household relocation), not a surface string.
+- **Migration 013 audit guard:** confirmed `003_transaction_events.sql` originally
+  had `CHECK (action IN ('confirm','undo','delete','recategorise'))` — no `'edit'`
+  — and 013 drops/re-adds it with `'edit'`. So
+  `test_edit_route_writes_an_audit_row_with_before_and_after`, which writes
+  `action='edit'` through `_record_event`, genuinely depends on 013; without it
+  the INSERT would raise `CheckViolation`. The migration's constraint-name
+  assumption (`transaction_events_action_check`) is validated by the fact that
+  `migrate()` runs clean in every test (a wrong name would fail the `DROP`).
+- **Money path:** amount edits parse through `money.parse_amount` →
+  `Decimal`, which rejects `float`/`bool`, non-positive, and `> NUMERIC(12,2)`;
+  `test_edit_route_rejects_a_non_positive_amount` covers the reject path. The
+  number `<input>`'s `value="{amount}"` renders the plain `Decimal` string. No
+  `float` enters the amount path.
+- **View discipline:** both reads in `edit_transaction_field` and
+  `set_transaction_category` go through `active_transactions` and carry a
+  `household_id` predicate; the `UPDATE` targets `transactions` but only via a
+  subquery that re-selects from the view, so a soft-deleted or foreign id matches
+  nothing and returns `None`. `recent_transactions` still reads the view; its new
+  column 9 is `t.account_id`.
+- **Timezone:** reports bucket on `occurred_on` (a `DATE`), so editing the date
+  re-buckets correctly with no UTC/IST hazard.
+- **Auth / scope:** `/app/edit` calls `authenticated_user(..., max_age=24h)` like
+  the other mutating routes, and the row is scoped to the signed user;
+  `test_edit_route_cannot_change_another_users_row` (404, unchanged) and
+  `test_edit_route_rejects_an_unknown_field` (400, column allowlist) both pass.
+- **Task honesty:** `TASKS.md` ticks the dashboard-edit task with a truthful
+  resolution note and *adds a new unticked task* for the deferred `app.py`
+  (497-line) split, with the reason (`test_webapp.py` monkeypatches
+  `kanakko.app.connect`). Not a falsely-ticked box.
+
+### Findings
+
+None blocking. Minor notes, no action required:
+
+- `EDITABLE_TRANSACTION_FIELDS` is a `frozenset` fed into an f-string only after
+  membership is confirmed (route rejects unknown `field` with 400 *and*
+  `edit_transaction_field` raises `ValueError` on a non-member) — the column name
+  can never carry attacker input. Correct.
+- Non-`account_id` `None`-return paths commit an empty `conn.transaction()`
+  (nothing written, no audit row). Harmless.
+- A user with no household yet renders empty account `<select>`s
+  (`accounts=()`); such a user has no transactions to edit, so it never surfaces.
+
+---
+
 ## 2026-08-12 — `a833485` — query lookup runs before bad-kind heuristic in `/account` routing (Phase 10)
 
 **Scope:** resolves **F4** against `aaaeb21`. `handle_account` now looks up

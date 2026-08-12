@@ -12,6 +12,80 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `ed36051` — refund Mini App dashboard action (Phase 10, split 3/3)
+
+**Scope:** a per-row "Refund" toggle on `expense` rows in the Mini App reveals a
+hidden panel (`recent._refund_panel`, amount pre-filled, own submit) that POSTs
+to a new `POST /app/refund` route. The route lives in its own module
+(`kanakko/webapp/refund.py`, `APIRouter` included in `app.py`) and calls the same
+`db.refunds.create_refund` the bot's `handle_refund_choice` does — 24h `max_age`,
+household-scoped (§16), trigger `RaiseException` → 409, gone/foreign/non-expense →
+404, bad body → 400, success 204. CSS + click dispatch added to `shell.py`. New
+suite in `tests/test_webapp.py`.
+
+**Status: ✅ DONE** — no blocking findings. Money stays `Decimal` end to end,
+the route reuses the shared `create_refund` (no second write path), it is
+household-scoped as §16 requires, the over-limit guard genuinely fails when
+defeated, and the line-count guideline is respected (sibling module, not a fifth
+route in the 300-line `routes.py`). One low-severity UX note below, not blocking.
+
+### What I checked (commands run, and what they returned)
+
+- **`uv run pytest -q` → `415 passed`** (17.06s). Full suite green, not just the
+  new file. **`uv run pytest tests/test_webapp.py -q` → `80 passed`.**
+- **Defeated the over-limit guard.** Edited `refund.py` to catch
+  `psycopg.errors.DataError` instead of `RaiseException`, ran
+  `test_refund_route_over_limit_is_409_and_writes_nothing` → **FAILED** (the
+  trigger's `RaiseException` propagated out as an unhandled 500). Restored the
+  file via `Edit` and confirmed `git diff` is empty. The guard fails for the
+  reason it exists.
+- **Money path.** `parse_amount` (money.py) rejects `float`, `bool`, non-finite,
+  `<= 0`, and over-`NUMERIC(12,2)` before the value reaches `create_refund`;
+  amount stays `Decimal` through the insert and the `refund.created` log
+  (`test_refund_route_logs_the_money_mutation` asserts `Decimal("200.00")`). No
+  `float` anywhere on the path.
+- **Reads/scoping.** `create_refund` (db/refunds.py) reads
+  `active_transactions`, scopes to `household_members WHERE user_id = %s`, and
+  only accepts a live `expense`. `test_refund_route_is_household_scoped…` proves
+  a second member can refund the owner's expense (204). `permitted_user` resolves
+  without creating (403 for an unadmitted caller — verified by the amended
+  `test_mini_app_mutations_refuse_an_unadmitted_user`, now covering `/app/refund`).
+- **`initData`.** Route passes `max_age=timedelta(hours=24)` like the other
+  mutating routes; `test_refund_route_rejects_a_stale_init_data` → 401. Bad body
+  (missing `id`/`amount`, unparsable amount) → 400 via the shared
+  `(ValueError, TypeError, KeyError)` catch — `json.JSONDecodeError` is a
+  `ValueError` subclass, so a non-JSON body is also 400.
+- **Commit semantics.** Route follows the sibling pattern exactly: `with
+  connect() as conn:` (autocommit off) commits on clean exit; the `_Reuse` test
+  stand-in shares one connection so writes are visible before rollback. Same
+  proven shape as `/app/delete`, `/app/edit`, `/app/category`.
+- **Render gating.** `test_recent_list_no_refund_control_for_income_or_transfer`
+  confirms the toggle/panel appear only for `type_ == "expense"`; income,
+  refund, and transfer rows get nothing.
+
+### Findings
+
+**Low — 1. The refund toggle is offered on already-fully-refunded expenses and
+pre-fills the full original amount; the resulting failed tap gives the user no
+feedback.** `recent.py:190` renders the toggle for every `expense` row (not just
+those with remaining > 0), and `_refund_panel` (`recent.py:117`) defaults the
+input to the row's full `amount`, not its remaining balance. Scenario: a ₹500
+expense already refunded ₹200; the user opens the panel (pre-filled ₹500), taps
+Refund → 200+500 > 500 → trigger `RaiseException` → 409 → the client's
+`.then(r => { if (r.ok) load(); })` (`shell.py:202`) does nothing, so the tap
+silently accomplishes nothing with no explanation. **No data is written or
+corrupted** (verified: `test_refund_route_over_limit_is_409_and_writes_nothing`
+asserts zero rows), and this silent-on-error handling is identical to the
+existing `/app/delete`, `/app/edit`, `/app/category` clients — so it is a
+pre-existing UX pattern, not a regression. It is worth noting because the bot
+side is stronger here: `refund_candidates` filters fully-refunded expenses out of
+the chooser (`HAVING remaining > 0`) and `handle_refund_choice` shows a
+`REFUND_OVER_LIMIT`/`REFUND_GONE` toast. *Suggested (non-blocking):* surface a
+brief message on a non-OK response, and/or default the input to the remaining
+balance. Not required for correctness.
+
+---
+
 ## 2026-08-13 — `75c0d3e` — refund bot-facing UX: chooser and write (Phase 10, split 2/3)
 
 **Scope:** `refund <amount>` lists live, not-fully-refunded expenses

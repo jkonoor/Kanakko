@@ -12,6 +12,68 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `87be3ac` — derive account balances from the ledger (Phase 10)
+
+**Scope:** New `db.account_balances(conn, user_id)` computes
+`opening_balance + inflows − outflows` per account in the caller's household from
+one query — no stored total (§18). Income/expense sum by `account_id`, transfers
+by `to_account_id`/`from_account_id`; a `credit` account's asset balance is negated
+so it reads as what is *owed*. Reads `active_transactions` (§6), household-scoped
+(§16). Adds `kanakko/db/accounts.py`, the `__init__` export, and
+`tests/test_accounts.py` (2 tests). No source path consumes it yet — this is the
+query, the write/UI wiring lands later.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches only `kanakko/db/accounts.py` (new, 65),
+  `kanakko/db/__init__.py` (export), `tests/test_accounts.py` (new, 112),
+  `TASKS.md` (tick). No existing behaviour changed.
+- `uv run pytest tests/test_accounts.py -q` → **2 passed**.
+- `uv run pytest -q` → **309 passed**, 1 warning.
+- **Verified the credit-negation guard reddens without the fix.** Replaced the
+  `CASE WHEN a.kind = 'credit' THEN -1 ELSE 1 END` factor with `1`, re-ran
+  `tests/test_accounts.py` → `test_balances_derive_...credit_sign_convention`
+  **FAILED**, the other passed. Restored the file; `git diff` clean. So the check
+  genuinely fails for the reason it exists (Card would read −4000 held instead of
+  +4000 owed), not on a surface string.
+- Read `DECISIONS.md` §18 (711–809): balance is derived never stored; a `credit`
+  account "reads as what is owed"; a transfer is "excluded from every spending and
+  income total". The query matches all three — transfers move only the two endpoint
+  columns, never a spending/income sum, and net to zero across the household.
+- Read `migrations/009–011`: `opening_balance NUMERIC(12,2)` signed (a credit debt
+  is a negative opening), `account_id` on every row (010 backfill), transfer
+  endpoints + the `type='transfer' ⇔ both endpoints set` CHECK (011). The query's
+  four sub-sums line up with that schema.
+- **Household scoping is safe against the scalar-subquery footgun.** The predicate
+  `a.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)`
+  would raise `more than one row` if a user could belong to two households, but
+  `migrations/006` puts a `UNIQUE` on `household_members.user_id` (noted in 006/007
+  and relied on by `households.py`), so the subquery is always ≤1 row. An unknown
+  user → NULL → empty result, no error. Matches the existing pattern in
+  `db/households.py`.
+- Confirmed `Decimal`, never float: `opening_balance` and every `sum(amount)` are
+  `NUMERIC`; `integer * numeric` and `coalesce(numeric, 0)` stay `numeric`, so
+  psycopg returns `Decimal`. The test asserts `isinstance(..., Decimal)` on every
+  balance.
+
+### Findings
+
+None blocking. Two notes, neither a defect in this commit:
+
+- The per-account sub-sums filter only on `account_id`/`to_account_id`/
+  `from_account_id`, not household — correct today because an `account_id` belongs
+  to exactly one household and the outer predicate confines `a` to the caller's.
+  Nothing to change; flagging that the invariant it leans on is "an account is in
+  one household," which the schema (FK + no cross-household transfer constraint)
+  does not itself enforce on transfer endpoints. When the transfer write path
+  lands, its validation must keep both endpoints in the same household, or a
+  cross-household transfer would silently move one side's balance.
+- The two tests cover `spending` and `credit`; `locked` and `external` kinds ride
+  the same `ELSE 1` branch as `spending`, so they are exercised by construction but
+  not named. Not a gap worth a test — the sign logic is one CASE, already covered.
+
 ## 2026-08-12 — `b4ecffb` — migration 011: the `transfer` type, excluded from both totals (Phase 10)
 
 **Scope:** Adds §18's fourth transaction type `transfer`: widens the `type` CHECK

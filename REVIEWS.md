@@ -12,6 +12,87 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `75c0d3e` — refund bot-facing UX: chooser and write (Phase 10, split 2/3)
+
+**Scope:** `refund <amount>` lists live, not-fully-refunded expenses
+(`db.refunds.refund_candidates`), one tap (`handle_refund_choice`) calls
+`create_refund`. New `_is_refund` predicate wired into `app.py`'s `is_parse`
+exclusion and callback dispatch. Over-limit taps caught (migration 014's
+trigger `RaiseException`) rather than 500. New suite `tests/test_refund_ux.py`,
+plus webhook-routing and help-discoverability coverage.
+
+**Status: ✅ DONE** — no blocking findings. Money stays `Decimal`, both sides of
+the candidate join read `active_transactions`, the over-limit guard genuinely
+fails when defeated, and the routing is unmetered as intended. Two low-severity
+UX notes below, neither blocking.
+
+### What I checked (commands run, and what they returned)
+
+- **`uv run pytest -q` → `406 passed`** (17.03s). The full suite is green, not
+  just the new file.
+- **`uv run pytest tests/test_refund_ux.py tests/test_webhook.py::…refund… tests/test_help.py -q` → `18 passed`.**
+- **Defeated the over-limit guard.** Edited `handle_refund_choice` to catch
+  `psycopg.errors.NoDataFound` instead of `RaiseException`, then ran
+  `test_handle_refund_choice_over_limit_is_caught_not_500` → **FAILED**, with the
+  trigger's `refund total 600.00 exceeds transaction 1 (amount 500.00)`
+  propagating out. Restored the file (`git checkout`). The guard fails for the
+  reason it exists, and the same test also asserts the connection is still usable
+  afterward (`create_refund` takes its own `conn.transaction()` savepoint, so the
+  outer transaction is not poisoned).
+- **Money path.** `refund_candidates` computes `remaining` as
+  `t.amount - coalesce(sum(r.amount),0)` in SQL over `NUMERIC(12,2)`; the handler
+  passes `Decimal` amounts (`parse_amount`) end to end; no `float` anywhere on
+  the amount path.
+- **`active_transactions` (§6).** Read `refund_candidates` — both `t` (expense)
+  and `r` (refund) sides join `active_transactions`, never base `transactions`,
+  so a soft-deleted refund can't understate `remaining` and a soft-deleted
+  expense can't reappear. `create_refund`'s scope SELECT also reads the view.
+  (`test_read_paths.py`'s bypass guard covers this and passes.)
+- **Timezone (§10).** `handle_refund_choice` dates the refund
+  `date.fromisoformat(today())`, and `today()` is `Asia/Kolkata`, not UTC.
+- **Household scope (§16) / forged buttons.** `create_refund` re-scopes to the
+  *presser's* household keyed by `user_id`, not the button — a forged `txn_id`
+  from another household returns `None` (verified by
+  `test_handle_refund_choice_reauthorizes_a_forged_household` and
+  `…_gone_expense`). The button carries no trust; `txn_id`/`amount` are re-parsed
+  and re-validated.
+- **Metering (§13).** `_is_refund` is in `app.py`'s `is_parse` exclusion (no LLM
+  call, so it must not count against the daily cap) and routed before
+  `handle_text`. `test_webhook_routes_refund_to_handle_refund_and_never_meters_it`
+  confirms it routes to the chooser (not the parser) and the claim is unmetered.
+- **Categories (§11).** No category string literals introduced; the test fixture
+  sources from `EXPENSE_CATEGORIES`.
+- **Spec fit (§18).** "`refund 500` lists recent candidates — amount-matched
+  first — and one tap picks the row" — matches. The `ORDER BY (t.amount = %s)
+  DESC, t.created_at DESC` puts the amount match first. TASKS.md honestly records
+  that the spec's "reuse `/remove`'s chooser keyboard" is stale (that chooser is a
+  static Keep/Delete, not an N-candidate list) rather than editing the spec.
+- **TASKS.md tick** is real, not a stub: the query, both handlers, routing, and
+  tests all exist and are exercised.
+
+### Findings (both low severity, non-blocking)
+
+1. **`kanakko/handlers.py:315` — the candidate button shows the original amount,
+   not what's left.** `_refund_keyboard` labels each row
+   `format_amount(c['amount'])`, but `refund_candidates` returns `remaining` and
+   lists partially-refunded expenses. A ₹500 expense with ₹200 already refunded
+   shows "₹500.00" in the list; typing "refund 500" and tapping it produces
+   `REFUND_OVER_LIMIT` — correct and safely handled, but the label misled the
+   user about what was tappable. Not a correctness bug (money is right, the over
+   limit case is caught); a UX polish item. Suggestion: show `remaining` when it
+   differs from `amount` (e.g. `… · ₹200 left`).
+
+2. **`kanakko/handlers.py:315` — a NULL-category expense renders the literal
+   string "None" in the button.** `category` is nullable (`migrations/001…`,
+   `TEXT`), and `refund_candidates` lists expenses regardless of category; the
+   f-string interpolates `c['category']` directly. Cosmetic only — downstream
+   `create_refund` copies the (possibly NULL) category consistently and reports
+   group by it fine. Suggestion: `c['category'] or 'Uncategorised'` in the label.
+
+Neither blocks the tick. Change is sound; recommend proceeding to split 3/3.
+
+---
+
 ## 2026-08-12 — `3bfbf58` — serialize the refund-sum guard against concurrent refunds
 
 **Scope:** the follow-up fix to finding 1 of the `256ba0b` review. Adds

@@ -12,6 +12,67 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `8e5afbf` split handlers.py: `/recurring` → `kanakko/commands/recurring.py` (Phase 10, slice 5/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slices 1–4. Moves the `/recurring` surface —
+`RECURRING_*` constants, `_is_recurring`, `_match_category_and_account`,
+`handle_recurring` — out of `handlers.py` into a new
+`kanakko/commands/recurring.py`, rewires `app.py`'s imports, drops the now-stale
+`create_recurring_rule`/`household_accounts`/`EXPENSE_CATEGORIES` imports from
+`handlers.py`, retargets `tests/test_recurring_command.py`, and fixes a stale
+docstring reference in `db/recurring.py`. The shared spine
+(`TextMessage`/`_command_arg`) stays in `handlers.py` and is imported by the new
+module. No money, timezone, soft-delete, `active_transactions`, or SQL path is
+touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the block
+  deleted from `handlers.py` (both guards, `_match_category_and_account`,
+  `handle_recurring`, all six `RECURRING_*` strings) is character-identical to
+  the block added in `kanakko/commands/recurring.py`. No logic, validation, or
+  `EXPENSE_CATEGORIES` sourcing changed — the category side is still
+  `EXPENSE_CATEGORIES` from `kanakko/categories.py`, accounts still come from
+  `household_accounts`, never a literal.
+- **No stale references left in `handlers.py`.** `grep -nE
+  'EXPENSE_CATEGORIES|create_recurring_rule|household_accounts|_is_recurring|handle_recurring|RECURRING_'
+  kanakko/handlers.py` → no output. The three dropped imports
+  (`create_recurring_rule`, `household_accounts`, `EXPENSE_CATEGORIES`) are gone
+  from `handlers.py` and nothing there still needs them; `ALL_CATEGORIES`/
+  `CATEGORY_PREFIX` correctly stay (still used by `handle_category`).
+- **Routing intact.** `app.py:30` imports `_is_recurring, handle_recurring` from
+  `kanakko.commands.recurring`; dispatch at `app.py:194,227-228` is unchanged by
+  the move. `test_webhook.py`'s routing test patches `app_module` directly, so
+  it is unaffected — confirmed still green in the full run.
+- **Only importers of the moved symbols are the new module and its test.**
+  `grep` across `kanakko`/`tests`: `recurring.py` imports `TextMessage,
+  _command_arg` from `handlers`; the test imports `TextMessage` from `handlers`
+  and everything else from `recurring_command`. Nothing else reaches into
+  `handlers` for the moved names.
+- **`uv run pytest -q` → 457 passed, 1 warning** (17.5s). Matches the commit
+  claim exactly.
+- **`uv run ruff check` on all three changed modules → All checks passed!** —
+  confirms no unused import was left behind after the drop.
+- **Red-without-fix verified independently.** Copied the test, repointed
+  `_stub_send` to patch `handlers.send_message` (the pre-move module) instead of
+  `recurring_command.send_message`, and reran: all 10 tests failed with
+  `RuntimeError: TELEGRAM_BOT_TOKEN is not set` (`kanakko/tg.py:31`) — the stub
+  never intercepted, so the real send path ran. This proves the retargeted
+  patch actually binds to the module `handle_recurring` now calls, not a stale
+  no-op. Same failure class the commit reported.
+
+### Findings
+
+None. This is a mechanical, behaviour-preserving move; the test binding was
+verified to still exercise the moved code, and no money/timezone/soft-delete
+surface is in scope. `handlers.py` is now 864 lines — still over the 300-line
+convention, but that is the explicit purpose of this incremental split
+(slice 6/6, `/refund`, remains), not a regression from this commit.
+
+---
+
 ## 2026-08-13 — `7ca3917` split handlers.py: `/invite` + `/invite_signup` → `kanakko/commands/invite.py` (Phase 10, slice 4/6)
 
 **Status: ✅ DONE**

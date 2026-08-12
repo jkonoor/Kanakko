@@ -62,7 +62,26 @@ def confirm_card(
     exactly the pre-accounts card: no extra line, no extra tap. `accounts` is
     ordered default-first (`db.list_accounts`), so a null `txn.account` (§18:
     "null means the default account") displays as `accounts[0]`.
+
+    §18: a `transfer` has no category — it is neither spending nor income — so
+    it renders its two account names instead ("Bank → Card") and skips the
+    category line, buttons and account picker entirely; Cancel-and-retype is
+    the correction path for a wrong transfer, not a second chooser.
     """
+    if txn.type == "transfer":
+        lines = [
+            f"Transfer — {format_amount(txn.amount)}",
+            f"{txn.from_account} → {txn.to_account}",
+            f"Date: {txn.date.isoformat()}",
+            f"Note: {txn.note}",
+        ]
+        keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Confirm", callback_data=CONFIRM),
+                InlineKeyboardButton("❌ Cancel", callback_data=CANCEL),
+            ]]
+        )
+        return "\n".join(lines), keyboard
     assert txn.category is not None, "null category must route to category_prompt (§3)"
     lines = [
         f"{txn.type.capitalize()} — {format_amount(txn.amount)}",
@@ -96,7 +115,18 @@ def settled_card(row: dict) -> str:
     `format_amount` so a settled card can no more show a float than a live one (§9).
     Deliberately returns no keyboard: the entry is saved, so there is nothing left
     to Confirm or Cancel, and a stale Cancel on this card must find no live button.
+    A `transfer` row (§18) carries `from_account`/`to_account`, not a category, so
+    it renders its two account names instead of `Category: None`.
     """
+    if row["type"] == "transfer":
+        return "\n".join(
+            [
+                f"✅ Saved — Transfer {format_amount(row['amount'])}",
+                f"{row['from_account']} → {row['to_account']}",
+                f"Date: {row['occurred_on'].isoformat()}",
+                f"Note: {row['note']}",
+            ]
+        )
     return "\n".join(
         [
             f"✅ Saved — {row['type'].capitalize()} {format_amount(row['amount'])}",

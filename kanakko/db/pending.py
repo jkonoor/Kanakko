@@ -63,6 +63,12 @@ def confirm_pending(
     onboarding) yields NULL, which `accounts.account_id` still permits until the
     NOT NULL write-wiring task lands.
 
+    A `transfer` (§18) takes the other branch: `account_id`/`category` are NULL
+    and `from_account_id`/`to_account_id` resolve `txn.from_account`/`to_account`
+    by name instead — mirroring migration 011's CHECK, so a swipe (an ordinary
+    expense on the `credit` account) and its bill payment (a transfer into it)
+    never both count as spending.
+
     The read → insert → delete → audit run in one transaction so a crash can never
     store a transaction while leaving its pending row live (a later double
     confirm), nor clear the pending row with nothing stored, nor write the ledger
@@ -87,33 +93,54 @@ def confirm_pending(
         pending_id, parsed = row
         txn = Transaction.model_validate(parsed)
         cur.execute(
-            "SELECT hm.household_id,"
-            "  coalesce("
-            "    (SELECT account_id FROM accounts"
-            "      WHERE household_id = hm.household_id AND name = %s AND deleted_at IS NULL),"
-            "    (SELECT account_id FROM accounts a"
-            "      WHERE a.household_id = hm.household_id AND a.is_default AND a.deleted_at IS NULL)"
-            "  )"
-            " FROM household_members hm WHERE hm.user_id = %s",
-            (txn.account, user_id),
+            "SELECT household_id FROM household_members WHERE user_id = %s", (user_id,)
         )
         home = cur.fetchone()
-        household_id, account_id = home if home is not None else (None, None)
+        household_id = home[0] if home is not None else None
+        if txn.type == "transfer":
+            # §18: a transfer names its two ends and no single account_id/category —
+            # migration 011's CHECK enforces the same shape on the row.
+            account_id = category = None
+            cur.execute(
+                "SELECT"
+                "  (SELECT account_id FROM accounts"
+                "    WHERE household_id = %s AND name = %s AND deleted_at IS NULL),"
+                "  (SELECT account_id FROM accounts"
+                "    WHERE household_id = %s AND name = %s AND deleted_at IS NULL)",
+                (household_id, txn.from_account, household_id, txn.to_account),
+            )
+            from_account_id, to_account_id = cur.fetchone()
+        else:
+            cur.execute(
+                "SELECT coalesce("
+                "  (SELECT account_id FROM accounts"
+                "    WHERE household_id = %s AND name = %s AND deleted_at IS NULL),"
+                "  (SELECT account_id FROM accounts a"
+                "    WHERE a.household_id = %s AND a.is_default AND a.deleted_at IS NULL)"
+                ")",
+                (household_id, txn.account, household_id),
+            )
+            (account_id,) = cur.fetchone()
+            from_account_id = to_account_id = None
+            category = txn.category
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, household_id, account_id, amount, type, category, note, occurred_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
-            (user_id, household_id, account_id,
-             txn.amount, txn.type, txn.category, txn.note, txn.date),
+            " (user_id, household_id, account_id, amount, type, category, note, occurred_on,"
+            "  from_account_id, to_account_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            (user_id, household_id, account_id, txn.amount, txn.type, category, txn.note, txn.date,
+             from_account_id, to_account_id),
         )
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))
         stored = {
             "amount": txn.amount,
             "type": txn.type,
-            "category": txn.category,
+            "category": category,
             "note": txn.note,
             "occurred_on": txn.date,
+            "from_account": txn.from_account,
+            "to_account": txn.to_account,
         }
         _record_event(cur, txn_id=txn_id, user_id=user_id, action="confirm",
                       before=None, after=stored, source=source, update_id=update_id)

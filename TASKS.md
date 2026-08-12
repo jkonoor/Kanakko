@@ -886,11 +886,39 @@ per task:
 
 ### The things accounts make possible
 
-- [ ] Credit card semantics end to end: a swipe is an expense on the `credit`
+- [x] Credit card semantics end to end: a swipe is an expense on the `credit`
       account and increases what is owed; paying the bill is a transfer from a
       `spending` account and **is not spending a second time**. The guard is the
       double-count itself — swipe ₹2,000, pay the bill, and the month's spending
       must read ₹2,000, not ₹4,000.
+      Done: the swipe half already worked (an ordinary expense on the `credit`
+      account, existing account machinery) — the gap was that nothing could ever
+      *produce* a transfer, so a bill payment had no way to avoid being parsed as
+      a second expense. `parse_schema`'s `type` enum gains `"transfer"` and two
+      new `from_account`/`to_account` fields, all three under the same
+      `len(accounts) > 1` gate the `account` enum already uses (§18: a transfer
+      needs two accounts to move money between, so it's meaningless without a
+      real choice) — a single-account household's schema is unchanged.
+      `_ACCOUNT_GUIDANCE` teaches "paid the credit card bill"/"paid off my card"
+      as `type: transfer`, `spending → credit`, `category: null`. `Transaction`
+      gains `from_account`/`to_account` (validated against the household's own
+      accounts, same closed-set validator as `account`) and a model-level guard
+      mirroring migration 011's CHECK: a transfer names both ends and no other
+      type names either, and the two ends must differ. `confirm_pending`
+      (`kanakko/db/pending.py`) gains the write-side branch: a transfer resolves
+      `from_account_id`/`to_account_id` by name and leaves `account_id`/`category`
+      NULL, instead of falling back to the household default. `confirm_card` and
+      `settled_card` (`kanakko/confirm.py`) render a transfer as "Bank → Card"
+      with no category line, no category buttons, no account picker — just
+      Confirm/Cancel; `handle_text`'s null-category gate excludes `type ==
+      "transfer"` so a bill payment never hits the category picker (which has no
+      `"transfer"` entry to build buttons from). Six guards verified
+      red-without-fix, green-with-fix: the schema gate, the transfer-shape model
+      validator (missing end, self-transfer, a non-transfer carrying an
+      endpoint), `confirm_pending`'s transfer branch (removing it trips 011's
+      CHECK), the named double-count guard itself (swipe ₹2,000 + pay the bill →
+      `month_summary` reads exactly ₹2,000), and `handle_text`'s picker exclusion.
+      `uv run pytest` → 354 passed (10 new).
 - [ ] Investment accounts: auto-create a `locked` on first mention ("put 5000 in SIP" →
       "new savings account 'SIP'?", one tap), contributions and maturities as transfers,
       and a per-account total of what went in and what came back. **No market value,

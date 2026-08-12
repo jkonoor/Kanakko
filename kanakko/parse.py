@@ -28,7 +28,14 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from kanakko.categories import ALL_CATEGORIES, schema_enum
 from kanakko.money import parse_amount
@@ -71,6 +78,10 @@ _ACCOUNT_GUIDANCE = (
     "— UPI is a payment rail, not a pool of money, so never invent or pick an "
     "account named after it. \"put 5000 in SIP\", \"FD 1 lakh\", \"paid chit\" "
     "mean the locked/savings account."
+    " Paying a credit card bill is not spending a second time — the swipe "
+    "already was. \"paid the credit card bill 2000\", \"paid off my card\" is "
+    "`type` \"transfer\", `from_account` the everyday spending account, "
+    "`to_account` the credit card account, `category` null."
 )
 
 
@@ -83,6 +94,13 @@ def parse_schema(accounts: list[str] | None = None) -> dict:
     that hasn't onboarded a second account) leaves the schema exactly as it was
     before accounts existed: no `account` property, no behaviour change, no
     added prompt cost.
+
+    A `transfer` `type` and its `from_account`/`to_account` endpoints appear
+    under the same gate: a transfer needs two accounts to move money between, so
+    it is meaningless without a real choice (§18). Credit-card semantics is the
+    first user of this — "paid the credit card bill" is a transfer, not a second
+    expense — so a swipe and its bill payment never double-count the month's
+    spending.
     """
     schema = {
         "type": "object",
@@ -123,10 +141,14 @@ def parse_schema(accounts: list[str] | None = None) -> dict:
         #
         # §18: nullable like category — null means "the default account", so the
         # model is never forced to guess when the message names no account.
-        schema["properties"]["account"] = {
-            "anyOf": [{"type": "string", "enum": list(accounts)}, {"type": "null"}]
-        }
-        schema["required"].append("account")
+        def account_or_null():
+            return {"anyOf": [{"type": "string", "enum": list(accounts)}, {"type": "null"}]}
+
+        schema["properties"]["account"] = account_or_null()
+        schema["properties"]["type"]["enum"].append("transfer")
+        schema["properties"]["from_account"] = account_or_null()
+        schema["properties"]["to_account"] = account_or_null()
+        schema["required"] += ["account", "from_account", "to_account"]
     return schema
 
 
@@ -198,7 +220,7 @@ class Transaction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["expense", "income"]
+    type: Literal["expense", "income", "transfer"]
     amount: Decimal
     category: str | None  # §3: null when the model cannot tell → show buttons
     date: date
@@ -208,6 +230,11 @@ class Transaction(BaseModel):
     # is per household, not a module-level constant, so it can only be checked
     # against the caller's own accounts, passed in as validation context.
     account: str | None = None
+    # §18: a transfer's two endpoints — set exactly when `type` is "transfer",
+    # the same structural invariant migration 011's CHECK enforces on the row.
+    # Checked against the caller's own accounts the same way `account` is.
+    from_account: str | None = None
+    to_account: str | None = None
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -229,18 +256,35 @@ class Transaction(BaseModel):
             raise ValueError(f"unknown category: {value!r}")
         return value
 
-    @field_validator("account")
+    @field_validator("account", "from_account", "to_account")
     @classmethod
     def _account_is_known(cls, value: str | None, info: ValidationInfo) -> str | None:
         # §18: the model must not invent an account any more than a category
         # (§11) — but the closed set is per household, so it travels as
         # validation context rather than a class-level constant. No context (or
         # no accounts in it) skips the check: today's tests and callers that
-        # never pass `accounts` keep working unchanged.
+        # never pass `accounts` keep working unchanged. One validator for all
+        # three account-shaped fields — they share the same closed set.
         accounts = (info.context or {}).get("accounts") if info.context else None
         if accounts and value is not None and value not in accounts:
             raise ValueError(f"unknown account: {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _transfer_names_two_distinct_ends(self) -> "Transaction":
+        # Mirrors migration 011's structural CHECK: a transfer names both ends,
+        # every other type names neither — so a bad parse fails validation (and
+        # retries) here rather than reaching confirm_pending's insert as an
+        # IntegrityError. Two different ends: a self-transfer moves no money and
+        # is never what "paid the credit card bill" means.
+        if self.type == "transfer":
+            if self.from_account is None or self.to_account is None:
+                raise ValueError("a transfer needs both from_account and to_account")
+            if self.from_account == self.to_account:
+                raise ValueError("a transfer needs two different accounts")
+        elif self.from_account is not None or self.to_account is not None:
+            raise ValueError("from_account/to_account only apply to a transfer")
+        return self
 
 
 def call(message: str, accounts: list[str] | None = None) -> dict:

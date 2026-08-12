@@ -18,6 +18,7 @@ from kanakko.db import (
     create_household_of_one,
     day_summary,
     get_or_create_user,
+    month_summary,
     recent_transactions,
     save_pending,
     set_account_opening_balance,
@@ -195,6 +196,104 @@ def test_confirm_uses_the_chosen_account_not_just_the_default(conn):
         )
         (name,) = cur.fetchone()
     assert name == "Card"  # not "Bank", the default
+    conn.rollback()
+
+
+def test_confirm_writes_a_transfer_with_two_endpoints_and_no_account(conn):
+    """A confirmed transfer names both ends and neither `account_id` nor `category` (§18).
+
+    Mirrors migration 011's CHECK from the write side: `confirm_pending`'s
+    transfer branch resolves `from_account`/`to_account` by name within the
+    household instead of falling back to a default, and leaves `account_id`/
+    `category` NULL — the shape `test_transfer_is_excluded_from_spending_and_
+    income_totals` (test_migrate.py) already proves is invisible to every total.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (78) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)  # mints "Bank"
+    set_account_opening_balance(conn, uid, "credit", Decimal("0"))  # mints "Card"
+
+    txn = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "2000.00",
+            "category": None,
+            "date": "2026-08-05",
+            "note": "paid the card bill",
+            "from_account": "Bank",
+            "to_account": "Card",
+        }
+    )
+    save_pending(conn, uid, 780, txn)
+    row = confirm_pending(conn, uid, 780, source="webhook", update_id=None)
+    assert row["from_account"] == "Bank"
+    assert row["to_account"] == "Card"
+    assert row["category"] is None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.account_id, t.category, fa.name, ta.name FROM transactions t"
+            " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
+            " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"
+            " WHERE t.txn_id = %s",
+            (row["txn_id"],),
+        )
+        account_id, category, from_name, to_name = cur.fetchone()
+    assert account_id is None
+    assert category is None
+    assert (from_name, to_name) == ("Bank", "Card")
+    conn.rollback()
+
+
+def test_credit_card_swipe_then_bill_payment_does_not_double_count_spending(conn):
+    """The task's own guard: a swipe and its bill payment must read as ₹2,000, not ₹4,000 (§18).
+
+    A swipe is an ordinary expense on the `credit` account — it already counts
+    once. Paying the bill is a transfer, `spending` → `credit` — excluded from
+    every total by migration 011's CHECK, the way `test_transfer_is_excluded_
+    from_spending_and_income_totals` proves at the SQL level. This proves the
+    same thing through the confirm path a real Telegram flow uses: if the bill
+    payment were ever confirmed as a second expense instead of a transfer, the
+    month's expense total would read ₹4,000 and this reddens.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (79) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+    set_account_opening_balance(conn, uid, "credit", Decimal("0"))  # mints "Card"
+
+    swipe = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "2000.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-05",
+            "note": "dinner, swiped",
+            "account": "Card",
+        }
+    )
+    save_pending(conn, uid, 781, swipe)
+    confirm_pending(conn, uid, 781, source="webhook", update_id=None)
+
+    bill = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "2000.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "paid the card bill",
+            "from_account": "Bank",
+            "to_account": "Card",
+        }
+    )
+    save_pending(conn, uid, 782, bill)
+    confirm_pending(conn, uid, 782, source="webhook", update_id=None)
+
+    _, expenses, _ = month_summary(conn, uid, date(2026, 8, 1), date(2026, 9, 1))
+    assert expenses == Decimal("2000.00")  # not 4000.00 — the bill payment is a transfer
     conn.rollback()
 
 

@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM, confirm_card
+from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM, confirm_card, settled_card
 from kanakko.parse import Transaction
 
 
@@ -91,3 +91,35 @@ def test_account_line_and_buttons_appear_once_a_second_account_exists():
 
     text, _ = confirm_card(_txn(account="Card"), ["Bank", "Card"])
     assert "Account: Card" in text  # a chosen account displays as itself
+
+
+def test_transfer_card_shows_no_category_and_no_pickers():
+    # §18: a transfer is neither spending nor income, so it has no category and
+    # renders its two account names instead — no category buttons, no account
+    # picker (the accounts are already fixed by the parse), just Confirm/Cancel.
+    txn = _txn(type="transfer", category=None, from_account="Bank", to_account="Card")
+    text, keyboard = confirm_card(txn, ["Bank", "Card"])
+    assert "Transfer" in text
+    assert "Bank → Card" in text
+    assert "Category:" not in text
+    assert "Account:" not in text
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert data == [CONFIRM, CANCEL]  # nothing else on the card
+
+
+def test_settled_transfer_card_shows_accounts_not_category_none():
+    # settled_card's counterpart: a stored transfer row must never render
+    # "Category: None" — the same gap a null category would leave on any other
+    # settled receipt.
+    row = {
+        "amount": Decimal("2000.00"),
+        "type": "transfer",
+        "category": None,
+        "note": "paid the card bill",
+        "occurred_on": date(2026, 8, 6),
+        "from_account": "Bank",
+        "to_account": "Card",
+    }
+    text = settled_card(row)
+    assert "Bank → Card" in text
+    assert "Category" not in text

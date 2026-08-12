@@ -305,7 +305,9 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     A null `category` means the model couldn't tell (§3): we show the category
     picker instead of a confirm card so the user names it in one tap. The pending
     row is still written (keyed by the sent card's id) so the category press can
-    update it; the amount, not the category, is what makes it a transaction.
+    update it; the amount, not the category, is what makes it a transaction. A
+    `transfer` (§18) always has a null category — it is neither spending nor
+    income — so it skips the picker and goes straight to its own confirm card.
 
     The user is resolved from `from_id` (the sender), never `chat_id` (the send
     target) — they coincide in a private chat but split under a household or group
@@ -353,7 +355,7 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     log_event("parse.completed", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id,
               duration_ms=ms_since(parse_start), model=resolve_model())
-    if txn.category is None:
+    if txn.type != "transfer" and txn.category is None:
         text, keyboard = category_prompt(txn)
     else:
         text, keyboard = confirm_card(txn, accounts)

@@ -139,6 +139,22 @@ def test_account_enum_appears_only_once_a_second_account_exists():
     assert "account" in schema["required"]
 
 
+def test_transfer_type_and_endpoints_appear_only_with_a_real_account_choice():
+    # §18: a transfer needs two accounts to move money between, so it rides the
+    # same len(accounts) > 1 gate as the account enum — a single-account
+    # household can't reach a transfer any more than it can name an account.
+    schema = parse_schema(accounts=["Bank", "Card"])
+    assert schema["properties"]["type"]["enum"] == ["expense", "income", "transfer"]
+    for field in ("from_account", "to_account"):
+        assert {"type": "string", "enum": ["Bank", "Card"]} in schema["properties"][field]["anyOf"]
+        assert {"type": "null"} in schema["properties"][field]["anyOf"]
+        assert field in schema["required"]
+
+    assert "transfer" not in parse_schema()["properties"]["type"]["enum"]
+    assert "transfer" not in parse_schema(accounts=["Bank"])["properties"]["type"]["enum"]
+    assert "from_account" not in parse_schema(accounts=["Bank"])["properties"]
+
+
 def test_model_default_survives_empty_env(monkeypatch):
     # Compose sets OPENROUTER_MODEL="" when the operator leaves it unset, so a
     # naive get("OPENROUTER_MODEL", default) would send "". §2 default must win.
@@ -295,6 +311,57 @@ def test_an_account_name_is_not_checked_when_no_accounts_were_offered(monkeypatc
     txn = parse_message("x")
     assert txn.account == "Anything"
     assert len(calls) == 1
+
+
+_TRANSFER = {
+    "type": "transfer",
+    "amount": "2000.00",
+    "category": None,
+    "date": "2026-08-06",
+    "note": "paid the card bill",
+    "from_account": "Bank",
+    "to_account": "Card",
+}
+
+
+def test_a_valid_transfer_validates_without_retry(monkeypatch):
+    calls = _feed(monkeypatch, _TRANSFER)
+    txn = parse_message("paid the credit card bill 2000", accounts=["Bank", "Card"])
+    assert txn.type == "transfer"
+    assert txn.from_account == "Bank"
+    assert txn.to_account == "Card"
+    assert len(calls) == 1
+
+
+def test_a_transfer_missing_an_endpoint_is_refused_not_retried(monkeypatch):
+    # Mirrors migration 011's structural CHECK: a transfer must name both ends —
+    # a bad parse here must fail validation, not reach confirm_pending's insert
+    # as an IntegrityError.
+    bad = {**_TRANSFER, "to_account": None}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_a_transfer_to_itself_is_refused(monkeypatch):
+    # A self-transfer moves no money — never what "paid the credit card bill"
+    # means, and not a shape confirm_pending's insert could make sense of.
+    bad = {**_TRANSFER, "from_account": "Card"}  # to_account is already "Card"
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_an_expense_carrying_a_transfer_endpoint_is_refused(monkeypatch):
+    # from_account/to_account only apply to a transfer — the structural
+    # invariant 011's CHECK also enforces on the row.
+    bad = {**_GOOD, "from_account": "Bank"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
 
 
 def test_http_error_is_not_retried(monkeypatch):

@@ -528,6 +528,47 @@ def test_handle_text_shows_category_buttons_when_category_is_null(conn, monkeypa
     conn.rollback()
 
 
+def test_handle_text_shows_a_confirm_card_not_a_category_picker_for_a_transfer(conn, monkeypatch):
+    """A transfer's null category means "not applicable", not "couldn't tell" (§18).
+
+    Every other null-category parse routes to the picker (the test above); a
+    transfer's category is *always* null, so without the `type != "transfer"`
+    guard `handle_text` would show category buttons for a credit-card bill
+    payment — and `category_keyboard("transfer")` has no entry to build them
+    from. It must go straight to the transfer's own Confirm/Cancel card instead.
+    """
+    migrate(conn)
+    txn = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "2000.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "paid the card bill",
+            "from_account": "Bank",
+            "to_account": "Card",
+        }
+    )
+    monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: txn)
+    sent = {}
+
+    def fake_send(chat_id, text, reply_markup=None):
+        sent.update(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return {"ok": True, "result": {"message_id": 909}}
+
+    monkeypatch.setattr(handlers, "send_message", fake_send)
+
+    pending_id = app_module.handle_text(
+        conn, TextMessage(chat_id=12345, message_id=1, text="paid the card bill 2000")
+    )
+    assert isinstance(pending_id, int)
+    assert "Bank → Card" in sent["text"]
+
+    cbs = [b.callback_data for row in sent["reply_markup"].inline_keyboard for b in row]
+    assert cbs == [CONFIRM, CANCEL]  # the transfer's own card, not the category picker
+    conn.rollback()
+
+
 def test_handle_text_threads_the_household_accounts_into_parse_message(conn, monkeypatch):
     """§18: the parse schema's account enum is built per request from the sender's
     own household, not asserted in name only — this checks `handle_text` actually

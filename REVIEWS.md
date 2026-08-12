@@ -12,6 +12,48 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `590c740` — remove `Refund` from `INCOME_CATEGORIES` (Phase 10, §11/§18)
+
+**Status: ✅ DONE**
+
+Scope: drops `"Refund"` from `INCOME_CATEGORIES` in `kanakko/categories.py`,
+updates the hand-transcribed spec fixtures in `tests/test_categories.py`, and
+ticks the task in `TASKS.md` with a recorded decision on existing rows.
+
+### What I checked
+
+- **Spec fit.** `docs/DECISIONS.md:826` (§18) states verbatim: "**`Refund` is
+  removed from the income category list** (§11), where it currently sits and
+  quietly inflates income." The change does exactly that. The commit correctly
+  did *not* edit §11's line 246 (which still lists `Refund`) to match — §18 is
+  the explicit amendment and CLAUDE.md forbids editing the spec to match code.
+- **Guard fails for its reason.** Restored `"Refund"` to the tuple and ran
+  `uv run pytest tests/test_categories.py -q` → all three tests fail
+  (`test_categories_match_the_spec_verbatim`, `test_schema_enum_is_the_deduped_union`,
+  `test_keyboard_mirrors_the_constant`). Reverted; they pass. The fixtures are
+  hand-transcribed (not imported from the module under test), so the guard is
+  real, not tautological.
+- **No orphaned literal.** `grep -rni refund kanakko/ webapp/ --include=*.py`
+  turns up only the `refund` *transaction-type* feature (routes, panels, CSS) —
+  no module carries `"Refund"` as a category string, so removing it from the
+  tuple can't leave a dangling reference.
+- **Existing-row claim.** `migrations/001_init.sql:18-20` confirms `category`
+  has no CHECK ("no CHECK here — the DB would be a second place to edit them"),
+  so old `income`/`Refund` rows are untouched and valid. Traced
+  `_category_select` (`kanakko/webapp/recent.py:27-33`): `known =
+  current in CATEGORIES_BY_TYPE[...]` is now `False` for `"Refund"`, so such a
+  row renders the disabled "Uncategorised" placeholder and is reclassifiable in
+  one tap — exactly as the commit describes.
+- **Full suite.** `uv run pytest -q` → **415 passed** (one unrelated Starlette
+  deprecation warning).
+
+### Findings
+
+None. Spec-mandated one-line removal, guard verified red-without-fix, no
+orphaned references, existing-row behaviour matches the recorded decision.
+
+---
+
 ## 2026-08-13 — `ed36051` — refund Mini App dashboard action (Phase 10, split 3/3)
 
 **Scope:** a per-row "Refund" toggle on `expense` rows in the Mini App reveals a

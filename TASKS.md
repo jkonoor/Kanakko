@@ -1158,19 +1158,46 @@ per task:
       soft-deleted account refusal in `create_recurring_rule`, and the
       household-scoping on `set_recurring_rule_active`. `uv run pytest` →
       418 passed (3 new).
-- [ ] Recurring rules for auto-debits — the cron send and the dashboard's
-      pause/delete (split 2/2). On the rule's `day_of_month`, the cron sends
-      the ordinary confirm card ("SIP ₹5,000 today?") with Confirm / Change
-      amount / Skip — never a silent insert (§18: a chit instalment changes
-      every month, so a fixed auto-entry is wrong nearly every time). Reuse
-      the §4 confirm path (`kanakko.db.pending`/`kanakko.confirm`) rather than
-      building a second write path; decide how the resulting transaction ties
-      back to the `rule_id` it came from (a nullable column, a new migration).
-      Pause and delete surface in the dashboard, calling
-      `kanakko.db.recurring.set_recurring_rule_active`/`delete_recurring_rule`,
-      consistent with the edit task above (task 974). Creation's own surface
-      (a bot command in the `/account`/`/invite` shape, or a dashboard form)
-      is undecided and belongs to this task, not the schema split above.
+- [x] Recurring rules for auto-debits — the dashboard's pause/delete (split
+      2/3). Split further off the original "cron send + dashboard pause/delete"
+      2/2: the cron send touches the shared confirm path
+      (`kanakko.db.pending`/`kanakko.confirm`) and needs a new migration to tie
+      a written transaction back to its `rule_id`, and creation's own surface is
+      still explicitly undecided (a bot command or a dashboard form) — neither
+      belongs in the same commit as a UI that only ever calls the read/pause/
+      delete functions 015 already landed and tested directly.
+      Done: `kanakko.webapp.recurring` — its own module (`routes.py` is at
+      CLAUDE.md's 300-line guideline, the same reason `refund.py` split out),
+      `POST /app/recurring/active` (`{id, active}`, calls
+      `set_recurring_rule_active`) and `POST /app/recurring/delete` (calls
+      `delete_recurring_rule`), both household-scoped (§16, any member may act
+      on a rule another member made) and passing a 24h `max_age` (§13). New
+      `render.recurring_list` renders each rule ("Food · ₹5,000 · day 5 ·
+      Bank") with a pause/resume toggle — `data-active` names the rule's
+      *current* state, the client sends the state to move to — and a delete
+      button; a paused rule dims (`.paused`) rather than disappearing, since
+      resuming it needs it still visible. Wired into `dashboard_html` (new
+      `rules` param, `mini_app_data` fetches via `list_recurring_rules`) and
+      `shell.py` (CSS + click handlers, same 44px lanes `.del`/`.edit-toggle`
+      use). Household-scoping guard verified red-without-fix: temporarily
+      dropped the `household_id` join from `set_recurring_rule_active`'s
+      UPDATE, watched `test_recurring_active_route_foreign_household_is_404`
+      fail, restored it. `uv run pytest` → 428 passed (10 new).
+- [ ] Recurring rules for auto-debits — the cron send (split 3/3). On the
+      rule's `day_of_month`, the cron sends the ordinary confirm card ("SIP
+      ₹5,000 today?") with Confirm / Change amount / Skip — never a silent
+      insert (§18: a chit instalment changes every month, so a fixed
+      auto-entry is wrong nearly every time). Reuse the §4 confirm path
+      (`kanakko.db.pending`/`kanakko.confirm`) rather than building a second
+      write path; decide how the resulting transaction ties back to the
+      `rule_id` it came from (a nullable column, a new migration — 015's
+      comment anticipates `recurring_rule_id`). Fan out over rules due today,
+      not over users (`kanakko.jobs.fan_out` takes an iterable of
+      `(user_id, telegram_user_id)`; a rule send needs the rule's own id too,
+      so this likely wants its own fan-out shape rather than reusing it as-is
+      — see `kanakko/jobs/__init__.py`). Creation's own surface (a bot command
+      in the `/account`/`/invite` shape, or a dashboard form) is undecided and
+      belongs to this task, not the schema or dashboard splits above.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

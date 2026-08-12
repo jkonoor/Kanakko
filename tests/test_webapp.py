@@ -29,9 +29,11 @@ from kanakko.webapp import (
     dashboard_html,
     previous_month_first,
     recent_list,
+    recurring_list,
     user_id_from_init_data,
     validate_init_data,
 )
+from kanakko.webapp import recurring as recurring_module
 from kanakko.webapp import refund as refund_module
 from kanakko.webapp import routes as app_module
 
@@ -853,6 +855,207 @@ def test_recent_list_no_refund_control_for_income_or_transfer():
     transfer = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
     assert "refund-toggle" not in recent_list(income)
     assert "refund-toggle" not in recent_list(transfer)
+
+
+def test_recurring_list_renders_a_rule_with_pause_and_delete():
+    """An active rule renders its fields, a pause toggle carrying `data-active`
+    for the state it is *in* (§13, task 1161 split 2/2a)."""
+    rules = [{"rule_id": 3, "account_id": 1, "account_name": "Bank",
+             "category": "Food", "amount": Decimal("5000.00"),
+             "day_of_month": 5, "active": True}]
+    out = recurring_list(rules)
+    assert 'class="rule-toggle" data-id="3" data-active="true"' in out
+    assert 'class="rule-del" data-id="3"' in out
+    assert "Food" in out and "5,000" in out and "day 5" in out and "Bank" in out
+    assert 'class="rule paused"' not in out
+
+
+def test_recurring_list_paused_rule_shows_resume_and_paused_class():
+    """A paused rule is dimmed (`.paused`), not hidden — you must still see it
+    to resume it (§13)."""
+    rules = [{"rule_id": 4, "account_id": 1, "account_name": "Bank",
+             "category": "Food", "amount": Decimal("5000.00"),
+             "day_of_month": 5, "active": False}]
+    out = recurring_list(rules)
+    assert 'class="rule paused"' in out
+    assert 'data-active="false"' in out
+    assert "Resume" in out
+
+
+def test_recurring_list_empty_renders_nothing():
+    assert recurring_list([]) == ""
+
+
+def _insert_rule(conn, user_id, account_id, category="Food", amount="5000.00", day=5):
+    from kanakko.db import create_recurring_rule
+    return create_recurring_rule(conn, user_id, account_id, category, Decimal(amount), day)
+
+
+def test_recurring_active_route_pauses_and_is_household_scoped(conn, monkeypatch):
+    """`POST /app/recurring/active` calls the real `set_recurring_rule_active` —
+    any household member may pause a rule another member created (§16, §18)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+
+    owner = get_or_create_user(conn, 42)
+    hh = household_of(conn, owner)
+    member = get_or_create_user(conn, 99)
+    join_household(conn, hh, member)
+    acc = default_account_of(conn, hh)
+    rule = _insert_rule(conn, owner, acc)
+
+    resp = client.post(
+        "/app/recurring/active",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=99)},
+        json={"id": rule["rule_id"], "active": False},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute("SELECT active FROM recurring_rules WHERE rule_id = %s", (rule["rule_id"],))
+        assert cur.fetchone() == (False,)
+    conn.rollback()
+
+
+def test_recurring_active_route_foreign_household_is_404(conn, monkeypatch):
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+
+    owner = get_or_create_user(conn, 42)
+    hh = household_of(conn, owner)
+    acc = default_account_of(conn, hh)
+    rule = _insert_rule(conn, owner, acc)
+
+    stranger = get_or_create_user(conn, 99)
+    household_of(conn, stranger)  # a household of their own, not owner's
+
+    resp = client.post(
+        "/app/recurring/active",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=99)},
+        json={"id": rule["rule_id"], "active": False},
+    )
+    conn.rollback()
+    assert resp.status_code == 404
+
+
+def test_recurring_active_route_rejects_a_bad_body(conn, monkeypatch):
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+    get_or_create_user(conn, 42)
+    headers = {"Authorization": "tma " + _fresh_init_data()}
+
+    assert client.post("/app/recurring/active", headers=headers,
+                       json={"active": False}).status_code == 400
+    assert client.post("/app/recurring/active", headers=headers,
+                       json={"id": 1}).status_code == 400
+    # "active" must be an actual bool, not a truthy string — a forged body
+    # can't smuggle a non-bool through int()/bool()'s permissive coercion.
+    assert client.post("/app/recurring/active", headers=headers,
+                       json={"id": 1, "active": "false"}).status_code == 400
+    conn.rollback()
+
+
+def test_recurring_delete_route_deletes_and_is_household_scoped(conn, monkeypatch):
+    """`POST /app/recurring/delete` calls the real `delete_recurring_rule` — a
+    hard delete, household-scoped like pause/resume (§16, §18)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+
+    owner = get_or_create_user(conn, 42)
+    hh = household_of(conn, owner)
+    member = get_or_create_user(conn, 99)
+    join_household(conn, hh, member)
+    acc = default_account_of(conn, hh)
+    rule = _insert_rule(conn, owner, acc)
+
+    resp = client.post(
+        "/app/recurring/delete",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=99)},
+        json={"id": rule["rule_id"]},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM recurring_rules WHERE rule_id = %s", (rule["rule_id"],))
+        assert cur.fetchone()[0] == 0
+    conn.rollback()
+
+
+def test_recurring_delete_route_missing_is_404(conn, monkeypatch):
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+    get_or_create_user(conn, 42)
+
+    resp = client.post(
+        "/app/recurring/delete",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": 999999},
+    )
+    conn.rollback()
+    assert resp.status_code == 404
+
+
+def test_recurring_routes_reject_a_stale_init_data(conn, monkeypatch):
+    """A genuine-but-old `initData` is a 401 on both recurring routes — they pass
+    `max_age` like every other mutation route (§13)."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+    stale = {"Authorization": "tma " + _sign(FIELDS)}  # auth_date = 2023
+
+    active = client.post("/app/recurring/active", headers=stale, json={"id": 1, "active": False})
+    delete = client.post("/app/recurring/delete", headers=stale, json={"id": 1})
+    conn.rollback()
+    assert (active.status_code, delete.status_code) == (401, 401)
+
+
+def test_recurring_routes_log_the_mutation(conn, monkeypatch):
+    """Each route emits one §17 line — `ok` with the rule id on success, `noop`
+    (no rule id) on a 404 miss."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(recurring_module, "connect", lambda: _Reuse(conn))
+
+    owner = get_or_create_user(conn, 42)
+    hh = household_of(conn, owner)
+    acc = default_account_of(conn, hh)
+    rule = _insert_rule(conn, owner, acc)
+    headers = {"Authorization": "tma " + _fresh_init_data()}
+
+    events = []
+    eventlog.bind_sink(events.append)
+    try:
+        ok = client.post("/app/recurring/active", headers=headers,
+                         json={"id": rule["rule_id"], "active": False})
+        miss = client.post("/app/recurring/active", headers=headers,
+                           json={"id": 999999, "active": False})
+    finally:
+        eventlog.unbind_sink()
+
+    assert (ok.status_code, miss.status_code) == (204, 404)
+    assert [(e["event"], e["status"]) for e in events] == [
+        ("recurring_rule.active_set", "ok"),
+        ("recurring_rule.active_set", "noop"),
+    ]
+    assert events[0]["source"] == "miniapp" and "update_id" not in events[0]
+    assert events[0]["rule_id"] == rule["rule_id"] and events[0]["active"] is False
+    assert "rule_id" not in events[1]
+    conn.rollback()
 
 
 def test_edit_route_changes_the_amount(conn, monkeypatch):

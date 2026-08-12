@@ -24,6 +24,7 @@ from kanakko.webapp.recent import recent_list
 from kanakko.webapp.render import (
     category_bars,
     dashboard_html,
+    recurring_list,
 )
 from kanakko.webapp.shell import SHELL_HTML
 
@@ -37,6 +38,7 @@ __all__ = [
     "dashboard_html",
     "previous_month_first",
     "recent_list",
+    "recurring_list",
     "user_id_from_init_data",
     "validate_init_data",
 ]

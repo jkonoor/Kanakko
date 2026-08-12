@@ -134,6 +134,16 @@ h2 {
   background: var(--tg-theme-button-color, #3390ec); color: var(--tg-theme-button-text-color, #fff);
   cursor: pointer;
 }
+/* The recurring-rules list (task 1161 split 2/2a) — same row grid as `.txn`,
+   its two actions in the same 44px lanes `.del`/`.edit-toggle` already use. */
+.rule { display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; align-items: center; padding: 4px 0; }
+.rule.paused { opacity: .5; }
+.rule-main { font-size: 15px; min-width: 0; }
+.rule-toggle, .rule-del {
+  border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
 </style>
 </head>
 <body>
@@ -199,6 +209,28 @@ app.addEventListener('click', e => {
       method: 'POST',
       headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
       body: JSON.stringify({id: Number(refundSubmit.dataset.id), amount}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
+  // The recurring-rule pause/resume toggle (task 1161 split 2/2a) — sends the
+  // state to move *to*, the opposite of `data-active` (the rule's current
+  // state, per `render.recurring_list`'s docstring), not a flip computed
+  // server-side.
+  const ruleToggle = e.target.closest('.rule-toggle');
+  if (ruleToggle) {
+    fetch('/app/recurring/active', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(ruleToggle.dataset.id), active: ruleToggle.dataset.active !== 'true'}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
+  const ruleDel = e.target.closest('.rule-del');
+  if (ruleDel) {
+    fetch('/app/recurring/delete', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(ruleDel.dataset.id)}),
     }).then(r => { if (r.ok) load(); });
     return;
   }

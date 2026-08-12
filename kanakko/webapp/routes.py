@@ -18,6 +18,7 @@ from kanakko.db import (
     edit_transaction_field,
     find_user,
     household_accounts,
+    list_recurring_rules,
     month_summary,
     recent_transactions,
     set_transaction_category,
@@ -115,9 +116,7 @@ def mini_app_data(request: Request) -> str:
         # the week's figures.
         w_income, w_expenses, w_top = month_summary(conn, user_id, w_first, w_next)
         m_income, m_expenses, m_top = month_summary(conn, user_id, first, next_first)
-        a_income, a_expenses, a_top = month_summary(
-            conn, user_id, date.min, date.max
-        )
+        a_income, a_expenses, a_top = month_summary(conn, user_id, date.min, date.max)
         # Previous-period expenses give each hero a baseline — a figure with none
         # is a record, not an insight. Same generic query, shifted bounds: the week
         # before (a plain 7-day step back) and the month before (its 1st, which for
@@ -131,6 +130,7 @@ def mini_app_data(request: Request) -> str:
         _, pm_expenses, _ = month_summary(conn, user_id, prev_m_first, first)
         recent = recent_transactions(conn, user_id)
         accounts = household_accounts(conn, user_id)
+        rules = list_recurring_rules(conn, user_id)
     return dashboard_html(
         [
             Period("week", "Week", "this week", w_income, w_expenses, w_top,
@@ -140,7 +140,7 @@ def mini_app_data(request: Request) -> str:
             Period("all", "All", "all time", a_income, a_expenses, a_top),
         ],
         recent,
-        accounts=accounts,
+        accounts=accounts, rules=rules,
     )
 
 

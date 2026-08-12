@@ -108,11 +108,52 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
     return '<h2>Spending by category</h2>' + "".join(rows)
 
 
+def recurring_list(rules: list[dict]) -> str:
+    """The recurring-rules list: pause/resume and delete per rule (§13, §16, §18).
+
+    Each `rules` entry is a dict from `db.list_recurring_rules` —
+    `{rule_id, account_id, account_name, category, amount, day_of_month,
+    active}`. A rule reads as "Food · ₹500 · day 5 · Bank" so it names every
+    field the cron will act on, not just the amount. `data-active` on the
+    toggle carries the rule's *current* state, since the toggle POSTs the
+    state to move *to* — `shell.py`'s click handler reads it and sends the
+    opposite, mirroring `_account_select`'s `data-id` convention. A paused
+    rule gets a `paused` class (dimmed in CSS) rather than being hidden — you
+    must still see a rule to resume it. Household-scoped like every other
+    figure on this dashboard (§16): `list_recurring_rules` already restricts
+    to the caller's household, so nothing further to check here. An empty
+    list — no rules yet, since creation has no surface yet either — renders
+    nothing, same as an empty `recent_list`.
+    """
+    if not rules:
+        return ""
+    items = []
+    for r in rules:
+        cls = "rule paused" if not r["active"] else "rule"
+        toggle_glyph = "▶" if not r["active"] else "⏸"
+        toggle_label = "Resume" if not r["active"] else "Pause"
+        items.append(
+            f'<div class="{cls}">'
+            f'<div class="rule-main"><span>{html.escape(r["category"])} · '
+            f'{format_amount(r["amount"])} · day {r["day_of_month"]} · '
+            f'{html.escape(r["account_name"])}</span></div>'
+            f'<button type="button" class="rule-toggle" data-id="{r["rule_id"]}" '
+            f'data-active="{"true" if r["active"] else "false"}" '
+            f'aria-label="{toggle_label} {html.escape(r["category"])} recurring rule">'
+            f'{toggle_glyph}</button>'
+            f'<button type="button" class="rule-del" data-id="{r["rule_id"]}" '
+            f'aria-label="Delete {html.escape(r["category"])} recurring rule">✕</button>'
+            "</div>"
+        )
+    return '<section class="recurring"><h2>Recurring</h2>' + "".join(items) + "</section>"
+
+
 def dashboard_html(
     periods: list[Period],
     recent: list[tuple],
     selected: str = "month",
     accounts: list[tuple[int, str]] = (),
+    rules: list[dict] = (),
 ) -> str:
     """The dashboard fragment: a period switcher, one panel per period, the list (§13).
 
@@ -123,9 +164,12 @@ def dashboard_html(
     stays Python + CSS with no charting library (§13), and `recent` is the
     recent-transactions list with per-row delete and edit; `accounts` is the
     household's live accounts (§18) the row editor's account `<select>` offers.
-    Formatted amounts and escaped labels / category names / notes are the only
-    things interpolated — the note is the only user-typed string and
-    `recent_list` escapes it, so nothing reaches the markup unescaped.
+    `rules` is the household's recurring rules (§18) — `recurring_list`'s pause/
+    resume/delete section, rendered above the recent list since a standing
+    instruction changes less often than a logged transaction but still belongs
+    on the one screen. Formatted amounts and escaped labels / category names /
+    notes are the only things interpolated — the note is the only user-typed
+    string and `recent_list` escapes it, so nothing reaches the markup unescaped.
 
     Why a switcher rather than three stacked sections: the old layout rendered
     Net/Income/Expenses three times over, nine near-identical rows for three
@@ -147,5 +191,6 @@ def dashboard_html(
     return (
         f'<div class="switch" role="tablist" aria-label="Time period">{tabs}</div>'
         + panels
+        + recurring_list(rules)
         + recent_list(recent, accounts)
     )

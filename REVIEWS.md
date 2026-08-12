@@ -12,6 +12,62 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `7ca3917` split handlers.py: `/invite` + `/invite_signup` → `kanakko/commands/invite.py` (Phase 10, slice 4/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slices 1–3 (`/transfer`, `/account`, `/remove`). Moves
+both `/invite*` surfaces — `INVITE_*`/`INVITE_SIGNUP_*` constants, `_is_invite`,
+`_is_invite_signup`, `handle_invite`, `handle_invite_signup` — out of
+`handlers.py` into a new `kanakko/commands/invite.py`, rewires `app.py`'s
+imports, drops the now-stale `secrets`/`is_admin`/`get_bot_username`/
+`create_household_invite`/`create_signup_invite` imports from `handlers.py`, and
+retargets `tests/test_invite.py` and `tests/test_invite_signup.py`. The shared
+spine (`TextMessage`/`_command_arg`) stays in `handlers.py` and is imported by
+the new module. No behaviour, money, timezone, soft-delete, or SQL path is
+touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the block
+  deleted from `handlers.py` (both handlers, both guards, all `INVITE_*`
+  constants, the `h-`/`s-` code prefixes, the `is_admin` and
+  `create_household_invite` owner gates) is character-identical to the block
+  added in `kanakko/commands/invite.py`. No logic, string, or §16
+  authorization changed.
+- **Routing intact.** `grep` of `app.py`: lines 24–29 import `_is_invite`,
+  `_is_invite_signup`, `handle_invite`, `handle_invite_signup` from
+  `kanakko.commands.invite`; the dispatch block (189–219) is unchanged by the
+  diff — `git diff HEAD~1 HEAD -- kanakko/app.py` touches only imports, not the
+  `elif` chain. `_is_invite_signup` is still tested before `_is_invite` so
+  `/invite_signup` never falls through to the household handler (confirmed by
+  `test_is_invite_signup_recognises_the_command`).
+- **No dangling references.** `grep` across `kanakko/` and `tests/` for the
+  moved names: every consumer now points at `kanakko.commands.invite`
+  (`app.py`, `test_invite.py`, `test_invite_signup.py`).
+  `test_webhook.py:926` patches `app_module.handle_invite`, which still resolves
+  since `app.py` re-imports it into its own namespace.
+- **Test retarget is correct, incl. the two-module patch.** `test_invite.py`
+  drives only `handle_invite` (now using `invite_command.send_message`/
+  `get_bot_username`), so its single-module patch is right.
+  `test_invite_signup.py`'s end-to-end consume test also drives `handle_start`,
+  which stays in `handlers.py` and sends through `handlers.send_message`; its
+  stub patches **both** modules, so no real send path leaks. This matches the
+  commit's stated guard rationale.
+- **Live run.**
+  - `uv run pytest tests/test_invite.py tests/test_invite_signup.py tests/test_webhook.py -q` → **61 passed**.
+  - `uv run pytest -q` → **457 passed**, 1 unrelated Starlette deprecation warning.
+  - `uv run ruff check` → **All checks passed!**
+  - All three match the commit message's claims exactly.
+
+### Findings
+
+None. A clean, behaviour-preserving code move; imports, routing, and tests are
+consistent, and the full suite is green. `handlers.py` is now 994 lines
+(1116 → 994), continuing the Phase 10 split toward the 300-line target.
+
+---
+
 ## 2026-08-13 — `d59e511` split handlers.py: `/remove` → `kanakko/commands/remove.py` (Phase 10, slice 3/6)
 
 **Status: ✅ DONE**

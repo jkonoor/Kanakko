@@ -12,6 +12,75 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `be98eab` — recurring rules: the creation surface, `/recurring` command (Phase 10)
+
+**Status: ✅ DONE**
+
+Scope: adds `/recurring <amount> <day> <category> <account>` (`handle_recurring`
++ `_is_recurring` + `_match_category_and_account` in `handlers.py`), wires it into
+`app.py`'s webhook dispatch and the `is_parse` no-meter exclusion, lists it in
+`HELP_TEXT`, and calls task 1125's previously-uncalled `create_recurring_rule`.
+Also flags `handlers.py` (1541 lines) as a new undesigned split task in `TASKS.md`.
+
+### What I checked
+
+- **`uv run pytest`** → `457 passed, 1 warning in 18.12s`. The 11 new tests
+  (`test_recurring_command.py`, plus the webhook-routing test and the `test_help.py`
+  addition) all pass.
+- **The brute-force category/account split is a real guard, not tautological.**
+  Ran the naive positional split the commit says it replaced:
+  `"Bills & Utilities Bank".partition(" ")` → category `"Bills"`, which is **not**
+  in `EXPENSE_CATEGORIES` (`in EXPENSE? False`), so `_match_category_and_account`
+  would return `None` and `handle_recurring` would refuse a valid command. The
+  shipped brute-force match returns `('Bills & Utilities', 1, 'Bank')`. The
+  multi-word-category test genuinely fails under the naive split.
+- **Metering/routing wire-up.** `_is_recurring` is added to both the `is_parse`
+  OR-chain (so a rule set-up is never counted against the daily cap and never
+  triggers an LLM call) and the dispatch `elif` ladder, consistent with `/account`.
+  `test_webhook_routes_recurring_to_handle_recurring_and_never_meters_it` asserts
+  `claims == [None]` (unmetered) and that it routes to `handle_recurring`, not
+  `handle_text`. Confirmed the branch ordering has no collision — `_is_recurring`
+  matches only `words[0] == "/recurring"` (bare or `@bot`), so `/recurringfoo`
+  correctly falls through to the parser.
+- **Money path.** `amount` is a `Decimal` end-to-end: `parse_amount` rejects
+  `float`/`bool`, `create_recurring_rule` inserts into `NUMERIC(12,2) CHECK
+  (amount > 0)`, and `format_amount` refuses a non-`Decimal`. No float anywhere.
+  Logging `amount=` a `Decimal` is safe — `file_sink` serialises with
+  `json.dumps(..., default=str)` and `log_event` never raises.
+- **`account` never a literal (§18).** Comes from `household_accounts(conn, user_id)`,
+  household-scoped and `kind <> 'external'`, `deleted_at IS NULL`. `category` is
+  validated against `EXPENSE_CATEGORIES` from `categories.py` (auto-debits are
+  always an expense — matches `jobs.recurring`'s hardcoded `type="expense"`), never
+  a string literal.
+- **Validation ordering / no crash.** Verified each refusal path returns `None`,
+  sends the right message, stores nothing, and logs `status="noop"`: bare command,
+  <3 args, unparseable amount, non-numeric day, out-of-range day (`0`/`32`),
+  unmatched category+account, and no-household-yet. Day bound `1 ≤ n ≤ 31` matches
+  migration 015's `CHECK (day_of_month BETWEEN 1 AND 31)`.
+- **Transaction ownership.** `handle_recurring` does not commit; the webhook's
+  `with connect() as conn:` commits on block exit, so the insert and the update
+  claim share one transaction. Correct.
+
+### Findings
+
+None blocking. Two non-issues noted for the record, neither a defect:
+
+- `_match_category_and_account` picks the first category (in `EXPENSE_CATEGORIES`
+  order) whose prefix matches *and* whose remainder is a live account. An
+  incorrect earlier split only wins if its remainder is itself a real account
+  name, which requires an account named to collide with the tail of a category —
+  not reachable with the default account nouns. It also correctly keeps scanning
+  when a prefix matches but the remainder isn't an account (no early `None`).
+- The command always creates an active rule with no dedup, so running it twice
+  makes two identical rules. This matches the stated design (creation is always
+  active; the dashboard's pause/delete manages the rest) and §18 — not a finding.
+
+The `handlers.py` size flag in `TASKS.md` is honest: 1541 lines is well past the
+300-line guideline with no carved exception (unlike `db.py`), and it's correctly
+left as its own design task rather than guessed at here.
+
+---
+
 ## 2026-08-13 — `7c6172e` — recurring rules: "Change amount" on the cron's confirm card (Phase 10, split 3b/3)
 
 **Status: ✅ DONE**

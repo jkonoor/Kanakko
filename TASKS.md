@@ -1371,9 +1371,27 @@ per task:
       4 failed on `InFailedSqlTransaction` (real send path, same failure class
       slices 1-3 found), not a clean assertion mismatch. `handlers.py` is now
       994 lines; `uv run pytest` → 457 passed, `ruff check` clean.
-- [ ] `handlers.py` split, slice 5/6: `kanakko/commands/recurring.py`
+- [x] `handlers.py` split, slice 5/6: `kanakko/commands/recurring.py`
       (`handle_recurring` + `_match_category_and_account`). Retarget
       `tests/test_recurring_command.py`.
+      Done: moved `RECURRING_COMMAND`/`RECURRING_USAGE`/`RECURRING_BAD_AMOUNT`/
+      `RECURRING_BAD_DAY`/`RECURRING_BAD_CATEGORY_ACCOUNT`/
+      `RECURRING_NO_HOUSEHOLD`, `_is_recurring`, `_match_category_and_account`
+      and `handle_recurring` verbatim into the new module; `app.py` now imports
+      them from `kanakko.commands.recurring`. Dropped `create_recurring_rule`/
+      `household_accounts`/`EXPENSE_CATEGORIES` from `handlers.py`'s now-stale
+      imports (`ALL_CATEGORIES`/`CATEGORY_PREFIX` stay — still used by
+      `handle_category`). `tests/test_recurring_command.py` retargeted its
+      `handlers.send_message` patch and `handlers.RECURRING_*`/
+      `handlers.EXPENSE_CATEGORIES` reads at the new `recurring_command`
+      module, same pattern as slices 1-4; `test_webhook.py`'s
+      `handle_recurring`-routing test patches `app_module` directly, unaffected
+      by the move. Verified red-without-fix: patched `handlers.send_message`
+      instead of `recurring_command.send_message` and reran — all 10 tests
+      failed with `RuntimeError: TELEGRAM_BOT_TOKEN is not set` (the stub never
+      intercepted, the real send path ran), same failure class slices 1-4
+      found. `handlers.py` is now 864 lines; `uv run pytest` → 457 passed,
+      `ruff check` clean.
 - [ ] `handlers.py` split, slice 6/6: `kanakko/commands/refund.py`
       (`handle_refund` + `handle_refund_choice`). Retarget
       `tests/test_refund_ux.py` and check `test_webhook.py`'s

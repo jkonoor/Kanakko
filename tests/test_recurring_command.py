@@ -13,9 +13,10 @@ from decimal import Decimal
 
 from conftest import household_of
 
-from kanakko import handlers
+from kanakko.commands import recurring as recurring_command
+from kanakko.commands.recurring import handle_recurring
 from kanakko.db import get_or_create_user, list_recurring_rules
-from kanakko.handlers import TextMessage, handle_recurring
+from kanakko.handlers import TextMessage
 from kanakko.migrate import migrate
 
 USER_TG = 601
@@ -23,7 +24,7 @@ USER_TG = 601
 
 def _stub_send(monkeypatch):
     sent = []
-    monkeypatch.setattr(handlers, "send_message",
+    monkeypatch.setattr(recurring_command, "send_message",
                         lambda chat_id, text: sent.append((chat_id, text)))
     return sent
 
@@ -45,7 +46,7 @@ def test_bare_command_is_a_usage_hint_and_stores_nothing(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_recurring(conn, _recurring("/recurring"))
     assert result is None
-    assert sent == [(USER_TG, handlers.RECURRING_USAGE)]
+    assert sent == [(USER_TG, recurring_command.RECURRING_USAGE)]
     assert list_recurring_rules(conn, user_id) == []
     conn.rollback()
 
@@ -56,7 +57,7 @@ def test_too_few_arguments_is_a_usage_hint(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_recurring(conn, _recurring("/recurring 5000 5"))
     assert result is None
-    assert sent == [(USER_TG, handlers.RECURRING_USAGE)]
+    assert sent == [(USER_TG, recurring_command.RECURRING_USAGE)]
     conn.rollback()
 
 
@@ -66,7 +67,7 @@ def test_unparseable_amount_is_refused(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_recurring(conn, _recurring("/recurring not-a-number 5 Food Bank"))
     assert result is None
-    assert sent == [(USER_TG, handlers.RECURRING_BAD_AMOUNT)]
+    assert sent == [(USER_TG, recurring_command.RECURRING_BAD_AMOUNT)]
     conn.rollback()
 
 
@@ -76,7 +77,7 @@ def test_out_of_range_day_is_refused(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_recurring(conn, _recurring("/recurring 5000 32 Food Bank"))
     assert result is None
-    assert sent == [(USER_TG, handlers.RECURRING_BAD_DAY)]
+    assert sent == [(USER_TG, recurring_command.RECURRING_BAD_DAY)]
     conn.rollback()
 
 
@@ -86,7 +87,7 @@ def test_non_numeric_day_is_refused(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
     result = handle_recurring(conn, _recurring("/recurring 5000 five Food Bank"))
     assert result is None
-    assert sent == [(USER_TG, handlers.RECURRING_BAD_DAY)]
+    assert sent == [(USER_TG, recurring_command.RECURRING_BAD_DAY)]
     conn.rollback()
 
 
@@ -98,9 +99,9 @@ def test_unmatched_category_and_account_is_refused(conn, monkeypatch):
     assert result is None
     assert sent == [(
         USER_TG,
-        handlers.RECURRING_BAD_CATEGORY_ACCOUNT.format(
+        recurring_command.RECURRING_BAD_CATEGORY_ACCOUNT.format(
             rest="Nonsense Nowhere",
-            categories=", ".join(handlers.EXPENSE_CATEGORIES),
+            categories=", ".join(recurring_command.EXPENSE_CATEGORIES),
         ),
     )]
     conn.rollback()
@@ -176,5 +177,5 @@ def test_no_household_is_refused_not_a_crash(conn, monkeypatch):
     result = handle_recurring(conn, _recurring("/recurring 5000 5 Food Bank"))
 
     assert result is None
-    assert sent == [(USER_TG, handlers.RECURRING_NO_HOUSEHOLD)]
+    assert sent == [(USER_TG, recurring_command.RECURRING_NO_HOUSEHOLD)]
     conn.rollback()

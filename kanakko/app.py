@@ -27,6 +27,7 @@ from kanakko.commands.invite import (
     handle_invite,
     handle_invite_signup,
 )
+from kanakko.commands.recurring import _is_recurring, handle_recurring
 from kanakko.commands.remove import REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice
 from kanakko.commands.transfer import _is_transfer, handle_transfer
 from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
@@ -40,7 +41,6 @@ from kanakko.handlers import (
     _is_greeting,
     _is_help,
     _is_household,
-    _is_recurring,
     _is_refund,
     _is_start,
     _is_undo,
@@ -53,7 +53,6 @@ from kanakko.handlers import (
     handle_confirm,
     handle_help,
     handle_household,
-    handle_recurring,
     handle_refund,
     handle_refund_choice,
     handle_start,

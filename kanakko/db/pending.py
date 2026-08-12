@@ -56,10 +56,12 @@ def confirm_pending(
     `household_members` row for `user_id`, the tenancy axis §16 moves off the user.
     A user with no membership yields NULL and the NOT NULL constraint (migration
     008) refuses the insert rather than orphaning money from every household total.
-    `account_id` is the household's default account (§18) — a transaction that
-    names no account lands there; a household with no default (a test fixture that
-    bypassed onboarding) yields NULL, which `accounts.account_id` still permits
-    until the NOT NULL write-wiring task lands.
+    `account_id` resolves `txn.account` by name within the confirmer's household
+    (§18); a null `txn.account` — the model couldn't tell, or nobody changed the
+    card's default — falls back to the household's default account, `coalesce`d
+    in the same query. A household with no default (a test fixture that bypassed
+    onboarding) yields NULL, which `accounts.account_id` still permits until the
+    NOT NULL write-wiring task lands.
 
     The read → insert → delete → audit run in one transaction so a crash can never
     store a transaction while leaving its pending row live (a later double
@@ -85,11 +87,15 @@ def confirm_pending(
         pending_id, parsed = row
         txn = Transaction.model_validate(parsed)
         cur.execute(
-            "SELECT hm.household_id, a.account_id FROM household_members hm"
-            " LEFT JOIN accounts a"
-            "   ON a.household_id = hm.household_id AND a.is_default AND a.deleted_at IS NULL"
-            " WHERE hm.user_id = %s",
-            (user_id,),
+            "SELECT hm.household_id,"
+            "  coalesce("
+            "    (SELECT account_id FROM accounts"
+            "      WHERE household_id = hm.household_id AND name = %s AND deleted_at IS NULL),"
+            "    (SELECT account_id FROM accounts a"
+            "      WHERE a.household_id = hm.household_id AND a.is_default AND a.deleted_at IS NULL)"
+            "  )"
+            " FROM household_members hm WHERE hm.user_id = %s",
+            (txn.account, user_id),
         )
         home = cur.fetchone()
         household_id, account_id = home if home is not None else (None, None)
@@ -140,6 +146,42 @@ def set_pending_category(
             return None
         pending_id, parsed = row
         txn = Transaction.model_validate({**parsed, "category": category})
+        cur.execute(
+            "UPDATE pending_transactions SET parsed = %s WHERE pending_id = %s",
+            (Jsonb(txn.model_dump(mode="json")), pending_id),
+        )
+    return txn
+
+
+def set_pending_account(
+    conn: psycopg.Connection, user_id: int, telegram_message_id: int, account: str
+) -> Transaction | None:
+    """Set `account` on the user's pending row for `telegram_message_id` (§18, §5).
+
+    `set_pending_category`'s counterpart for the account picker: an `acct:<name>`
+    tap re-writes the pending row's account and returns the updated `Transaction`
+    so the handler can re-render the card. Scoped by `user_id` for the same
+    reason (§1). Trusts the caller has already checked `account` against the
+    confirmer's own household accounts (`handle_account_choice` does, since the
+    closed set is per household rather than a module-level constant like
+    category's) — unlike `set_pending_category`, round-tripping through
+    `Transaction` here re-validates nothing, because `_account_is_known` only
+    fires when validation context carries the account list. Returns `None` when
+    there is no pending row (a stale card). Does not commit — the caller owns the
+    transaction.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT pending_id, parsed FROM pending_transactions"
+            " WHERE user_id = %s AND telegram_message_id = %s"
+            " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
+            (user_id, telegram_message_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        pending_id, parsed = row
+        txn = Transaction.model_validate({**parsed, "account": account})
         cur.execute(
             "UPDATE pending_transactions SET parsed = %s WHERE pending_id = %s",
             (Jsonb(txn.model_dump(mode="json")), pending_id),

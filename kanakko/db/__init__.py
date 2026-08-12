@@ -30,6 +30,7 @@ from kanakko.db.pending import (
     cancel_pending,
     confirm_pending,
     save_pending,
+    set_pending_account,
     set_pending_category,
     undo_last,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "save_pending",
     "confirm_pending",
     "set_pending_category",
+    "set_pending_account",
     "undo_last",
     "cancel_pending",
     "day_summary",

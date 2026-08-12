@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.confirm import CANCEL, CONFIRM, confirm_card
+from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM, confirm_card
 from kanakko.parse import Transaction
 
 
@@ -66,3 +66,28 @@ def test_category_buttons_are_on_the_card_for_one_tap_correction():
     assert set(f"cat:{c}" for c in EXPENSE_CATEGORIES) <= set(data)
     # ...and they come from categories.py, not a literal list living here.
     assert "cat:Food" in data and "cat:Bills & Utilities" in data
+
+
+def test_no_account_line_or_buttons_without_a_real_choice():
+    # §18: "accounts become visible only when a second one exists" — the daily
+    # path (no accounts, or exactly one) must not gain a line or a tap. This is
+    # the check the task names: a one-account household still confirms in one tap.
+    for accounts in (None, [], ["Bank"]):
+        text, keyboard = confirm_card(_txn(), accounts)
+        assert "Account:" not in text
+        data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+        assert not any(d.startswith(ACCOUNT_PREFIX) for d in data)
+
+
+def test_account_line_and_buttons_appear_once_a_second_account_exists():
+    # A real choice: the card names the account the parse chose (or the default,
+    # when null) and offers every account as an `acct:<name>` button, the same
+    # `cat:<name>` shape §5 already uses for category — reusing the pattern, not
+    # a second chooser.
+    text, keyboard = confirm_card(_txn(account=None), ["Bank", "Card"])
+    assert "Account: Bank" in text  # null account displays as the default (first)
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert {"acct:Bank", "acct:Card"} <= set(data)
+
+    text, _ = confirm_card(_txn(account="Card"), ["Bank", "Card"])
+    assert "Account: Card" in text  # a chosen account displays as itself

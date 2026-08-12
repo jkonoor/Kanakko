@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from kanakko import __version__, configure_logging
 from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
-from kanakko.confirm import CANCEL, CONFIRM
+from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM
 from kanakko.db import (
     claim_update,
     connect,
@@ -40,6 +40,7 @@ from kanakko.handlers import (
     _is_undo,
     dispatch,
     handle_account,
+    handle_account_choice,
     handle_cancel,
     handle_category,
     handle_confirm,
@@ -406,6 +407,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                 handle_cancel(conn, action)
             elif action.data.startswith(CATEGORY_PREFIX):
                 handle_category(conn, action)
+            elif action.data.startswith(ACCOUNT_PREFIX):
+                handle_account_choice(conn, action)
             elif action.data.startswith(REMOVE_PREFIX):
                 handle_remove_choice(conn, action)
         except Exception:

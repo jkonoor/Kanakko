@@ -17,8 +17,8 @@ from kanakko import app as app_module
 from kanakko import db, eventlog, handlers
 from kanakko.app import WEBHOOK_SECRET_HEADER, app
 from kanakko.categories import CATEGORY_PREFIX, EXPENSE_CATEGORIES
-from kanakko.confirm import CANCEL, CONFIRM
-from kanakko.db import get_or_create_user, save_pending
+from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CONFIRM
+from kanakko.db import get_or_create_user, save_pending, set_account_opening_balance
 from kanakko.handlers import REMOVE_PREFIX, ButtonPress, TextMessage, dispatch
 from kanakko.migrate import migrate
 from kanakko.parse import Transaction
@@ -566,6 +566,56 @@ def test_handle_text_threads_the_household_accounts_into_parse_message(conn, mon
     conn.rollback()
 
 
+def test_handle_text_shows_the_account_only_once_a_second_account_exists(conn, monkeypatch):
+    """The confirm card's account line/buttons are the daily path's one real gate (§18).
+
+    A single-account household (every onboarded user, by default) must send the
+    exact pre-accounts card — the task's own acceptance line: "spent 500 on tea"
+    with one account still confirms in one tap. Once a second account exists, the
+    card grows an `Account:` line and `acct:<name>` buttons.
+    """
+    migrate(conn)
+
+    def _card_for(user_id, chat_id):
+        txn = Transaction.model_validate(
+            {
+                "type": "expense",
+                "amount": "500.00",
+                "category": EXPENSE_CATEGORIES[0],
+                "date": "2026-08-06",
+                "note": "spent 500 on tea",
+            }
+        )
+        monkeypatch.setattr(handlers, "parse_message", lambda text, accounts=None: txn)
+        sent = {}
+        monkeypatch.setattr(
+            handlers, "send_message",
+            lambda chat_id, text, reply_markup=None: sent.update(
+                text=text, reply_markup=reply_markup
+            ) or {"ok": True, "result": {"message_id": 909}},
+        )
+        app_module.handle_text(
+            conn, TextMessage(chat_id=chat_id, message_id=1, text="spent 500 on tea")
+        )
+        return sent["text"], sent["reply_markup"]
+
+    one_uid = get_or_create_user(conn, 20001)
+    household_of(conn, one_uid)  # mints only the default "Bank" account
+    text, keyboard = _card_for(one_uid, 20001)
+    assert "Account:" not in text
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert not any(d.startswith(ACCOUNT_PREFIX) for d in data)
+
+    two_uid = get_or_create_user(conn, 20002)
+    household_of(conn, two_uid)
+    set_account_opening_balance(conn, two_uid, "credit", Decimal("500.00"))  # mints "Card"
+    text, keyboard = _card_for(two_uid, 20002)
+    assert "Account: Bank" in text
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert {"acct:Bank", "acct:Card"} <= set(data)
+    conn.rollback()
+
+
 def _seed_pending(conn, chat_id, card_message_id, amount="100.00"):
     user_id = get_or_create_user(conn, chat_id)
     household_of(conn, user_id)  # confirm_pending homes the row in the user's household (§16)
@@ -748,15 +798,24 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     assert len(confirmed) == 1 and len(cancelled) == 1  # not to Confirm/Cancel
     assert len(opened) == 3  # and opened its own connection
 
+    accounted = []
+    monkeypatch.setattr(
+        app_module, "handle_account_choice", lambda conn, press: accounted.append(press)
+    )
+    client.post("/webhook", json=press(f"{ACCOUNT_PREFIX}Bank"), headers=AUTH)
+    assert len(accounted) == 1  # an acct: tap routes to the account-choice handler
+    assert len(categorised) == 1 and len(confirmed) == 1  # not to category/Confirm
+    assert len(opened) == 4  # and opened its own connection
+
     chose = []
     monkeypatch.setattr(app_module, "handle_remove_choice", lambda conn, press: chose.append(press))
     client.post("/webhook", json=press(f"{REMOVE_PREFIX}delete:7"), headers=AUTH)
     assert len(chose) == 1  # an rm: tap routes to the removal-choice handler
     assert len(categorised) == 1 and len(confirmed) == 1  # not to category/Confirm
-    assert len(opened) == 4
+    assert len(opened) == 5
 
     client.post("/webhook", json={"channel_post": {"text": "x"}}, headers=AUTH)
-    assert len(opened) == 4  # an ignored update opens nothing
+    assert len(opened) == 5  # an ignored update opens nothing
     assert texted == []
 
 
@@ -1228,6 +1287,81 @@ def test_handle_category_ignores_a_forged_unknown_category(conn, monkeypatch):
         cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
         (parsed,) = cur.fetchone()
     assert parsed["category"] == EXPENSE_CATEGORIES[0]  # unchanged
+    conn.rollback()
+
+
+def test_handle_account_choice_updates_the_pending_row_and_re_renders_the_card(conn, monkeypatch):
+    """An `acct:<name>` tap sets the account and edits the card in place (§18, §5).
+
+    The account picker's counterpart to `test_handle_category_updates_…`: the
+    tap must (1) write the chosen account to the pending row so a later Confirm
+    stores it there (`kanakko.db.pending.confirm_pending` reads `txn.account`),
+    and (2) re-render the same message. Drives the real `set_pending_account`
+    against Postgres; only Telegram I/O is stubbed.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    set_account_opening_balance(conn, user_id, "credit", Decimal("500.00"))  # mints "Card"
+    edited = {}
+    acked = {}
+    monkeypatch.setattr(
+        handlers,
+        "edit_message_text",
+        lambda chat_id, message_id, text, reply_markup=None: edited.update(
+            chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+        ),
+    )
+    monkeypatch.setattr(
+        handlers, "answer_callback_query", lambda cbq, text=None: acked.update(cbq=cbq, text=text)
+    )
+
+    result = app_module.handle_account_choice(
+        conn,
+        ButtonPress(
+            chat_id=12345, message_id=909, callback_query_id="cbq1", data=f"{ACCOUNT_PREFIX}Card"
+        ),
+    )
+    assert result is not None and result.account == "Card"
+    assert acked == {"cbq": "cbq1", "text": "Account: Card"}
+    assert edited["chat_id"] == 12345 and edited["message_id"] == 909
+    assert "Account: Card" in edited["text"]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
+        (parsed,) = cur.fetchone()
+    assert parsed["account"] == "Card"  # the row now carries the chosen account
+    conn.rollback()
+
+
+def test_handle_account_choice_ignores_an_account_outside_the_household(conn, monkeypatch):
+    """An `acct:` callback naming an account outside this user's household is ignored.
+
+    Unlike category (a module-level closed set the keyboard itself can't
+    misrepresent), the account set is per household — a stale or forged tap
+    naming another household's account, or an account since deleted, must not
+    500 or silently misfile the transaction. The pending row is left untouched
+    and nothing is re-rendered.
+    """
+    migrate(conn)
+    user_id, _ = _seed_pending(conn, chat_id=12345, card_message_id=909)
+    edits = []
+    monkeypatch.setattr(handlers, "edit_message_text", lambda *a, **k: edits.append(a))
+    monkeypatch.setattr(handlers, "answer_callback_query", lambda cbq, text=None: None)
+
+    result = app_module.handle_account_choice(
+        conn,
+        ButtonPress(
+            chat_id=12345, message_id=909, callback_query_id="cbq1",
+            data=f"{ACCOUNT_PREFIX}Bogus",
+        ),
+    )
+    assert result is None
+    assert edits == []  # nothing re-rendered
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 909")
+        (parsed,) = cur.fetchone()
+    assert parsed["account"] is None  # unchanged
     conn.rollback()
 
 

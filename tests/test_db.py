@@ -20,6 +20,8 @@ from kanakko.db import (
     get_or_create_user,
     recent_transactions,
     save_pending,
+    set_account_opening_balance,
+    set_pending_account,
     set_pending_category,
     set_transaction_category,
     soft_delete_transaction,
@@ -165,6 +167,37 @@ def test_confirm_stamps_the_households_default_account(conn):
     conn.rollback()
 
 
+def test_confirm_uses_the_chosen_account_not_just_the_default(conn):
+    """A confirm honours `txn.account` when the card carries one (§18).
+
+    Task: "show the account on the confirm card with one tap to change it" is
+    dead UI unless the eventual Confirm actually stores the chosen account, not
+    always the household default `confirm_pending` fell back to before this
+    task. Mints a second account (`set_account_opening_balance`, the onboarding
+    path) so there is a real choice to pick.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (77) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+    set_account_opening_balance(conn, uid, "credit", Decimal("500.00"))  # mints "Card"
+
+    txn = Transaction.model_validate({**_txn("60.00").model_dump(mode="json"), "account": "Card"})
+    save_pending(conn, uid, 770, txn)
+    confirm_pending(conn, uid, 770, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.name FROM transactions t JOIN accounts a ON a.account_id = t.account_id"
+            " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)",
+            (uid,),
+        )
+        (name,) = cur.fetchone()
+    assert name == "Card"  # not "Bank", the default
+    conn.rollback()
+
+
 def test_confirm_without_a_household_is_refused(conn):
     """A user with no household cannot confirm — money must have a home (§16).
 
@@ -271,6 +304,36 @@ def test_set_pending_category_is_scoped_to_the_user(conn):
         )
         (parsed,) = cur.fetchone()
     assert parsed["category"] == EXPENSE_CATEGORIES[0]  # B's row untouched
+    conn.rollback()
+
+
+def test_set_pending_account_updates_the_row(conn):
+    """An account tap re-writes the pending row's account and returns the txn (§18, §5).
+
+    `set_pending_category`'s counterpart: the stored `parsed` must carry the new
+    account so the eventual Confirm stamps it (`confirm_pending` reads
+    `txn.account`), and the amount survives untouched.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 31)
+    save_pending(conn, user_id, 556, _txn("250.00"))
+
+    txn = set_pending_account(conn, user_id, 556, "Card")
+    assert txn is not None
+    assert txn.account == "Card"
+    assert txn.amount == Decimal("250.00")  # amount survives the update
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 556")
+        (parsed,) = cur.fetchone()
+    assert parsed["account"] == "Card"
+    conn.rollback()
+
+
+def test_set_pending_account_unknown_message_returns_none(conn):
+    """Setting an account on a card with no pending row is a no-op, not an error."""
+    migrate(conn)
+    assert set_pending_account(conn, 42, 999_999, "Card") is None
     conn.rollback()
 
 

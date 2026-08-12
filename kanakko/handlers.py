@@ -23,7 +23,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from kanakko.auth import is_admin, signup_mode
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
-from kanakko.confirm import category_prompt, confirm_card, settled_card
+from kanakko.confirm import ACCOUNT_PREFIX, category_prompt, confirm_card, settled_card
 from kanakko.db import (
     cancel_pending,
     check_removal,
@@ -38,6 +38,7 @@ from kanakko.db import (
     remove_member,
     save_pending,
     set_account_opening_balance,
+    set_pending_account,
     set_pending_category,
     transfer_ownership,
     undo_last,
@@ -352,8 +353,10 @@ def handle_text(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     log_event("parse.completed", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id,
               duration_ms=ms_since(parse_start), model=resolve_model())
-    render = category_prompt if txn.category is None else confirm_card
-    text, keyboard = render(txn)
+    if txn.category is None:
+        text, keyboard = category_prompt(txn)
+    else:
+        text, keyboard = confirm_card(txn, accounts)
     sent = send_message(msg.chat_id, text, reply_markup=keyboard)
     card_message_id = sent["result"]["message_id"]
     pending_id = save_pending(conn, user_id, card_message_id, txn)
@@ -1047,9 +1050,47 @@ def handle_category(conn: psycopg.Connection, press: ButtonPress) -> Transaction
         log_event("pending.recategorised", status="noop", update_id=press.update_id,
                   source=press.source, user_id=user_id, duration_ms=ms_since(start))
         return None
-    text, keyboard = confirm_card(txn)
+    text, keyboard = confirm_card(txn, list_accounts(conn, user_id))
     edit_message_text(press.chat_id, press.message_id, text, reply_markup=keyboard)
     answer_callback_query(press.callback_query_id, f"Category: {category}")
     log_event("pending.recategorised", status="ok", update_id=press.update_id,
+              source=press.source, user_id=user_id, duration_ms=ms_since(start))
+    return txn
+
+
+def handle_account_choice(conn: psycopg.Connection, press: ButtonPress) -> Transaction | None:
+    """Apply an `acct:<name>` tap to the pending row, then re-render the card (§18, §5).
+
+    The account picker's counterpart to `handle_category`: the tap carries the
+    card's message id and the chosen account name, `set_pending_account`
+    re-writes the pending row (scoped to this user, §1), and the same card is
+    edited in place to reflect it. Unlike a category (a module-level closed
+    set), the valid accounts are per household, so this handler resolves the
+    user *first* and checks the name against that household's own
+    `list_accounts` — a forged or stale account name is ignored rather than
+    500ing, the same non-retry contract `handle_category` uses for a bad
+    `cat:` tap. A stale card whose pending row is gone answers with a note and
+    edits nothing. Does not commit — the caller owns the transaction. Returns
+    the updated `Transaction`, or `None` when there was nothing to update.
+    """
+    start = time.perf_counter()
+    account = press.data.removeprefix(ACCOUNT_PREFIX)
+    user_id = get_or_create_user(conn, press.from_id)
+    accounts = list_accounts(conn, user_id)
+    if account not in accounts:
+        answer_callback_query(press.callback_query_id, "Unknown account")
+        log_event("pending.reaccounted", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    txn = set_pending_account(conn, user_id, press.message_id, account)
+    if txn is None:
+        answer_callback_query(press.callback_query_id, "That card's gone")
+        log_event("pending.reaccounted", status="noop", update_id=press.update_id,
+                  source=press.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    text, keyboard = confirm_card(txn, accounts)
+    edit_message_text(press.chat_id, press.message_id, text, reply_markup=keyboard)
+    answer_callback_query(press.callback_query_id, f"Account: {account}")
+    log_event("pending.reaccounted", status="ok", update_id=press.update_id,
               source=press.source, user_id=user_id, duration_ms=ms_since(start))
     return txn

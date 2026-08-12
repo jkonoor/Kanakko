@@ -18,8 +18,31 @@ from kanakko.parse import Transaction
 CONFIRM = "confirm"
 CANCEL = "cancel"
 
+# callback_data prefix for an account button (§18) — `acct:<name>`, the same
+# shape as `categories.CATEGORY_PREFIX`.
+ACCOUNT_PREFIX = "acct:"
 
-def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
+
+def account_keyboard(accounts: list[str]) -> InlineKeyboardMarkup:
+    """Account buttons, two per row — the same shape as `categories.keyboard` (§18, §5).
+
+    Only meaningful when there is a real choice to show; callers gate on
+    `len(accounts) > 1` (§18: "accounts become visible only when a second one
+    exists") before calling this.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(a, callback_data=f"{ACCOUNT_PREFIX}{a}")
+            for a in accounts[i : i + 2]
+        ]
+        for i in range(0, len(accounts), 2)
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def confirm_card(
+    txn: Transaction, accounts: list[str] | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     """Render `txn` as the confirm-card text plus its Confirm/Cancel keyboard.
 
     §4: every parsed transaction shows this before it is stored. A null category
@@ -32,6 +55,13 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
     category is the most-often-wrong field and a closed set, so correcting it is
     one tap (`cat:<name>`, handled by the category-press task) rather than a
     Cancel-and-retype.
+
+    §18: the account line and its `acct:<name>` buttons only appear when
+    `accounts` names a real choice — `len(accounts) > 1`, the same gate
+    `parse_schema` uses. A single-account household (the daily path) gets
+    exactly the pre-accounts card: no extra line, no extra tap. `accounts` is
+    ordered default-first (`db.list_accounts`), so a null `txn.account` (§18:
+    "null means the default account") displays as `accounts[0]`.
     """
     assert txn.category is not None, "null category must route to category_prompt (§3)"
     lines = [
@@ -40,6 +70,9 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
         f"Date: {txn.date.isoformat()}",
         f"Note: {txn.note}",
     ]
+    show_accounts = bool(accounts) and len(accounts) > 1
+    if show_accounts:
+        lines.insert(2, f"Account: {txn.account or accounts[0]}")
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -47,6 +80,7 @@ def confirm_card(txn: Transaction) -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton("❌ Cancel", callback_data=CANCEL),
             ],
             *category_keyboard(txn.type).inline_keyboard,
+            *(account_keyboard(accounts).inline_keyboard if show_accounts else []),
         ]
     )
     return "\n".join(lines), keyboard

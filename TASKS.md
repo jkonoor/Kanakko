@@ -839,11 +839,33 @@ per task:
       red-without-fix, green-with-fix: the `external` exclusion, the
       out-of-set account validator, and the `handle_text` wiring. `uv run
       pytest` → 334 passed (11 new).
-- [ ] Show the account on the confirm card with one tap to change it — the §3/§5
+- [x] Show the account on the confirm card with one tap to change it — the §3/§5
       pattern, never a question. **The daily path must not gain a tap:** "spent
       500 on tea" with one account still confirms in one tap, and that is the
       check. Reuse the category keyboard's shape rather than inventing a second
       chooser.
+      Done: `confirm_card` (`kanakko/confirm.py`) takes the caller's `accounts`
+      and, only when `len(accounts) > 1` (the same gate `parse_schema` already
+      uses, §18: "accounts become visible only when a second one exists"),
+      inserts an `Account: <name>` line (`txn.account` or the default,
+      `accounts[0]`, when null) and appends `acct:<name>` buttons via a new
+      `account_keyboard` — `categories.keyboard`'s exact two-per-row shape, not
+      a second chooser. A one/no-account household gets byte-for-byte the
+      pre-accounts card. `handle_text`/`handle_category` thread `accounts`
+      through; a new `handle_account_choice` (routed on `ACCOUNT_PREFIX =
+      "acct:"` in `app.py`) mirrors `handle_category`: resolves the tapping
+      user's own household accounts first (the closed set is per household, not
+      module-level like category's), ignores a tap naming an account outside
+      it, and re-renders the card via a new `db.set_pending_account`.
+      Also closed the gap that made the picker cosmetic: `confirm_pending`
+      previously always stamped the household's *default* account regardless of
+      `txn.account`. Its account lookup now resolves the pending row's chosen
+      account by name within the household, falling back to the default only
+      when `txn.account` is null (one `coalesce`d query, no extra round trip).
+      Three guards verified red-without-fix, green-with-fix: the `len(accounts)
+      > 1` display gate, `confirm_pending` honouring the chosen account instead
+      of always the default, and `handle_account_choice` rejecting an
+      out-of-household account name. `uv run pytest` → 343 passed (8 new).
 - [ ] Teach the parse prompt the account vocabulary: "swiped", "on card", "paid
       cash", "UPI" (→ the bank account, **never its own account** — §18: UPI is a
       rail, not a pool), "put 5000 in SIP", "FD 1 lakh", "paid chit". Wrong-pool

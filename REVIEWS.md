@@ -12,6 +12,50 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `b13a599` cover reply-id extraction and steer nudges into it (b71effc review follow-up)
+
+**Status: ✅ DONE**
+
+Scope: the fix commit for the two MEDIUM findings in the `b71effc` review —
+(1) `dispatch()`'s `reply_to_message.message_id` extraction was untested; and
+(2) `nudge_text()` never asked the user to tap Reply, so a bare answer in the
+ordinary multi-account household had no reply target and `pending_awaiting_reconcile`
+correctly refused to guess, routing the reply through parse instead of reconcile.
+
+### What I checked
+
+- `git show HEAD` — four files: `kanakko/jobs/reconcile.py` (adds `_REPLY_CUE`,
+  appends it to both nudge wordings), `tests/test_webhook.py` (+1 test),
+  `tests/test_jobs_reconcile.py` (+1 assertion), `REVIEWS.md`.
+- `uv run pytest -q` → **477 passed, 1 warning** (was 476). Matches the claim.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Guard 1 fails for its reason.** Reverted `handlers.py:118` to
+  `reply_to_message_id=None` and ran
+  `test_text_message_carries_the_telegram_reply_target` → **1 failed**
+  (`assert None == 909`); restored → passes. The test exercises the real
+  extraction line off a Telegram payload and confirms a bare message (no
+  `reply_to_message` key) yields `None`, closing the gap where every other test
+  set the field directly.
+- **Guard 2 fails for its reason.** Blanked `_REPLY_CUE` to `""` and ran
+  `test_run_nudges_every_live_non_external_account` → **1 failed**; restored →
+  passes. The assertion (`texts.count("Reply to this message with the number.")
+  == 2`) reddens if either wording drops the cue.
+- **Chain is consistent end to end.** `create_reconcile_ask`
+  (`db/reconcile.py:56`) keys the awaiting row by the nudge's own
+  `message_id`; Telegram echoes that same id as `reply_to_message.message_id`
+  when the user taps Reply; `dispatch` extracts it (`handlers.py:118`); `app.py:186`
+  passes it to `pending_awaiting_reconcile`, which matches it against
+  `telegram_message_id`. The cue steers the user into exactly the reply shape the
+  matcher needs — the fix targets the root cause, not a symptom.
+
+### Findings
+
+None. Both prior findings are genuinely resolved (verified by sabotage, not by
+claim), the fix is minimal, money/timezone paths are untouched, and no new
+dependency, float, or spec drift was introduced.
+
+---
+
 ## 2026-08-13 — `b71effc` reconcile reply routes by nudge, not by recency (104d562 review follow-up)
 
 **Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — both

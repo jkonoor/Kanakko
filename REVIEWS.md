@@ -12,6 +12,75 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `5f893bd` — recurring rules: cron send, Confirm/Skip half (Phase 10, split 3a/3)
+
+**Status: ✅ DONE**
+
+Scope: migration 016 adds a nullable `recurring_rule_id` (`ON DELETE SET NULL`)
+to `pending_transactions` and `transactions` and recreates `active_transactions`;
+`db.pending.save_pending`/`confirm_pending` thread it through; new
+`db.recurring.due_rules_today` (cross-household cron read); new
+`kanakko/jobs/recurring.py` (per-rule fan-out sending the ordinary confirm card
+with a "⏭️ Skip" relabel); a `cancel_label` param on `confirm.confirm_card`; an
+08:00 IST crontab line; and 7 new tests.
+
+### What I checked (and what it returned)
+
+- **Full suite.** `uv run pytest -q` → **435 passed** (1 deprecation warning),
+  matching the commit message.
+- **Guard is real, not a claim.** Reverted the fix by hand — changed
+  `confirm_pending`'s INSERT to store `None` instead of `recurring_rule_id` —
+  and re-ran `test_recurring_rule_id_flows_from_pending_to_the_settled_transaction`
+  plus `tests/test_jobs_recurring.py`: **4 failed** (the flow guard and the three
+  job tests). Restored; suite green again. The provenance guard fails for the
+  reason it exists.
+- **Money path.** `rule["amount"]` is `NUMERIC(12,2)` from `recurring_rules`,
+  carried into `Transaction(amount=...)` and never through `float`; the card
+  renders `5,000.00`. No `float` introduced.
+- **Reads/view.** Migration recreates `active_transactions` *after* the
+  `ALTER TABLE`s (correct order) so the appended column is exposed; the
+  soft-delete filter is unchanged. `due_rules_today` joins `accounts` with
+  `a.deleted_at IS NULL` — verified red/green by
+  `test_due_rules_today_skips_a_rule_whose_account_was_later_soft_deleted`.
+- **Timezone.** Day-of-month is taken from `today_ist()` (a `date` in
+  `Asia/Kolkata`), reused from `jobs.evening`, not a UTC `date.today()`.
+- **Failure isolation.** `jobs.recurring.run` copies `fan_out`'s exact shape —
+  one `conn.transaction()` savepoint per rule, `conn.commit()` before raising
+  `DeliveryFailures`. `test_one_blocked_recipient_does_not_silence_the_others`
+  exercises it: the blocked recipient writes no pending row, the other survives.
+- **Send shape.** `send_message(chat_id, text, reply_markup)` and the real Bot
+  API response (`response["result"]["message_id"]`) line up with the code.
+- **Secrets / boundaries.** No token literals; no ORM/Celery/Redis added. Crontab
+  line matches the `EXPECTED` map pinned in `test_crontab.py`.
+
+### Findings
+
+No blocking issues. Two non-blocking observations for a later split, neither a
+spec violation (§18 is silent on both, and both degrade the way §18 prefers —
+*no* prompt rather than a silently-wrong insert):
+
+1. **`day_of_month` in short months silently skips** —
+   `kanakko/jobs/recurring.py:44` / `db/recurring.py:due_rules_today`. A rule
+   with `day_of_month` 29/30/31 (migration 015 allows `BETWEEN 1 AND 31`) is
+   matched by `r.day_of_month = %s` against today's actual day, so a SIP set for
+   the 31st never fires in April/June/Sept/Nov, and 29–31 never fire in
+   February. §18 names no last-day clamping, and a missed prompt is the graceful
+   failure mode, so this is not blocking — but whoever builds the creation
+   surface (split 3c) should decide clamp-to-month-end vs. reject days > 28, and
+   a guard should pin the choice.
+2. **View column is untested and unconsumed** — `migrations/016...sql:24`. The
+   recreated `active_transactions` now carries `recurring_rule_id`, but nothing
+   reads it through the view yet (the flow test reads `transactions` directly),
+   and no test asserts the view exposes it. If a future edit dropped the view
+   recreation, the miss would be silent until the "account-acting note" reader
+   lands. Cheap to guard now; not blocking while unconsumed.
+
+Also noted (no action): re-running the cron in a day re-sends every due rule's
+card (no per-day dedup log), the same property `jobs.evening` already has —
+consistent with the codebase, and the cron fires once daily.
+
+---
+
 ## 2026-08-13 — `05f28e5` — recurring-rule dashboard pause/delete (Phase 10, split 2/3)
 
 **Status: ✅ DONE**

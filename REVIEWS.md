@@ -12,6 +12,47 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-12 — `b29eced` — `/account` no longer crashes when the sender has no household
+
+**Scope:** Fixes the one blocking finding from the `70b6cc4` review — a
+reachable unhandled `TypeError` when a user in open-signup mode sends `/account
+credit|locked <amount>` before `/start` mints a household.
+`set_account_opening_balance` now returns `None` on an empty `RETURNING` instead
+of unpacking it; `handle_account` treats that `None` as a refusal
+(`ACCOUNT_NO_HOUSEHOLD`, "Send /start first"). Adds one regression test.
+
+**Status: ✅ DONE** — the fix is correct, minimal, and matches the existing
+refusal pattern in `handle_account`. No money-path, timezone, soft-delete, or
+security surface is touched. No new findings.
+
+### What I checked (commands and results)
+
+- **Read the fix in context.** `set_account_opening_balance`
+  (`kanakko/db/accounts.py:49-96`): the no-household case is exactly the INSERT
+  branch. `SELECT account_id ... WHERE household_id = (SELECT household_id FROM
+  household_members WHERE user_id = %s)` returns no row (the subquery is NULL,
+  so `household_id = NULL` never matches), falls to the INSERT `... SELECT ...
+  FROM household_members WHERE user_id = %s`, which selects zero rows, so
+  `RETURNING` is empty and `cur.fetchone()` is `None` → the new `if row is None:
+  return None` fires. The existing account (UPDATE) branch is unreachable
+  without a household, so no path unpacks a `None`. Correct.
+- **Read the caller.** `handle_account` (`kanakko/handlers.py:930-935`) checks
+  `account is None`, sends `ACCOUNT_NO_HOUSEHOLD`, logs `status="noop"`, returns
+  `None` — the same shape as the three refusal branches above it
+  (`ACCOUNT_USAGE`, `ACCOUNT_BAD_KIND`, `ACCOUNT_BAD_AMOUNT`). Consistent.
+- **`uv run pytest -q tests/test_account_command.py`** → `7 passed`.
+- **Verified the guard fails for the reason it exists.** Temporarily reverted
+  the `row is None` check to the bare `(account_id,) = cur.fetchone()` and ran
+  `test_no_household_is_refused_not_a_crash` → `1 failed` (the `TypeError` the
+  fix prevents). Restored the fix.
+- **`uv run pytest -q`** (full suite) → `320 passed, 1 warning`.
+
+No `float` on an amount, no read bypassing `active_transactions`, no timezone
+boundary, no secret — none of those surfaces are in this diff. The commit
+message's claims (320 passed, guard reddens on revert) are accurate.
+
+---
+
 ## 2026-08-12 — `70b6cc4` — `/account` onboarding ask + default account per household (Phase 10)
 
 **Scope:** `create_household_of_one` now mints the two structural accounts every

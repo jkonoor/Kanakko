@@ -30,6 +30,29 @@ def signup_mode() -> str:
     return "open" if os.environ.get("SIGNUP_MODE") == "open" else "invite"
 
 
+def is_admin(telegram_user_id: int) -> bool:
+    """May this Telegram user issue signup invites? — from $ADMIN_TELEGRAM_IDS (§16).
+
+    A signup invite admits a stranger to the bot itself, which is an operator act,
+    not a household one: `/invite` is owner-only because it hands out membership of
+    a household you own, but `/invite_signup` hands out the bot, and gating that on
+    "owns a household" would let every admitted tester admit more — a closed beta
+    that opens itself. So the list lives in the environment, next to `SIGNUP_MODE`,
+    where only whoever deploys can change it.
+
+    Fails closed the same way: unset or empty admits nobody, and a non-integer entry
+    is skipped rather than crashing the webhook (a fat-fingered env must not take the
+    bot down — the same reasoning as `daily_message_cap`). Comma-separated, spaces
+    tolerated: `ADMIN_TELEGRAM_IDS=12345, 67890`.
+    """
+    ids = set()
+    for part in (os.environ.get("ADMIN_TELEGRAM_IDS") or "").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.add(int(part))
+    return telegram_user_id in ids
+
+
 def is_authorized(conn: psycopg.Connection, telegram_user_id: int) -> bool:
     """May this Telegram user be served at all? — the one check before any work (§16).
 

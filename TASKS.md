@@ -601,6 +601,23 @@ means transactions with no home. Each task leaves the tree green and deployable.
       on screen. That label lives in BotFather and **nothing in the repo could see
       it**, so it is now recorded in `docs/DEPLOYMENT.md`; a rename there must
       change the text here too, and no test will catch it.
+- [x] Add `/invite_signup <label>` — the operator admits a tester with their own
+      household (§16). The `signup` grant already existed in the schema and in
+      `consume_invite`, but nothing could **issue** one: `/invite` mints the
+      `household` kind, so the only way to onboard a tester who is *not* joining
+      your household was an INSERT by hand. Gated on `ADMIN_TELEGRAM_IDS`, not on
+      owning a household — the gate `/invite` uses would let every admitted tester
+      admit more, which is a closed beta that opens itself. Fails closed: unset
+      admits nobody. **Not registered in BotFather** on purpose — the "/" menu is
+      the user-facing manual, and an operator command listed there is an invitation
+      to try it and be refused; it is likewise absent from `HELP_TEXT`.
+- [ ] `[human]` Set `ADMIN_TELEGRAM_IDS` to your own Telegram user id on
+      `kanakko-web` in Dokploy (`scripts/push-env.py` pushes it from `.env`), then
+      redeploy. Until it is set, `/invite_signup` refuses everyone — including you.
+      Get the id by sending any message and reading `from.id` from
+      `getUpdates`, or from `@userinfobot`. Note that `push-env.py` **replaces**
+      the whole application env, so anything set only in the Dokploy UI is dropped
+      on the next push — that is why the optional keys now ride along from `.env`.
 - [ ] `[human]` Set up the BotFather surfaces — no code, and the bot has none of
       them beyond the menu button. **`docs/DEPLOYMENT.md` now carries the exact
       command list to paste**, and it must stay in step with

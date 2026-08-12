@@ -21,7 +21,7 @@ import psycopg
 from pydantic import ValidationError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from kanakko.auth import signup_mode
+from kanakko.auth import is_admin, signup_mode
 from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
 from kanakko.confirm import category_prompt, confirm_card, settled_card
 from kanakko.db import (
@@ -31,6 +31,7 @@ from kanakko.db import (
     consume_invite,
     create_household_invite,
     create_household_of_one,
+    create_signup_invite,
     get_or_create_user,
     household_roster,
     remove_member,
@@ -481,6 +482,69 @@ def handle_invite(conn: psycopg.Connection, msg: TextMessage) -> str | None:
     send_message(msg.chat_id,
                  f"Invite for {label} — a single-use link to join your household:\n{link}")
     log_event("invite.issued", status="ok", update_id=msg.update_id,
+              source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+    return code
+
+
+INVITE_SIGNUP_COMMAND = "/invite_signup"
+
+INVITE_SIGNUP_USAGE = (
+    "Add a label so you can tell who's who — e.g. `/invite_signup ravi`. Each link "
+    "is single-use and gives that person their own household."
+)
+
+INVITE_SIGNUP_NOT_ADMIN = (
+    "Only the operator can issue signup invites. `/invite <name>` adds someone to "
+    "your own household."
+)
+
+
+def _is_invite_signup(text: str) -> bool:
+    """True when `text` is the `/invite_signup` command — bare or `@bot`-suffixed.
+
+    An underscore rather than the hyphen this reads as in prose: Telegram recognises
+    only `a-z 0-9 _` in a command, so `/invite-signup` splits at the hyphen and
+    BotFather cannot register it — it would work when typed by hand and be invisible
+    everywhere else.
+    """
+    words = text.split()
+    return bool(words) and words[0].split("@", 1)[0].lower() == INVITE_SIGNUP_COMMAND
+
+
+def handle_invite_signup(conn: psycopg.Connection, msg: TextMessage) -> str | None:
+    """Issue a labelled single-use signup invite link — operator only (§16).
+
+    `/invite_signup <label>` is how a tester gets in: the link admits them to the bot
+    and gives them a household of one, so their money is nobody else's business —
+    unlike `/invite`, which adds them to the caller's household. Gated on
+    `is_admin` (the environment, not the database — see `auth.is_admin`) because a
+    signup invite hands out the bot itself; a non-admin gets a refusal and no row.
+    A bare `/invite_signup` is a usage hint, not a row.
+
+    Same code shape and collision reasoning as `handle_invite`, with an `s-` prefix
+    so a glance at the `invites` table tells the two grants apart. Does not commit —
+    the caller owns the transaction. Returns the issued code, or `None`.
+    """
+    start = time.perf_counter()
+    user_id = get_or_create_user(conn, msg.from_id)
+    if not is_admin(msg.from_id):
+        send_message(msg.chat_id, INVITE_SIGNUP_NOT_ADMIN)
+        log_event("invite.signup_issued", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    label = _command_arg(msg.text)
+    if not label:
+        send_message(msg.chat_id, INVITE_SIGNUP_USAGE)
+        log_event("invite.signup_issued", status="noop", update_id=msg.update_id,
+                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
+        return None
+    code = "s-" + secrets.token_urlsafe(9)
+    create_signup_invite(conn, user_id, code, label)
+    link = f"https://t.me/{get_bot_username()}?start={code}"
+    send_message(msg.chat_id,
+                 f"Signup invite for {label} — single-use, gives them their own "
+                 f"household:\n{link}")
+    log_event("invite.signup_issued", status="ok", update_id=msg.update_id,
               source=msg.source, user_id=user_id, duration_ms=ms_since(start))
     return code
 

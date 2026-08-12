@@ -479,6 +479,21 @@ environment change — the policy is config, the mechanism is permanent. In
 `invite` mode an unrecognised user gets a polite refusal and **nothing is
 stored**, not even a user row.
 
+**`ADMIN_TELEGRAM_IDS` names the operator** — comma-separated Telegram user ids,
+and the answer to "issued by the operator" in the table above. `/invite_signup
+<label>` is gated on it; `/invite <label>` stays gated on owning a household,
+which the `households` table can answer in SQL. The operator is deliberately
+**not** a database role: a signup invite hands out the bot itself, so deriving the
+right from anything a user can acquire in-band — owning a household, being the
+first row — makes a closed beta that opens itself, one tester at a time. Fails
+closed like `SIGNUP_MODE`: unset admits nobody, and a non-integer entry is skipped
+rather than crashing the webhook.
+
+The command is `/invite_signup`, an underscore rather than a hyphen, because
+Telegram recognises only `a-z 0-9 _` in a command: `/invite-signup` would split at
+the hyphen, so BotFather could not register it and the client would not render it
+as tappable — a command that works only for whoever already knows to type it.
+
 **A known bug this exposes:** `handle_text` uses `msg.chat_id` as identity and
 never reads `message.from.id`. In a private chat the two coincide, so it works
 today; with households it is wrong. Identity and delivery address are different

@@ -90,3 +90,26 @@ def create_household_invite(
             (code, label, owner_user_id, owner_user_id),
         )
         return cur.rowcount == 1
+
+
+def create_signup_invite(
+    conn: psycopg.Connection, created_by_user_id: int, code: str, label: str
+) -> None:
+    """Issue a single-use signup invite — admits a new user with their own household (§16).
+
+    The other half of §16's two grants: `create_household_invite` adds someone to an
+    existing household, this one admits a stranger to the bot and `consume_invite`
+    gives them a household of one. `household_id` is NULL, which the
+    `invites_household_matches_kind` CHECK requires of the signup kind.
+
+    No permission check here, unlike its household sibling: ownership is a fact this
+    table can answer in SQL, but "is an operator" is not — it lives in the
+    environment (`auth.is_admin`), so the handler is the only place that can gate it.
+    Does not commit — the caller owns the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by)"
+            " VALUES (%s, 'signup', NULL, %s, %s)",
+            (code, label, created_by_user_id),
+        )

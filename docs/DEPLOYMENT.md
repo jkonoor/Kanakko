@@ -220,3 +220,10 @@ transfer - Hand over household ownership
 `/remove` and `/transfer` are listed deliberately. Leaving a destructive command
 out of the menu does not make it safer — it makes it unfindable — and `/remove`
 already asks Keep-or-Delete before it acts.
+
+**`/invite_signup` is deliberately absent** from that list and from `HELP_TEXT`.
+It is operator-only (gated on `ADMIN_TELEGRAM_IDS`, see DECISIONS §16), and a
+command in the "/" menu that refuses almost everyone who taps it is worse than an
+unlisted one. It works when typed regardless — Telegram does not require a command
+to be registered, only to be spelled with `a-z 0-9 _`, which is why the name
+carries an underscore and not the hyphen it reads with.

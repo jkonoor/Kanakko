@@ -10,12 +10,13 @@ from decimal import Decimal
 
 import psycopg
 import pytest
-from conftest import household_of
+from conftest import default_account_of, household_of
 
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.db import (
     confirm_pending,
     create_household_of_one,
+    create_recurring_rule,
     day_summary,
     get_or_create_user,
     month_summary,
@@ -29,6 +30,7 @@ from kanakko.db import (
     undo_last,
 )
 from kanakko.migrate import migrate
+from kanakko.money import parse_amount
 from kanakko.parse import Transaction
 
 
@@ -111,6 +113,49 @@ def test_confirm_writes_the_transaction_and_clears_pending(conn):
         )
         cur.execute("SELECT count(*) FROM pending_transactions WHERE telegram_message_id = 555")
         assert cur.fetchone() == (0,)
+    conn.rollback()
+
+
+def test_recurring_rule_id_flows_from_pending_to_the_settled_transaction(conn):
+    """`jobs.recurring`'s provenance survives Confirm untouched (§18).
+
+    `save_pending`'s `recurring_rule_id` is the only thing that tells
+    `confirm_pending` the card came from the cron, not a typed message — if
+    that column were dropped from either the SELECT or the INSERT, the stored
+    row would go back to `NULL` and there would be no way to ever tie a
+    settled transaction back to the rule that asked for it.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 12)
+    acc = default_account_of(conn, household_of(conn, user_id))
+    rule = create_recurring_rule(
+        conn, user_id, acc, EXPENSE_CATEGORIES[0], parse_amount("5000"), 5
+    )
+    save_pending(conn, user_id, 999, _txn(), recurring_rule_id=rule["rule_id"])
+
+    row = confirm_pending(conn, user_id, 999, source="cron", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT recurring_rule_id FROM transactions WHERE txn_id = %s", (row["txn_id"],)
+        )
+        assert cur.fetchone() == (rule["rule_id"],)
+    conn.rollback()
+
+
+def test_recurring_rule_id_defaults_to_null_for_an_ordinary_confirm(conn):
+    """Every non-cron caller of `save_pending` still stores no rule link."""
+    migrate(conn)
+    user_id = _seed_user(conn, 13)
+    save_pending(conn, user_id, 998, _txn())
+
+    row = confirm_pending(conn, user_id, 998, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT recurring_rule_id FROM transactions WHERE txn_id = %s", (row["txn_id"],)
+        )
+        assert cur.fetchone() == (None,)
     conn.rollback()
 
 

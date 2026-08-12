@@ -23,6 +23,7 @@ from kanakko.db import (
     create_refund,
     day_summary,
     delete_recurring_rule,
+    due_rules_today,
     list_recurring_rules,
     month_summary,
     set_recurring_rule_active,
@@ -960,4 +961,67 @@ def test_recurring_rule_amount_and_day_of_month_are_checked(conn):
                 " VALUES (%s, %s, %s, %s, %s, %s)",
                 (hh, acc, EXPENSE_CATEGORIES[0], Decimal("500"), 32, uid),
             )
+    conn.rollback()
+
+
+def test_due_rules_today_crosses_households_and_excludes_paused_and_wrong_day(conn):
+    """The cron's read: active, day-matched rules from *every* household (§18).
+
+    Unlike the CRUD above, this has no caller to scope by — `jobs.recurring`
+    runs once for the whole system, the same reach `db.users.all_users` has.
+    A rule due on the wrong day and a paused rule due on the right day must
+    both be silently excluded, or the cron would ask about money that isn't
+    due, or stay silent for a rule the user paused for nothing.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9870) RETURNING user_id")
+        (a,) = cur.fetchone()
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9880) RETURNING user_id")
+        (b,) = cur.fetchone()
+    hh_a = household_of(conn, a)
+    hh_b = household_of(conn, b)
+    acc_a = default_account_of(conn, hh_a)
+    acc_b = default_account_of(conn, hh_b)
+
+    due_a = create_recurring_rule(conn, a, acc_a, EXPENSE_CATEGORIES[0], parse_amount("5000"), 5)
+    due_b = create_recurring_rule(conn, b, acc_b, EXPENSE_CATEGORIES[1], parse_amount("999"), 5)
+    wrong_day = create_recurring_rule(conn, a, acc_a, EXPENSE_CATEGORIES[0], parse_amount("1"), 6)
+    paused = create_recurring_rule(conn, b, acc_b, EXPENSE_CATEGORIES[0], parse_amount("2"), 5)
+    set_recurring_rule_active(conn, b, paused["rule_id"], False)
+
+    due = due_rules_today(conn, 5)
+
+    assert {r["rule_id"] for r in due} == {due_a["rule_id"], due_b["rule_id"]}
+    assert wrong_day["rule_id"] not in {r["rule_id"] for r in due}
+    assert paused["rule_id"] not in {r["rule_id"] for r in due}
+    by_id = {r["rule_id"]: r for r in due}
+    assert by_id[due_a["rule_id"]]["account_name"] == "Bank"
+    assert by_id[due_a["rule_id"]]["telegram_user_id"] == 9870
+    assert by_id[due_a["rule_id"]]["created_by"] == a
+    conn.rollback()
+
+
+def test_due_rules_today_skips_a_rule_whose_account_was_later_soft_deleted(conn):
+    """A rule pinned to an account removed after creation must not surface (§18).
+
+    Nothing yet lets a user soft-delete an account, but the column exists and
+    every other account read filters it — a cron that skipped this filter
+    would try to send a confirm card that names a pool the dashboard no longer
+    shows.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (9890) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    hh = household_of(conn, uid)
+    acc = default_account_of(conn, hh)
+    rule = create_recurring_rule(conn, uid, acc, EXPENSE_CATEGORIES[0], parse_amount("500"), 7)
+
+    assert [r["rule_id"] for r in due_rules_today(conn, 7)] == [rule["rule_id"]]
+
+    with conn.cursor() as cur:
+        cur.execute("UPDATE accounts SET deleted_at = now() WHERE account_id = %s", (acc,))
+
+    assert due_rules_today(conn, 7) == []
     conn.rollback()

@@ -2,13 +2,14 @@
 
 §18: "A recurring rule (amount, category, account, day of month, active) is
 the answer to auto-debits... on the day, the cron sends the ordinary confirm
-card... not a silent insert." This module is the CRUD side — create, list,
-pause/resume, delete — household-scoped like `accounts.py` and `refunds.py`
-(§16's shared ledger means any member may manage a rule, not just the one who
-made it). The cron that finds a rule due today and sends the confirm card, and
-the dashboard's pause/delete controls, are separate tasks; these functions are
-what they will call — tested directly here in the meantime, the same split
-migration 014's `create_refund` used.
+card... not a silent insert." `create_recurring_rule`/`list_recurring_rules`/
+`set_recurring_rule_active`/`delete_recurring_rule` are the CRUD side —
+household-scoped like `accounts.py` and `refunds.py` (§16's shared ledger means
+any member may manage a rule, not just the one who made it). `due_rules_today`
+is the cron's read: `kanakko.jobs.recurring` calls it, builds a confirm card
+per row, and threads the rule id through `db.pending.save_pending` (§18) —
+the actual creation surface for a rule (a bot command or a dashboard form) is
+still undecided and is a separate task.
 """
 
 from decimal import Decimal
@@ -120,6 +121,44 @@ def set_recurring_rule_active(
         return None
     rid, is_active = row
     return {"rule_id": rid, "active": is_active}
+
+
+def due_rules_today(conn: psycopg.Connection, day_of_month: int) -> list[dict]:
+    """Every active rule whose `day_of_month` matches, across every household (§18).
+
+    Cross-household like `db.users.all_users` — the cron reaches every
+    household in one run, not one caller's. Joined to the account name (a card
+    reads "SIP, Bank", not "account 7") and the rule creator's Telegram id, the
+    send target (§18: the cron sends *a* confirm card, and the one who set the
+    rule up is who is expecting it). The account join filters `deleted_at IS
+    NULL` — a rule pinned to an account soft-deleted after creation simply
+    doesn't come up as due, the same silent-skip the recurring_rules_due_idx
+    partial index already assumes for a paused rule.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT r.rule_id, r.account_id, a.name, r.category, r.amount,"
+            " r.created_by, u.telegram_user_id"
+            " FROM recurring_rules r"
+            " JOIN accounts a ON a.account_id = r.account_id AND a.deleted_at IS NULL"
+            " JOIN users u ON u.user_id = r.created_by"
+            " WHERE r.active AND r.day_of_month = %s"
+            " ORDER BY r.rule_id",
+            (day_of_month,),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "rule_id": rule_id,
+            "account_id": account_id,
+            "account_name": account_name,
+            "category": category,
+            "amount": amount,
+            "created_by": created_by,
+            "telegram_user_id": telegram_user_id,
+        }
+        for rule_id, account_id, account_name, category, amount, created_by, telegram_user_id in rows
+    ]
 
 
 def delete_recurring_rule(conn: psycopg.Connection, user_id: int, rule_id: int) -> dict | None:

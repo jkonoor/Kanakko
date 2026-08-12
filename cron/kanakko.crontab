@@ -15,6 +15,9 @@
 # omit it and cron logs an error and ignores the whole file.
 
 # m  h dom mon dow  user  command
+# recurring runs before noon's nudge and evening's summary, on no wall-clock
+# time §12/§18 pin — 08:00 IST is a judgment call, not a spec requirement.
+0 8 * * *   root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.recurring > /proc/1/fd/1 2>&1
 0 12 * * *  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.noon    > /proc/1/fd/1 2>&1
 0 21 * * *  root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.evening > /proc/1/fd/1 2>&1
 0 9 1 * *   root  . /app/cron.env; cd /app && /app/.venv/bin/python -m kanakko.jobs.monthly > /proc/1/fd/1 2>&1

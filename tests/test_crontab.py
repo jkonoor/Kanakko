@@ -4,8 +4,8 @@ Both failure modes here are silent. A crontab in the wrong /etc/cron.d format
 (no user field) makes cron log an error to a place no one reads and skip every
 job. And cron runs each job with a *stripped* environment — if the entrypoint
 doesn't hand DATABASE_URL/TELEGRAM_BOT_TOKEN through, the jobs crash the moment
-they connect, but only at 12:00/21:00 IST, in the sidecar's log. So this file
-pins the schedule→job mapping (§12), the /etc/cron.d format, and — by actually
+they connect, but only at 08:00/12:00/21:00 IST, in the sidecar's log. So this
+file pins the schedule→job mapping (§12/§18), the /etc/cron.d format, and — by actually
 running the entrypoint — that a value survives the dump-and-source round trip.
 """
 
@@ -19,8 +19,9 @@ CRONTAB = (ROOT / "cron" / "kanakko.crontab").read_text()
 ENTRYPOINT = ROOT / "cron" / "entrypoint.sh"
 COMPOSE = (ROOT / "docker-compose.yml").read_text()
 
-# DECISIONS §12: (minute, hour, day-of-month, month, day-of-week) → job module.
+# DECISIONS §12/§18: (minute, hour, day-of-month, month, day-of-week) → job module.
 EXPECTED = {
+    "recurring": ("0", "8", "*", "*", "*"),
     "noon": ("0", "12", "*", "*", "*"),
     "evening": ("0", "21", "*", "*", "*"),
     "monthly": ("0", "9", "1", "*", "*"),

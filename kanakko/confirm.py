@@ -41,7 +41,7 @@ def account_keyboard(accounts: list[str]) -> InlineKeyboardMarkup:
 
 
 def confirm_card(
-    txn: Transaction, accounts: list[str] | None = None
+    txn: Transaction, accounts: list[str] | None = None, cancel_label: str = "❌ Cancel"
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Render `txn` as the confirm-card text plus its Confirm/Cancel keyboard.
 
@@ -72,6 +72,14 @@ def confirm_card(
     `to_account` (the pool doesn't exist yet — `confirm_pending` mints it on
     Confirm) leads with the question the task names: "New savings account
     'SIP'?" — Confirm/Cancel doubling as create/decline, no separate tap.
+
+    §18 (recurring rules): `cancel_label` swaps the second button's text —
+    `jobs.recurring` passes "⏭️ Skip" so a cron-sent card reads "Confirm /
+    Skip", matching the spec's wording, without a second callback_data or a
+    second handler: `callback_data=CANCEL` is unchanged, so the tap still
+    routes through the ordinary `handle_cancel`, which is exactly what
+    skipping this month's send means — discard the pending row, leave the rule
+    itself alone.
     """
     if txn.type == "transfer":
         to_display = txn.to_account or txn.new_locked_account
@@ -87,7 +95,7 @@ def confirm_card(
         keyboard = InlineKeyboardMarkup(
             [[
                 InlineKeyboardButton("✅ Confirm", callback_data=CONFIRM),
-                InlineKeyboardButton("❌ Cancel", callback_data=CANCEL),
+                InlineKeyboardButton(cancel_label, callback_data=CANCEL),
             ]]
         )
         return "\n".join(lines), keyboard
@@ -105,7 +113,7 @@ def confirm_card(
         [
             [
                 InlineKeyboardButton("✅ Confirm", callback_data=CONFIRM),
-                InlineKeyboardButton("❌ Cancel", callback_data=CANCEL),
+                InlineKeyboardButton(cancel_label, callback_data=CANCEL),
             ],
             *category_keyboard(txn.type).inline_keyboard,
             *(account_keyboard(accounts).inline_keyboard if show_accounts else []),

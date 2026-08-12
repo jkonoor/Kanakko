@@ -19,19 +19,28 @@ from kanakko.parse import Transaction
 
 
 def save_pending(
-    conn: psycopg.Connection, user_id: int, telegram_message_id: int, txn: Transaction
+    conn: psycopg.Connection,
+    user_id: int,
+    telegram_message_id: int,
+    txn: Transaction,
+    recurring_rule_id: int | None = None,
 ) -> int:
     """Store `txn` as a pending row keyed by the confirm card's message id.
 
     `model_dump(mode="json")` serializes `amount` as a string and `date` as ISO,
     so nothing float-shaped is persisted; `confirm_pending` reverses it through
-    the same model. Returns the new `pending_id`.
+    the same model. `recurring_rule_id` names the rule whose cron send produced
+    this card (§18) — `None` for the ordinary parse path, which is every caller
+    but `jobs.recurring`. Kept as its own column rather than a field on `txn`:
+    it is provenance about *why* the card exists, not part of the parsed
+    transaction. Returns the new `pending_id`.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO pending_transactions (user_id, telegram_message_id, parsed)"
-            " VALUES (%s, %s, %s) RETURNING pending_id",
-            (user_id, telegram_message_id, Jsonb(txn.model_dump(mode="json"))),
+            "INSERT INTO pending_transactions"
+            " (user_id, telegram_message_id, parsed, recurring_rule_id)"
+            " VALUES (%s, %s, %s, %s) RETURNING pending_id",
+            (user_id, telegram_message_id, Jsonb(txn.model_dump(mode="json")), recurring_rule_id),
         )
         (pending_id,) = cur.fetchone()
     return pending_id
@@ -51,6 +60,11 @@ def confirm_pending(
     globally (§1): keying on the message id alone would let one user's Confirm
     write another user's pending transaction. `save_pending` stores `user_id`;
     this reverses it with the same scoping.
+
+    Carries the pending row's `recurring_rule_id` (§18) straight onto the stored
+    row, unchanged — this function has no idea whether the card came from a
+    typed message or `jobs.recurring`'s cron send, and does not need to: the
+    `None` every ordinary confirm carries is just another value here.
 
     The row is homed in the entering user's household (§16): `household_id` is the
     `household_members` row for `user_id`, the tenancy axis §16 moves off the user.
@@ -86,7 +100,7 @@ def confirm_pending(
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "SELECT pending_id, parsed FROM pending_transactions"
+            "SELECT pending_id, parsed, recurring_rule_id FROM pending_transactions"
             " WHERE user_id = %s AND telegram_message_id = %s"
             " ORDER BY created_at DESC, pending_id DESC LIMIT 1",
             (user_id, telegram_message_id),
@@ -94,7 +108,7 @@ def confirm_pending(
         row = cur.fetchone()
         if row is None:
             return None
-        pending_id, parsed = row
+        pending_id, parsed, recurring_rule_id = row
         txn = Transaction.model_validate(parsed)
         cur.execute(
             "SELECT household_id FROM household_members WHERE user_id = %s", (user_id,)
@@ -157,10 +171,10 @@ def confirm_pending(
         cur.execute(
             "INSERT INTO transactions"
             " (user_id, household_id, account_id, amount, type, category, note, occurred_on,"
-            "  from_account_id, to_account_id)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
+            "  from_account_id, to_account_id, recurring_rule_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id",
             (user_id, household_id, account_id, txn.amount, txn.type, category, txn.note, txn.date,
-             from_account_id, to_account_id),
+             from_account_id, to_account_id, recurring_rule_id),
         )
         (txn_id,) = cur.fetchone()
         cur.execute("DELETE FROM pending_transactions WHERE pending_id = %s", (pending_id,))

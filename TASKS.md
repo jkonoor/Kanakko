@@ -1183,21 +1183,46 @@ per task:
       dropped the `household_id` join from `set_recurring_rule_active`'s
       UPDATE, watched `test_recurring_active_route_foreign_household_is_404`
       fail, restored it. `uv run pytest` → 428 passed (10 new).
-- [ ] Recurring rules for auto-debits — the cron send (split 3/3). On the
-      rule's `day_of_month`, the cron sends the ordinary confirm card ("SIP
-      ₹5,000 today?") with Confirm / Change amount / Skip — never a silent
-      insert (§18: a chit instalment changes every month, so a fixed
-      auto-entry is wrong nearly every time). Reuse the §4 confirm path
-      (`kanakko.db.pending`/`kanakko.confirm`) rather than building a second
-      write path; decide how the resulting transaction ties back to the
-      `rule_id` it came from (a nullable column, a new migration — 015's
-      comment anticipates `recurring_rule_id`). Fan out over rules due today,
-      not over users (`kanakko.jobs.fan_out` takes an iterable of
-      `(user_id, telegram_user_id)`; a rule send needs the rule's own id too,
-      so this likely wants its own fan-out shape rather than reusing it as-is
-      — see `kanakko/jobs/__init__.py`). Creation's own surface (a bot command
-      in the `/account`/`/invite` shape, or a dashboard form) is undecided and
-      belongs to this task, not the schema or dashboard splits above.
+- [x] Recurring rules for auto-debits — the cron send, Confirm/Skip half
+      (split 3a/3). Split further off "the cron send (split 3/3)": that task
+      bundled three things — the rule↔transaction link, the daily send, and
+      "Change amount" — and "Change amount" is a materially separate
+      interaction (a new free-text reply mode with its own bot state, not a
+      button relabel), not a stub if left for its own commit.
+      Done: migration 016 adds nullable `recurring_rule_id` (`ON DELETE SET
+      NULL` — a rule's hard delete must not break its own transaction
+      history) to both `pending_transactions` and `transactions`, and
+      recreates `active_transactions` (§6 — `SELECT *` froze the old column
+      list). `db.pending.save_pending`/`confirm_pending` thread it through
+      unchanged for every existing caller (`None` by default). New
+      `db.recurring.due_rules_today` is the cross-household read (like
+      `db.users.all_users`), filtering `active`, the day, and a live account.
+      New `kanakko.jobs.recurring` sends the ordinary confirm card via
+      `kanakko.confirm.confirm_card`'s new `cancel_label` param — "⏭️ Skip"
+      for a cron-sent card — reusing `handle_confirm`/`handle_cancel`
+      unchanged, since `callback_data=CANCEL` never moved (§18: "reuses the
+      entire §4 confirm machinery"). Its own fan-out loop, not
+      `kanakko.jobs.fan_out` (a rule send needs the rule's own data per
+      iteration, which that helper's per-user signature has no room for) —
+      same failure-isolation shape: one savepoint per rule, a commit before
+      raising `DeliveryFailures`. Crontab: daily 08:00 IST, a judgment call —
+      §12/§18 name no time. Two guards verified red-without-fix, green-with-
+      fix: `recurring_rule_id` surviving Confirm, and the per-rule savepoint
+      actually isolating a blocked recipient. `uv run pytest` → 435 passed
+      (7 new).
+- [ ] Recurring rules for auto-debits — "Change amount" on the cron's confirm
+      card (split 3b/3), the second of the three buttons §18 specifies
+      ("Confirm / Change amount / Skip" — split 3a/3 shipped Confirm/Skip).
+      Needs a bot-side "awaiting a free-text amount for pending_id N" state —
+      nothing in the webhook today distinguishes "the next text message is a
+      new transaction to parse" from "the next text message is a replacement
+      amount" — plus re-rendering the card via `edit_message_text` with the
+      corrected amount before Confirm is even tappable. Decide where that
+      state lives (a pending-row column, since the card being live already
+      implies one; not a new table).
+- [ ] Recurring rules for auto-debits — the creation surface (a bot command in
+      the `/account`/`/invite` shape, or a dashboard form). Undecided; belongs
+      to its own task, not the schema, dashboard, or cron-send splits above.
 - [ ] The reconcile nudge (§18): weekly, per account, "I think your Bank has
       ₹42,300 — what does your bank say?" A different figure writes a **visible
       adjustment row** against the `external` account. The guard is that the

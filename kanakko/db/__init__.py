@@ -45,6 +45,7 @@ from kanakko.db.pending import (
 from kanakko.db.recurring import (
     create_recurring_rule,
     delete_recurring_rule,
+    due_rules_today,
     list_recurring_rules,
     set_recurring_rule_active,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "list_recurring_rules",
     "set_recurring_rule_active",
     "delete_recurring_rule",
+    "due_rules_today",
     "save_pending",
     "confirm_pending",
     "set_pending_category",

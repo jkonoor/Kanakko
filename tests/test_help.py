@@ -109,7 +109,7 @@ def test_help_lists_every_command_and_the_failed_parse_stays_a_correction():
     served both jobs, a real expense that failed to parse was answered with a
     description of the bot and never told the user the *amount* was the problem.
     """
-    for command in ("/undo", "/household", "/invite", "/remove", "/transfer"):
+    for command in ("/undo", "/household", "/invite", "/remove", "/transfer", "/recurring", "refund"):
         assert command in handlers.HELP_TEXT, f"{command} is undiscoverable"
 
     # Names the menu button as it reads on screen (docs/DEPLOYMENT.md), so the

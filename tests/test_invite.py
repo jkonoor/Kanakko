@@ -6,13 +6,14 @@ homed in the owner's own household, labelled so the operator can tell who is
 active. A bare `/invite` with no label stores nothing.
 """
 
-from kanakko import handlers
+from kanakko.commands import invite as invite_command
+from kanakko.commands.invite import handle_invite
 from kanakko.db import (
     create_household_invite,
     create_household_of_one,
     get_or_create_user,
 )
-from kanakko.handlers import TextMessage, handle_invite
+from kanakko.handlers import TextMessage
 from kanakko.migrate import migrate
 
 OWNER_TG = 111
@@ -24,9 +25,9 @@ BOT = "kanakko_bot"
 def _stub_telegram(monkeypatch):
     """No network: capture sends, pin the bot username the link is built from."""
     sent = []
-    monkeypatch.setattr(handlers, "send_message",
+    monkeypatch.setattr(invite_command, "send_message",
                         lambda chat_id, text: sent.append((chat_id, text)))
-    monkeypatch.setattr(handlers, "get_bot_username", lambda: BOT)
+    monkeypatch.setattr(invite_command, "get_bot_username", lambda: BOT)
     return sent
 
 
@@ -95,7 +96,7 @@ def test_member_who_isnt_owner_is_refused(conn, monkeypatch):
 
     assert code is None
     assert _invite_rows(conn) == []  # nothing issued
-    assert sent == [(MEMBER_TG, handlers.INVITE_NOT_OWNER)]
+    assert sent == [(MEMBER_TG, invite_command.INVITE_NOT_OWNER)]
     conn.rollback()
 
 
@@ -108,7 +109,7 @@ def test_bare_invite_asks_for_a_label(conn, monkeypatch):
 
     assert code is None
     assert _invite_rows(conn) == []  # no label, no code
-    assert sent == [(OWNER_TG, handlers.INVITE_USAGE)]
+    assert sent == [(OWNER_TG, invite_command.INVITE_USAGE)]
     conn.rollback()
 
 
@@ -133,7 +134,7 @@ def _owner_id(conn):
 
 
 def test_is_invite_recognises_the_command():
-    assert handlers._is_invite("/invite ravi")
-    assert handlers._is_invite("/invite@kanakko_bot ravi")  # group form
-    assert not handlers._is_invite("invite ravi")
-    assert not handlers._is_invite("/invitation ravi")
+    assert invite_command._is_invite("/invite ravi")
+    assert invite_command._is_invite("/invite@kanakko_bot ravi")  # group form
+    assert not invite_command._is_invite("invite ravi")
+    assert not invite_command._is_invite("/invitation ravi")

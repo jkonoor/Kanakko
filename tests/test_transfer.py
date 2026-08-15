@@ -9,14 +9,15 @@ refused while they own the household, and succeeds once ownership has moved.
 
 from conftest import household_of
 
-from kanakko import handlers
+from kanakko.commands import transfer as transfer_module
+from kanakko.commands.transfer import handle_transfer
 from kanakko.db import (
     create_household_of_one,
     get_or_create_user,
     remove_member,
     transfer_ownership,
 )
-from kanakko.handlers import TextMessage, handle_transfer
+from kanakko.handlers import TextMessage
 from kanakko.migrate import migrate
 
 OWNER_TG = 111
@@ -26,7 +27,7 @@ OTHER_TG = 333
 
 def _stub_send(monkeypatch):
     sent = []
-    monkeypatch.setattr(handlers, "send_message",
+    monkeypatch.setattr(transfer_module, "send_message",
                         lambda chat_id, text, reply_markup=None: sent.append((chat_id, text, reply_markup)))
     return sent
 
@@ -141,7 +142,7 @@ def test_handle_transfer_bare_is_a_usage_hint(conn, monkeypatch):
     sent = _stub_send(monkeypatch)
 
     assert handle_transfer(conn, _msg(OWNER_TG)) is None
-    assert sent[-1][:2] == (OWNER_TG, handlers.TRANSFER_USAGE)
+    assert sent[-1][:2] == (OWNER_TG, transfer_module.TRANSFER_USAGE)
     assert _owner_of(conn, hid) == owner  # nothing moved
     conn.rollback()
 
@@ -155,7 +156,7 @@ def test_handle_transfer_member_cannot(conn, monkeypatch):
 
     # ravi (a member) tries to hand priya ownership — refused, nothing moves.
     assert handle_transfer(conn, _msg(MEMBER_TG, "/transfer priya")) is None
-    assert sent[-1][:2] == (MEMBER_TG, handlers.TRANSFER_NOT_OWNER)
+    assert sent[-1][:2] == (MEMBER_TG, transfer_module.TRANSFER_NOT_OWNER)
     assert _owner_of(conn, hid) == owner
     conn.rollback()
 
@@ -173,8 +174,8 @@ def test_handle_transfer_unknown_label(conn, monkeypatch):
 
 
 def test_is_transfer_recognises_the_command():
-    assert handlers._is_transfer("/transfer")
-    assert handlers._is_transfer("/transfer ravi")
-    assert handlers._is_transfer("/transfer@kanakko_bot")  # group form
-    assert not handlers._is_transfer("transfer")
-    assert not handlers._is_transfer("/transferred")
+    assert transfer_module._is_transfer("/transfer")
+    assert transfer_module._is_transfer("/transfer ravi")
+    assert transfer_module._is_transfer("/transfer@kanakko_bot")  # group form
+    assert not transfer_module._is_transfer("transfer")
+    assert not transfer_module._is_transfer("/transferred")

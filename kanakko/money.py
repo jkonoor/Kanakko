@@ -15,13 +15,16 @@ MAX_AMOUNT = Decimal("9999999999.99")
 _PAISE = Decimal("0.01")
 
 
-def parse_amount(value: str | int | Decimal) -> Decimal:
+def parse_amount(value: str | int | Decimal, *, allow_zero: bool = False) -> Decimal:
     """A positive ₹ amount as a `Decimal` quantized to paise.
 
     Accepts a string (optionally with a ₹ sign, commas, or surrounding space),
     an `int`, or a `Decimal`. Rejects `float` outright — see the module note.
-    Raises `ValueError` if the value is not a number, is not positive, or does
-    not fit `NUMERIC(12,2)`.
+    Raises `ValueError` if the value is negative (or, unless `allow_zero`, zero),
+    is not a number, or does not fit `NUMERIC(12,2)`. `allow_zero` exists for the
+    one caller where zero is a real answer, not a mistake: a reconcile reply
+    reporting an empty account (§18) — every other amount in the system (an
+    expense, a transfer, an opening balance) is a positive quantity by definition.
     """
     if isinstance(value, bool) or isinstance(value, float):
         # bool is an int subclass; a float has already lost precision.
@@ -45,7 +48,7 @@ def parse_amount(value: str | int | Decimal) -> Decimal:
     # (the `<= 0` below) then signals InvalidOperation uncaught. Reject here.
     if not amount.is_finite():
         raise ValueError(f"not a valid amount: {value!r}")
-    if amount <= 0:
+    if amount < 0 or (amount == 0 and not allow_zero):
         raise ValueError(f"amount must be positive: {value!r}")
     if amount > MAX_AMOUNT:
         raise ValueError(f"amount exceeds NUMERIC(12,2): {value!r}")
@@ -70,6 +73,7 @@ def demo() -> None:
     assert parse_amount(500) == Decimal("500.00")
     assert parse_amount(Decimal("0.1")) + parse_amount(Decimal("0.2")) == Decimal("0.30")
     assert format_amount(Decimal("1234.5")) == "₹1,234.50"
+    assert parse_amount("0", allow_zero=True) == Decimal("0.00")
 
     for bad in (10.0, 0.1, True):
         try:

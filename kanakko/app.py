@@ -1,73 +1,82 @@
-"""FastAPI app: webhook and Mini App routes."""
+"""FastAPI app: webhook, Mini App shell, and health check.
+
+The Mini App's data routes (`/app/data`, `/app/delete`, `/app/category`,
+`/app/edit`) live in `kanakko.webapp.routes` — this file was 497 lines once the
+edit route (task 974) landed, past CLAUDE.md's 300-line guideline, and those
+four routes plus `authenticated_user`/`permitted_user` were the obvious,
+self-contained seam to move. `/app/refund` (task 1082) and `/app/recurring/*`
+(task 1161 split 2/2a) are sibling modules for the same reason — `routes.py`
+was already at the 300-line guideline, so a fifth (then seventh) route there
+would have overshot it again.
+"""
 
 import hmac
 import os
 import time
-from datetime import date, timedelta
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from kanakko import __version__, configure_logging
 from kanakko.auth import is_authorized, within_daily_cap
-from kanakko.categories import ALL_CATEGORIES, CATEGORY_PREFIX
-from kanakko.confirm import CANCEL, CONFIRM
+from kanakko.categories import CATEGORY_PREFIX
+from kanakko.commands.account import _is_account, handle_account
+from kanakko.commands.invite import (
+    _is_invite,
+    _is_invite_signup,
+    handle_invite,
+    handle_invite_signup,
+)
+from kanakko.commands.recurring import _is_recurring, handle_recurring
+from kanakko.commands.refund import REFUND_PREFIX, _is_refund, handle_refund, handle_refund_choice
+from kanakko.commands.remove import REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice
+from kanakko.commands.transfer import _is_transfer, handle_transfer
+from kanakko.confirm import ACCOUNT_PREFIX, CANCEL, CHANGE_AMOUNT, CONFIRM
+from kanakko.confirm_flow import (
+    handle_account_choice,
+    handle_amount_reply,
+    handle_cancel,
+    handle_category,
+    handle_change_amount_request,
+    handle_confirm,
+)
 from kanakko.db import (
     claim_update,
     connect,
-    find_user,
     get_or_create_user,
-    month_summary,
-    recent_transactions,
-    set_transaction_category,
-    soft_delete_transaction,
+    pending_awaiting_amount,
+    pending_awaiting_reconcile,
 )
 from kanakko.eventlog import log_event, ms_since
 from kanakko.handlers import (
     ACCESS_REFUSED,
     CAP_REACHED,
-    REMOVE_PREFIX,
     TextMessage,
     _is_greeting,
     _is_help,
     _is_household,
-    _is_invite,
-    _is_invite_signup,
-    _is_remove,
     _is_start,
-    _is_transfer,
     _is_undo,
     dispatch,
-    handle_cancel,
-    handle_category,
-    handle_confirm,
     handle_help,
     handle_household,
-    handle_invite,
-    handle_invite_signup,
-    handle_remove,
-    handle_remove_choice,
     handle_start,
     handle_text,
-    handle_transfer,
     handle_undo,
 )
+from kanakko.reconcile_flow import handle_reconcile_reply
 from kanakko.tg import send_message
-from kanakko.webapp import (
-    SHELL_HTML,
-    InitDataError,
-    Period,
-    current_month_ist,
-    current_week_ist,
-    dashboard_html,
-    previous_month_first,
-    user_id_from_init_data,
-    validate_init_data,
-)
+from kanakko.webapp import SHELL_HTML
+from kanakko.webapp.recurring import router as webapp_recurring_router
+from kanakko.webapp.refund import router as webapp_refund_router
+from kanakko.webapp.routes import router as webapp_router
 
 configure_logging()
 
 app = FastAPI(title="Kanakko", version=__version__)
+app.include_router(webapp_router)
+app.include_router(webapp_refund_router)
+app.include_router(webapp_recurring_router)
 
 WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 
@@ -96,193 +105,6 @@ def healthz() -> dict[str, str]:
 def mini_app_shell() -> str:
     """Serve the Mini App bootstrap page (§13) — no data, no secret, no auth."""
     return SHELL_HTML
-
-
-TMA_PREFIX = "tma "
-
-def authenticated_user(request: Request, max_age: timedelta | None = None) -> int:
-    """The Telegram user id proved by this request's `initData`, or a 401 (§13).
-
-    Every Mini App route starts here, so the check exists once rather than once
-    per route — the third copy of an auth preamble is where they start to drift.
-    The bootstrap sends `initData` in `Authorization: tma <initData>` (Telegram's
-    documented scheme); validation *is* the authentication, so a valid HMAC both
-    proves the payload came from Telegram and names the user (§13).
-
-    A missing, malformed, forged or (with `max_age`) stale payload is a 401. An
-    unset `TELEGRAM_BOT_TOKEN` is left to raise, surfacing as a 500 — a loud
-    misconfiguration rather than a quiet bypass.
-
-    `max_age` is the replay window, and **state-mutating routes must pass one**
-    (§13): a captured `initData` must not stay a working delete button forever.
-    Read-only routes leave it `None`, where a stale-but-valid payload only ever
-    reveals the caller's own data.
-    """
-    header = request.headers.get("Authorization") or ""
-    if not header.startswith(TMA_PREFIX):
-        raise HTTPException(status_code=401)
-    try:
-        fields = validate_init_data(header[len(TMA_PREFIX):], max_age=max_age)
-        return user_id_from_init_data(fields)
-    except InitDataError:
-        raise HTTPException(status_code=401)
-
-
-def permitted_user(conn, telegram_user_id: int) -> int:
-    """This Mini App caller's internal `user_id`, or a 403 (§16).
-
-    `authenticated_user` proves *which* Telegram user is asking; it never asks
-    whether they are permitted. That is a separate question and this is where it
-    is answered — once, rather than once per route.
-
-    **Resolving must not create.** These routes previously called
-    `get_or_create_user`, so anyone who found the bot and tapped the menu button
-    minted a `users` row. That row then satisfied the bot's own gate, which asks
-    `user_exists` — so the Mini App was a way around the invite gate §16 exists to
-    be. Worse, the row belonged to no household, and `confirm_pending` derives
-    `household_id` from a membership that wasn't there: a NOT NULL violation, a
-    500, and a Telegram redelivery loop on every Confirm.
-
-    A user row is therefore the credential: it exists only after `/start` admitted
-    the person (an invite in `invite` mode, a household of one in `open` mode), so
-    "no row" means "has not been admitted" in either mode and gets a 403.
-    """
-    user_id = find_user(conn, telegram_user_id)
-    if user_id is None:
-        raise HTTPException(status_code=403)
-    return user_id
-
-
-@app.get("/app/data", response_class=HTMLResponse)
-def mini_app_data(request: Request) -> str:
-    """The dashboard fragment for the authenticated user (§13): totals, balance,
-    this-week and current-month figures.
-
-    Read-only, so `authenticated_user` is called without a `max_age`: a
-    stale-but-valid payload reveals only the caller's own figures.
-    """
-    telegram_user_id = authenticated_user(request)
-
-    with connect() as conn:
-        user_id = permitted_user(conn, telegram_user_id)
-        first, next_first = current_month_ist()
-        w_first, w_next = current_week_ist()
-        # month_summary is a generic date-range summary, so the same function
-        # serves all three periods — the week, the month, and (over a range wide
-        # enough to hold any ledger) all time. Each panel needs its *own* category
-        # breakdown, or switching to Week would show the month's bars underneath
-        # the week's figures.
-        w_income, w_expenses, w_top = month_summary(conn, user_id, w_first, w_next)
-        m_income, m_expenses, m_top = month_summary(conn, user_id, first, next_first)
-        a_income, a_expenses, a_top = month_summary(
-            conn, user_id, date.min, date.max
-        )
-        # Previous-period expenses give each hero a baseline — a figure with none
-        # is a record, not an insight. Same generic query, shifted bounds: the week
-        # before (a plain 7-day step back) and the month before (its 1st, which for
-        # January is December of the prior year — see `previous_month_first`). Both
-        # derive from the *current* bounds, so no second clock read can disagree
-        # with them at a month/week rollover. All-time has no prior period.
-        prev_m_first = previous_month_first(first)
-        _, pw_expenses, _ = month_summary(
-            conn, user_id, w_first - timedelta(days=7), w_first
-        )
-        _, pm_expenses, _ = month_summary(conn, user_id, prev_m_first, first)
-        recent = recent_transactions(conn, user_id)
-    return dashboard_html(
-        [
-            Period("week", "Week", "this week", w_income, w_expenses, w_top,
-                   pw_expenses, "vs last week"),
-            Period("month", "Month", first.strftime("%B %Y"), m_income, m_expenses,
-                   m_top, pm_expenses, "vs last month"),
-            Period("all", "All", "all time", a_income, a_expenses, a_top),
-        ],
-        recent,
-    )
-
-
-@app.post("/app/delete")
-async def mini_app_delete(request: Request) -> Response:
-    """Soft-delete one of the authenticated user's transactions (§13, task 100).
-
-    The dashboard's per-row delete button POSTs `{"id": <txn_id>}`. This route
-    *mutates state*, so it passes a 24h `max_age` — a captured `initData` must
-    not stay a working delete button forever (§13, and the official SDK's
-    default). The row is scoped to the user `authenticated_user` returns, resolved
-    from the *signed* `user` object, so one user cannot delete another's row by
-    guessing an id.
-
-    A body without a usable integer `id` is 400; a delete that matched no live row
-    of this user's is 404 (already gone, or never theirs). Success is 204 — the
-    client re-fetches `/app/data`.
-    """
-    telegram_user_id = authenticated_user(request, max_age=timedelta(hours=24))
-
-    try:
-        body = await request.json()
-        txn_id = int(body["id"])
-    except (ValueError, TypeError, KeyError):
-        raise HTTPException(status_code=400)
-
-    start = time.perf_counter()
-    with connect() as conn:
-        user_id = permitted_user(conn, telegram_user_id)
-        deleted = soft_delete_transaction(conn, user_id, txn_id,
-                                          source="miniapp", update_id=None)
-    # ponytail: log_event is a synchronous write inside an async route — fine at
-    # this scale (one line, no fsync). Move to a queue only if the sink ever
-    # blocks the event loop. No `update_id`: a Mini App POST is not a Telegram
-    # update (§17 gap 2). A 404 (already gone, or never this user's) is `noop`.
-    if deleted is None:
-        log_event("transaction.deleted", status="noop", source="miniapp",
-                  user_id=user_id, duration_ms=ms_since(start))
-        raise HTTPException(status_code=404)
-    log_event("transaction.deleted", status="ok", source="miniapp",
-              user_id=user_id, duration_ms=ms_since(start),
-              txn_id=deleted["txn_id"], amount=deleted["amount"])
-    return Response(status_code=204)
-
-
-@app.post("/app/category")
-async def mini_app_category(request: Request) -> Response:
-    """Change the category of one of the user's transactions (§5, §13, task 101).
-
-    The dashboard's per-row category `<select>` POSTs
-    `{"id": <txn_id>, "category": <name>}`. Like `/app/delete` this *mutates
-    state*, so it passes a 24h `max_age` (§13). `category` must be one of the
-    closed set (`categories.py`, §11); anything else is a 400, so a forged body
-    cannot write a junk label. The row is scoped to the authenticated user, so one
-    user cannot relabel another's.
-
-    A body without a usable integer `id`, or an unknown `category`, is 400; an id
-    matching no live row of this user's is 404. Success is 204.
-    """
-    telegram_user_id = authenticated_user(request, max_age=timedelta(hours=24))
-
-    try:
-        body = await request.json()
-        txn_id = int(body["id"])
-        category = body["category"]
-    except (ValueError, TypeError, KeyError):
-        raise HTTPException(status_code=400)
-    if category not in ALL_CATEGORIES:
-        raise HTTPException(status_code=400)
-
-    start = time.perf_counter()
-    with connect() as conn:
-        user_id = permitted_user(conn, telegram_user_id)
-        updated = set_transaction_category(conn, user_id, txn_id, category,
-                                           source="miniapp", update_id=None)
-    # ponytail: synchronous log write in an async route — see /app/delete above
-    # for the ceiling and upgrade path. No `update_id` (§17 gap 2); 404 is `noop`.
-    if updated is None:
-        log_event("transaction.recategorised", status="noop", source="miniapp",
-                  user_id=user_id, duration_ms=ms_since(start))
-        raise HTTPException(status_code=404)
-    log_event("transaction.recategorised", status="ok", source="miniapp",
-              user_id=user_id, duration_ms=ms_since(start),
-              txn_id=updated["txn_id"], amount=updated["amount"])
-    return Response(status_code=204)
 
 
 @app.post("/webhook")
@@ -350,6 +172,21 @@ async def webhook(request: Request) -> dict[str, bool]:
                       source="webhook", duration_ms=ms_since(start))
             return {"ok": True}
         user_id = get_or_create_user(conn, action.from_id)
+        # §18: a "Change amount" tap marks its card `awaiting_amount` (below), so
+        # the *next* text message this user sends is a replacement amount, not a
+        # transaction to parse — checked once, up front, for every TextMessage.
+        awaiting_message_id = (
+            pending_awaiting_amount(conn, user_id) if isinstance(action, TextMessage) else None
+        )
+        # §18: the weekly reconcile nudge marks itself awaiting a reply the same
+        # way — checked only when no amount-change reply is already claiming this
+        # message, since the two "next text message is a reply" states cannot both
+        # be answered by the one message that arrives.
+        awaiting_reconcile = (
+            pending_awaiting_reconcile(conn, user_id, action.reply_to_message_id)
+            if isinstance(action, TextMessage) and awaiting_message_id is None
+            else None
+        )
         # §16 cost control: only the text-parse path is an LLM call (§2), so a
         # runaway user is an unbounded bill on the owner's OpenRouter credits.
         # /undo and the Confirm/Cancel/category taps cost nothing — they are never
@@ -357,15 +194,25 @@ async def webhook(request: Request) -> dict[str, bool]:
         # crucially, never *metered*: the claim below stamps `user_id` only on the
         # parse path, leaving callback/undo rows NULL so `count_updates_on_day`
         # counts exactly the messages that spend credits (§16), not the free taps.
-        is_parse = isinstance(action, TextMessage) and not (
-            _is_undo(action.text)
-            or _is_help(action.text)
-            or _is_greeting(action.text)
-            or _is_invite(action.text)
-            or _is_invite_signup(action.text)
-            or _is_household(action.text)
-            or _is_remove(action.text)
-            or _is_transfer(action.text)
+        # An amount reply is the same kind of free tap — no LLM call — so it is
+        # excluded here too.
+        is_parse = (
+            isinstance(action, TextMessage)
+            and awaiting_message_id is None
+            and awaiting_reconcile is None
+            and not (
+                _is_undo(action.text)
+                or _is_help(action.text)
+                or _is_greeting(action.text)
+                or _is_invite(action.text)
+                or _is_invite_signup(action.text)
+                or _is_household(action.text)
+                or _is_remove(action.text)
+                or _is_transfer(action.text)
+                or _is_account(action.text)
+                or _is_recurring(action.text)
+                or _is_refund(action.text)
+            )
         )
         if is_parse and not within_daily_cap(conn, user_id):
             send_message(action.chat_id, CAP_REACHED)
@@ -379,7 +226,15 @@ async def webhook(request: Request) -> dict[str, bool]:
             return {"ok": True}  # a prior delivery of this update was handled
         try:
             if isinstance(action, TextMessage):
-                if _is_undo(action.text):
+                if awaiting_message_id is not None:
+                    handle_amount_reply(conn, action, awaiting_message_id)
+                elif awaiting_reconcile is not None:
+                    handle_reconcile_reply(
+                        conn, action,
+                        awaiting_reconcile["telegram_message_id"],
+                        awaiting_reconcile["account_id"],
+                    )
+                elif _is_undo(action.text):
                     handle_undo(conn, action)
                 elif _is_help(action.text) or _is_greeting(action.text):
                     handle_help(conn, action)
@@ -393,16 +248,28 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_remove(conn, action)
                 elif _is_transfer(action.text):
                     handle_transfer(conn, action)
+                elif _is_account(action.text):
+                    handle_account(conn, action)
+                elif _is_recurring(action.text):
+                    handle_recurring(conn, action)
+                elif _is_refund(action.text):
+                    handle_refund(conn, action)
                 else:
                     handle_text(conn, action)
             elif action.data == CONFIRM:
                 handle_confirm(conn, action)
             elif action.data == CANCEL:
                 handle_cancel(conn, action)
+            elif action.data == CHANGE_AMOUNT:
+                handle_change_amount_request(conn, action)
             elif action.data.startswith(CATEGORY_PREFIX):
                 handle_category(conn, action)
+            elif action.data.startswith(ACCOUNT_PREFIX):
+                handle_account_choice(conn, action)
             elif action.data.startswith(REMOVE_PREFIX):
                 handle_remove_choice(conn, action)
+            elif action.data.startswith(REFUND_PREFIX):
+                handle_refund_choice(conn, action)
         except Exception:
             log_event("update.handled", status="error", update_id=update_id,
                       source="webhook", duration_ms=ms_since(start))

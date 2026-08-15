@@ -12,6 +12,2775 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-13 — `4f2646e` 9.6's manual-test money check reworked as a delta
+
+**Scope:** docs-only. Reworks `docs/TESTING.md` row 9.6 and the money-path callout
+below the §9 table from an absolute total ("Exactly ₹2,000") to a delta ("rises by
+exactly ₹2,000 across 9.4–9.5"). Also appends a `RESOLVED` block to the prior
+review in `REVIEWS.md`. This fixes finding 1 from the `6a398e6` review below.
+
+**Status:** ✅ DONE — the fix is correct, and it is the right *kind* of fix
+(robust delta, not a patched-up absolute).
+
+### What I checked
+
+- `git show HEAD` — the diff touches only `docs/TESTING.md` (row 9.6 + the callout
+  prose) and `REVIEWS.md`. No code.
+- Read the full §9 flow (`docs/TESTING.md:342–369`) to trace what spending exists
+  before 9.6. 9.1 confirms `spent 40 on tea`; 9.3 sends tea again (its expected
+  column checks the *card display*, so whether the tester confirms it is left
+  ambiguous). Either way, an absolute total at 9.6 is ≥ ₹2,000 + at least one
+  ₹40 tea — so the old "Exactly ₹2,000" would fail a *correct* implementation.
+  The finding it fixes was real. The reworded delta sidesteps the ambiguity: the
+  rise from a baseline taken after 9.3 is +₹2,000 (swipe) + ₹0 (transfer) = ₹2,000
+  regardless of what the baseline was.
+- Verified the load-bearing behavioural claim against the implementation. In
+  `kanakko/db/reports.py:70–81`, `month_summary` sums `type = 'expense'` (net of
+  `refund`) and reads `active_transactions` — a `transfer` row (type `'transfer'`)
+  is excluded, and the swipe (an `expense`, regardless of which account it hits)
+  is included. So 9.4's swipe adds ₹2,000 to this-month spending and 9.5's bill
+  payment (a transfer) adds nothing. The delta of exactly ₹2,000 holds.
+- `uv run pytest -q` → **477 passed** in 20.79s. Docs-only, so nothing code-side
+  could have moved; run to confirm the tree is green, not to guard the doc.
+
+### Findings
+
+None. The commit message's own arithmetic (`₹2,040`) reads 9.3 as unconfirmed
+(one tea, not two); if 9.3 *is* confirmed the absolute would be `₹2,080`. That
+discrepancy lives only in the commit message and is exactly the fragility the
+delta rewrite removes — the doc itself no longer asserts any absolute, so it is
+correct under either reading. Not a finding.
+
+---
+
+## 2026-08-13 — `6a398e6` Phase 10 manual-test section (§9) for accounts, transfers, reconciliation
+
+**Scope:** docs-only. Adds `## 9` (rows 9.1–9.18) to `docs/TESTING.md`, a Summary
+table row, and folds 9.6/9.13 into the "stops a release" money-path callout; ticks
+the "Add a Phase 10 section to `docs/TESTING.md`" task in `TASKS.md`.
+
+**Status:** ⚠️ CHANGES REQUESTED → ✅ RESOLVED (see the block below) — the 9.6
+arithmetic error fixed in the follow-up commit on `ralph/phase-10`.
+
+> **RESOLVED.** Finding 1 (MEDIUM — 9.6's "Exactly ₹2,000" ignored the 9.1/9.3
+> tea spending already in the same sequential flow): reworded 9.6 to a delta
+> check — "rises by exactly ₹2,000 across 9.4–9.5 (the swipe) — the bill
+> payment adds nothing" — measured from the total noted after 9.3, not an
+> absolute figure. Updated the money-path callout below the table to say the
+> same. No code changed; this section has no `pytest` surface (the doc says so
+> itself), so there is no automated guard to add — the check here is the
+> cross-read against the implementing code that this same review already did
+> for 9.6 (`kanakko/db` totals: tea is Food spending on Bank, the swipe is Food
+> spending on the credit card, the bill payment is a transfer excluded from
+> both totals) and that a delta, unlike an absolute figure, holds regardless of
+> what ran earlier in the manual script.
+
+### What I checked
+
+- `git show HEAD` / `--stat`: two files, `TASKS.md` (+6) and `docs/TESTING.md`
+  (+39). No code touched.
+- Cross-read each of the 18 rows against the implementing code to confirm the
+  *expected* value the tester is told to accept is the behaviour the code
+  actually produces (a manual test that asserts a wrong expected value is the
+  "guard that doesn't guard" failure, one rung up):
+  - 9.11 `/account <name>` → `kanakko/commands/account.py:101-105` emits
+    `"{name} — put in {contributed}, got back {paid_out}"`; the FD created by
+    `put 5000 in FD` has opening_balance 0 so no "started with" tail — matches
+    the doc's `"put in ₹5,000.00, got back ₹5,500.00"`.
+  - 9.13 over-refund refusal → real guard, migration 014's trigger, caught as
+    `psycopg.errors.RaiseException` in `kanakko/commands/refund.py:131-136` and
+    turned into `REFUND_OVER_LIMIT`. The remaining-₹300 arithmetic in the row
+    (500 spent − 200 refunded) is right.
+  - 9.15 "each account except `external`" → `accounts_for_reconcile`
+    (`kanakko/db/reconcile.py:34-41`) filters `a.kind <> 'external'`. Correct.
+  - 9.16/9.17 adjustment vs. "no changes needed" →
+    `kanakko/reconcile_flow.py:66-75`: a matching figure makes `create_adjustment`
+    return `None` → `RECONCILE_MATCHED` (no row); a mismatch writes the visible
+    adjustment. Both match the rows.
+  - 9.18 bare (non-Reply) answer in a two-account household falls through →
+    `jobs/reconcile.py:32-49` + `pending_awaiting_reconcile` only route a bare
+    reply when exactly one ask is outstanding. Correct.
+- `uv run pytest -q` → **477 passed, 1 warning in 20.20s**. (The doc's own note
+  "no `pytest` surface to run" is accurate — nothing here is code — but the
+  suite is green, so no adjacent breakage.)
+
+### Findings
+
+**1. (MEDIUM, money path) 9.6's "Exactly ₹2,000" is off by the tea money — the
+section's primary money check would misfire.** `docs/TESTING.md:339` (row 9.6).
+The rows are a single sequential flow with no reset. 9.1 confirms `spent 40 on
+tea` — a ₹40 Food expense on the default Bank `spending` account, which counts
+toward "this month's spending". 9.4 then confirms the ₹2,000 dinner swipe. So by
+9.6 the dashboard's monthly spending is **₹2,040** (₹40 tea + ₹2,000 swipe; ₹2,080
+if 9.3's second tea is also confirmed), not "Exactly ₹2,000". A tester following
+the script literally sees ₹2,040, and 9.6 is explicitly one of the checks that
+"stops a release" — so a correct implementation reads as a money-path FAIL, or
+the tester learns to discount the word "Exactly" and rubber-stamps the row that
+matters most. The real double-count guard is a *delta*, not an absolute: the
+swipe (9.4) must add ₹2,000 and the bill payment (9.5) must add ₹0.
+*Suggested fix:* phrase 9.6 as a delta or scope it away from the tea — e.g.
+"this month's spending rises by **exactly ₹2,000** across 9.4–9.5 (the swipe),
+and the bill payment adds nothing — not a second ₹2,000", or note the ₹40 tea
+explicitly in the expected total. The point being protected (swipe counts once,
+bill payment never) is right; only the absolute figure is inconsistent with the
+script's own earlier steps.
+
+No other row had an expected value that contradicts the code or the flow; the
+relative checks (9.8/9.10 "unchanged", 9.14 "reduced by the refunded amount only")
+are correct as written. The `TASKS.md` tick is legitimate — the section is a real
+18-row deliverable with the Summary and callout wiring the note claims, not a stub.
+
+---
+
+## 2026-08-13 — `b13a599` cover reply-id extraction and steer nudges into it (b71effc review follow-up)
+
+**Status: ✅ DONE**
+
+Scope: the fix commit for the two MEDIUM findings in the `b71effc` review —
+(1) `dispatch()`'s `reply_to_message.message_id` extraction was untested; and
+(2) `nudge_text()` never asked the user to tap Reply, so a bare answer in the
+ordinary multi-account household had no reply target and `pending_awaiting_reconcile`
+correctly refused to guess, routing the reply through parse instead of reconcile.
+
+### What I checked
+
+- `git show HEAD` — four files: `kanakko/jobs/reconcile.py` (adds `_REPLY_CUE`,
+  appends it to both nudge wordings), `tests/test_webhook.py` (+1 test),
+  `tests/test_jobs_reconcile.py` (+1 assertion), `REVIEWS.md`.
+- `uv run pytest -q` → **477 passed, 1 warning** (was 476). Matches the claim.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Guard 1 fails for its reason.** Reverted `handlers.py:118` to
+  `reply_to_message_id=None` and ran
+  `test_text_message_carries_the_telegram_reply_target` → **1 failed**
+  (`assert None == 909`); restored → passes. The test exercises the real
+  extraction line off a Telegram payload and confirms a bare message (no
+  `reply_to_message` key) yields `None`, closing the gap where every other test
+  set the field directly.
+- **Guard 2 fails for its reason.** Blanked `_REPLY_CUE` to `""` and ran
+  `test_run_nudges_every_live_non_external_account` → **1 failed**; restored →
+  passes. The assertion (`texts.count("Reply to this message with the number.")
+  == 2`) reddens if either wording drops the cue.
+- **Chain is consistent end to end.** `create_reconcile_ask`
+  (`db/reconcile.py:56`) keys the awaiting row by the nudge's own
+  `message_id`; Telegram echoes that same id as `reply_to_message.message_id`
+  when the user taps Reply; `dispatch` extracts it (`handlers.py:118`); `app.py:186`
+  passes it to `pending_awaiting_reconcile`, which matches it against
+  `telegram_message_id`. The cue steers the user into exactly the reply shape the
+  matcher needs — the fix targets the root cause, not a symptom.
+
+### Findings
+
+None. Both prior findings are genuinely resolved (verified by sabotage, not by
+claim), the fix is minimal, money/timezone paths are untouched, and no new
+dependency, float, or spec drift was introduced.
+
+---
+
+## 2026-08-13 — `b71effc` reconcile reply routes by nudge, not by recency (104d562 review follow-up)
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — both
+findings fixed in the follow-up commit on `ralph/phase-10`.
+
+> **RESOLVED.** Finding 1 (MEDIUM — untested extraction line): added
+> `test_text_message_carries_the_telegram_reply_target` (`tests/test_webhook.py`),
+> asserting `dispatch()` reads `reply_to_message.message_id` off a real Telegram
+> payload into `TextMessage.reply_to_message_id`, and that a bare message (no
+> `reply_to_message` key) yields `None`. Sabotaged
+> `kanakko/handlers.py`'s extraction line to hardcode `reply_to_message_id=None`
+> — the new test failed (`assert None == 909`); restored — passes. Finding 2
+> (MEDIUM — nudge doesn't ask for a reply): `nudge_text` now appends "Reply to
+> this message with the number." to both the credit and non-credit wording, so
+> the reply shape `pending_awaiting_reconcile` needs for a multi-account
+> household is the one the nudge steers the user into. Extended
+> `test_run_nudges_every_live_non_external_account` to assert the cue appears in
+> both sent nudges; blanked `_REPLY_CUE` to `""` — failed; restored — passes.
+> `uv run pytest -q` → **477 passed, 1 warning** (was 476; +1 new test).
+> `ruff check kanakko/ tests/` → **All checks passed!**
+
+Scope: the fix commit for the three `104d562` findings — `TextMessage` gains
+`reply_to_message_id`; `pending_awaiting_reconcile` matches the reply to its
+exact nudge (or refuses to guess with >1 outstanding); receipts name the
+account; `parse_amount` gains `allow_zero` for an emptied account.
+
+### What I checked (and what the commands returned)
+
+- `uv run pytest -q` → **476 passed, 1 warning** (matches the claim; was 473).
+- **Verified the HIGH guard is real:** reverted `kanakko/db/reconcile.py` to its
+  parent (`git show HEAD~1:…`), ran
+  `test_pending_awaiting_reconcile_does_not_misroute_across_two_asks` → **1
+  failed**, restored → passes. The misroute guard fails for the reason it exists.
+- **Verified the zero path is correct, not just accepted:** read
+  `create_adjustment` (`kanakko/db/reconcile.py:186`). Reported `0` on a
+  `spending` account with presented balance ₹1000 → `drift=-1000`, `amount=1000`,
+  from=account→external. Reads go through `active_transactions`; amount stays
+  `Decimal`. `test_a_zero_reply_is_a_real_answer` asserts `amount == 1000.00`. ✓
+- **Verified `allow_zero` still rejects negatives:** `parse_amount("-5",
+  allow_zero=True)` raises (`amount < 0` branch); `"0"` → `Decimal("0.00")`. ✓
+- Confirmed all other `pending_awaiting_reconcile` callers rely on the
+  `reply_to_message_id=None` default, so the signature change is safe.
+- Confirmed the three claimed findings are genuinely resolved (not stubbed):
+  account name interpolated via `household_accounts` (household-scoped, excludes
+  `external`, falls back to `"the account"`); receipts formatted with it.
+
+### Findings
+
+**1. MEDIUM — the one line the whole HIGH fix depends on is untested; silent
+breakage passes green.** `kanakko/handlers.py:118` —
+`reply_to_message_id=(message.get("reply_to_message") or {}).get("message_id")`.
+Everything above it (the db-layer routing, the field default, the app.py
+plumbing) is tested by passing `reply_to_message_id` *directly*; the webhook
+tests monkeypatch `pending_awaiting_reconcile` to a stub. Nothing exercises
+`dispatch` extracting the id from a real Telegram payload. I sabotaged that line
+to hardcode `None` (so replies never carry their nudge id — the exact regression
+the HIGH fix prevents) and ran the full suite: **476 passed**. A typo'd key or
+wrong field here silently defeats the fix and every multi-account reply falls
+through to parsing, with green tests — precisely the "guard that reports safety
+it doesn't provide" this repo flags first. *Fix:* extend
+`test_text_message_is_dispatched_with_its_fields` (or add a sibling) with a
+`reply_to_message: {message_id: 909}` in the update and assert
+`action.reply_to_message_id == 909`. One assertion; it reddens under the sabotage.
+
+**2. MEDIUM — the nudge never tells the user to reply, so the normal §18
+multi-account case silently doesn't reconcile.** `kanakko/jobs/reconcile.py`
+`nudge_text` sends a plain message. Telegram only populates `reply_to_message`
+when the user explicitly taps "Reply"; a user reading a bot message in a 1:1
+chat and typing "42300" sends a bare message with no reply target. §18 is
+explicitly *per account*, so a household with Bank + Card is the ordinary case —
+and for it, `pending_awaiting_reconcile` with `len(rows) > 1` and no
+`reply_to_message_id` returns `None` (correctly refusing to misroute), so the
+reply falls through to the LLM parse path and becomes a spurious pending
+transaction to confirm instead of an adjustment. The fix correctly removes the
+previous *silent wrong adjustment*, but leaves the multi-account happy path
+non-functional for the reply shape users actually send. *Fix:* append a reply
+cue to `nudge_text` (e.g. "Reply to this message with the number"), so the
+`reply_to_message_id` path the fix relies on is the one users are steered into.
+Single-account households are unaffected (bare reply still resolves).
+
+Neither finding is a money-correctness bug — the zero path, the Decimal
+handling, the `active_transactions` reads, and the misroute guard are all
+correct. Both are about the fix being verifiable and complete for the case §18
+actually targets. Fix finding 1 (a one-line test) before finding 2.
+
+---
+
+## 2026-08-13 — `104d562` reconcile nudge: the weekly send and the reply (Phase 10, split 2/2)
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — all three
+findings fixed in the follow-up commit on `ralph/phase-10`.
+
+> **RESOLVED.** Finding 1 (HIGH — misroute): `TextMessage` now carries
+> `reply_to_message_id` (Telegram's own `reply_to_message.message_id`, captured
+> in `handlers.dispatch`). `db.pending_awaiting_reconcile(conn, user_id,
+> reply_to_message_id)` matches the reply to its exact nudge by
+> `telegram_message_id` when one is given; with no reply target it only
+> resolves when exactly one ask is outstanding, and returns `None` — falling
+> through to ordinary handling rather than guessing — when more than one is
+> outstanding and the reply doesn't say which. `app.py` passes
+> `action.reply_to_message_id` through. New guard
+> `test_pending_awaiting_reconcile_does_not_misroute_across_two_asks`
+> (`tests/test_reconcile.py`) reproduces the exact two-account (Bank + Card)
+> scenario from this review and asserts the older Bank ask is still reachable
+> by its own message id; reverting the db-layer fix (`git stash` the three
+> touched files) reddens it — confirmed. Finding 2 (LOW — unnamed receipt):
+> `RECONCILE_MATCHED`/`RECONCILE_ADJUSTED` now interpolate the account's name
+> (`db.household_accounts`, already household-scoped the same way
+> `create_adjustment` is). Finding 3 (LOW — zero balance): `money.parse_amount`
+> gained an `allow_zero` keyword (default `False`, so every other caller is
+> unchanged) and `reconcile_flow` passes `allow_zero=True` — a genuinely-empty
+> account can now be reported as `0`. `uv run pytest -q` → **476 passed, 1
+> warning** (was 473; +3 new: the misroute guard, a zero-reply test, and an
+> `allow_zero` unit test). `ruff check kanakko/ tests/` → **All checks passed!**
+
+Lands the other half of §18's reconcile nudge: `kanakko/jobs/reconcile.py` (the
+weekly Sunday-10:00-IST cron fan-out, one nudge per household account), migration
+`019` (makes `pending_transactions.parsed` nullable, adds
+`awaiting_reconcile_account_id` with an XOR CHECK), the `db.reconcile` read/ask/
+clear triple, and `kanakko/reconcile_flow.py` wired into the webhook. The money
+math, sign convention, failure-isolation loop, and both named guards all hold.
+**But the reply is routed to the wrong account whenever a household has more than
+one reconcilable account — which is the normal §18 case — writing the reported
+figure as an adjustment against an account the user never meant.** That is a
+silent money-correctness bug and blocks.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD --stat` — scope is exactly the 14 files claimed. No money-path
+  code outside the reconcile flow is touched.
+- `uv run pytest -q` → **473 passed, 1 warning** (the pre-existing Starlette
+  deprecation). Matches the commit's claimed count. `ruff check kanakko/` → **All
+  checks passed!**
+- **Both named guards verified red-without-fix, independently:**
+  - Stripped the `CHECK` block from migration `019` (kept the column change),
+    reran `test_migrate.py::test_pending_transactions_row_is_a_parsed_transaction_xor_a_reconcile_ask`
+    → **1 failed** (the "neither set" / "both set" inserts stopped raising
+    `CheckViolation`). Restored.
+  - Removed the `elif awaiting_reconcile is not None:` branch from `app.py`'s
+    webhook, reran `test_webhook.py::test_webhook_routes_an_awaited_reconcile_reply_and_never_meters_it`
+    → **1 failed** (the reply fell through instead of routing to
+    `handle_reconcile_reply`). Restored. `git status` clean afterwards.
+- **Reproduced the routing bug empirically.** A throwaway test: one user, the
+  default `Bank` (spending, id 1) plus a seeded `Card` (credit, id 3); ran
+  `reconcile.run(conn)` (2 nudges sent), then called the same
+  `pending_awaiting_reconcile(conn, uid)` the webhook uses to pick where a reply
+  goes. It returned `account_id = 3` (Card) — so a user answering the *Bank*
+  nudge has their bank balance applied to the *Card*. Deleted the temp test;
+  tree clean.
+- Read the spec (`docs/DECISIONS.md` §18), `db/reconcile.py`, `db/accounts.py`
+  (`account_balances`), `db/pending.py`, `money.py` (`parse_amount` is `Decimal`,
+  rejects float), `handlers.py` (`dispatch`, `TextMessage`), and confirmed
+  `today_ist()` buckets in `Asia/Kolkata`, not UTC.
+
+### Findings
+
+**1. (HIGH — silent wrong account) The reply is matched to the newest outstanding
+ask by LIFO, not to the nudge the user is answering.**
+`kanakko/reconcile_flow.py` + `kanakko/app.py:185` + `kanakko/db/reconcile.py:293`
+(`pending_awaiting_reconcile`).
+
+The weekly cron creates one awaiting-reply row *per account* in a household
+(`jobs/reconcile.py` fan-out; `test_run_nudges_every_live_non_external_account`
+asserts `count == 2` for a single user with a Bank and a Card). When a reply
+arrives, `app.py` picks the ask via `pending_awaiting_reconcile`, which returns
+`ORDER BY created_at DESC, pending_id DESC LIMIT 1` — the *most recent* ask. The
+reply carries no linkage to which nudge it answers: `dispatch` (`handlers.py:106`)
+never captures `reply_to_message`, and `RECONCILE_ADJUSTED` doesn't name the
+account, so the misroute is invisible.
+
+Failure scenario (reproduced above): Sunday 10:00, a household with Bank (id 1)
+and Card (id 3) receives two nudges — "I think your Bank has ₹42,300 — what does
+your bank say?" and "I think you owe ₹5,000 on Card…". The user reads the Bank
+nudge and replies `42300`. `pending_awaiting_reconcile` returns the Card ask
+(newest), so `handle_reconcile_reply` clears the Card ask and calls
+`create_adjustment(..., account_id=Card, reported=42300)` — writing a ~₹37,300
+adjustment against the credit card the user never touched, and replying "Logged
+an adjustment of ₹37,300.00 to match what you told me" with no account name. The
+user believes they reconciled the Bank. Note `created_at` is the transaction
+timestamp (constant within the run), so the `pending_id DESC` tie-break makes
+this deterministic, not race-dependent.
+
+Suggested fix: tie the reply to its nudge. Capture `reply_to_message.message_id`
+in `dispatch`, and have the webhook look up the ask by that specific
+`telegram_message_id` (the ask is already keyed by the nudge's message id) rather
+than by "most recent". When the reply isn't a Telegram reply (a bare number with
+no `reply_to`), either refuse-and-ask-which-account or fall back only when exactly
+one ask is outstanding. The single-account case the tests cover keeps working
+either way; the multi-account case stops corrupting the wrong ledger.
+
+**2. (LOW — compounds #1) The reply receipt names neither the account nor the
+old figure.** `kanakko/reconcile_flow.py:19-21` (`RECONCILE_MATCHED`,
+`RECONCILE_ADJUSTED`). Even once #1 is fixed, "Logged an adjustment of ₹X to
+match what you told me" gives the user nothing to verify against — which account,
+adjusted from what to what. Including the account name (and the previous derived
+balance) turns the receipt into a check the user can actually read, and would
+have made #1 visible in manual testing. Suggested fix: include the account name
+in both messages.
+
+**3. (LOW — edge) A genuinely-zero reported balance can't be entered.**
+`kanakko/reconcile_flow.py:502` calls `money.parse_amount`, which rejects `"0"`
+(`amount must be positive`). A user whose bank truly reads ₹0 gets
+`RECONCILE_RETRY_PROMPT` on every attempt and can never settle the ask. §18
+doesn't mandate zero handling, so this is non-blocking, but worth a note.
+
+### What is correct
+
+- **Money stays `Decimal`.** `parse_amount` refuses floats; `create_adjustment`
+  and `account_balances` compute over `NUMERIC` via `active_transactions` (§6),
+  never `transactions` directly. The nudge quotes `account_balances`'s own figure
+  rather than a third copy of the balance formula, as the commit claims.
+- **Sign convention carries through** for `credit`: reply `700` on a card owing
+  `500` deepens the debt (`from_account_id == card`), verified by the committed
+  test and consistent with `create_adjustment`'s algebra.
+- **Failure isolation** mirrors `jobs.fan_out`: per-account savepoint, failures
+  collected and raised after a commit, so one blocked recipient neither stops nor
+  rolls back the rest (`test_one_blocked_recipient_does_not_silence_the_others`).
+- **Metering:** the reply is a free tap — not metered, not capped (`is_parse` is
+  false, `claim_update` gets `None`), matching §16 and the amount-reply path.
+- **The XOR CHECK** genuinely prevents a pending row from being both/neither a
+  parsed transaction and a reconcile ask, verified red-without-fix.
+- **Crontab:** weekly `0 10 * * 0`, parsed by `test_crontab.py`; the `cron`
+  container runs `TZ=Asia/Kolkata`, so Sunday 10:00 is IST.
+
+---
+
+## 2026-08-13 — `2fd6537` reconciliation adjustments: the write path (Phase 10, split 1/2)
+
+**Status: ✅ DONE**
+
+Lands `kanakko/db/reconcile.py::create_adjustment` — the money-correctness core
+of the §18 reconcile nudge. Compares a reported balance against the account's
+derived figure and, on a mismatch, writes an ordinary `transfer` against the
+household's `external` account plus an `action="adjustment"` audit row (never a
+silent balance rewrite). Migration `018` only widens
+`transaction_events.action` to admit `'adjustment'`. No caller yet, by design —
+the weekly cron send and the free-text reply are the still-unticked split 2/2.
+The math, the sign convention, the household scoping, and the named guard all
+hold. One non-blocking maintainability finding (formula duplication) below.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` / `--stat` — scope is exactly the four files claimed plus the
+  `TASKS.md` tick: new `reconcile.py`, migration `018`, `test_reconcile.py`, one
+  export line in `db/__init__.py`. No money-path code elsewhere is touched.
+- `uv run pytest -q` → **463 passed, 1 warning** (the pre-existing Starlette
+  deprecation). Matches the commit's claimed count; `test_reconcile.py -q` → **6
+  passed** on its own.
+- **The named guard is real, verified independently.** Blanked migration `018`
+  (`printf '-- reverted' > 018_…sql`), reran `test_reconcile.py` →
+  **3 failed, 3 passed**, all three failures a `CheckViolation` on
+  `transaction_events_action_check` at the `_record_event` INSERT — i.e. the
+  three write-path tests can only pass if the audit row is actually written, not
+  if only the balance moved. Restored the file; suite green again. The three
+  no-write tests (matching report, foreign account, external account) stay green
+  because they assert `None` + unchanged row counts, which is correct.
+- **Sign convention traced by hand and confirmed against the tests.** Credit
+  card, opening `-500` (owes ₹500 presented), reports owing ₹700: `drift =
+  700 − 500 = 200`, `sign = −1`, `delta_raw = −200` → transfer *card → external*
+  ₹200, deepening the debt the same direction a swipe would. Recomputed
+  presented balance after: `−1·(−500 − 200) = 700` = reported. Spending account
+  ₹1000 → reports ₹1200: `delta_raw = +200` → *external → Bank* ₹200,
+  recomputes to ₹1200. Both directions match `account_balances`, and the tests
+  assert the post-write balance equals the reported figure via
+  `account_balances` — so a wrong-signed transfer would fail loudly.
+- **Money stays `Decimal`.** `drift = reported_balance − presented_balance`
+  (both `Decimal`, `presented_balance` from `NUMERIC(12,2)`), `sign` is a Python
+  `int`, `int · Decimal → Decimal`, `abs(Decimal) → Decimal`. No float anywhere
+  on the amount path. `drift == 0` short-circuits to `None` (no zero-value row).
+- **Schema/CHECK preserved.** `018` drops+re-adds
+  `transaction_events_action_check` as `('confirm','undo','delete',
+  'recategorise','edit','refund','adjustment')` — a superset of the post-014
+  set (`…,'refund'`), so no previously-valid action is dropped. `migrate.py`
+  discovers it by `sorted(glob('*.sql'))`, so it applies with no runner change
+  (confirmed by the full suite passing with the new action in use).
+- **Transfer INSERT column shape matches the existing write path.** Sets
+  `from_account_id`/`to_account_id`, leaves `account_id` NULL — exactly what
+  `011`'s `transactions_transfer_accounts_check` and `012`'s
+  `account_id IS NOT NULL OR type = 'transfer'` require, and what
+  `pending.confirm_pending` does for a transfer. `category` defaults NULL
+  (correct — transfers carry none and are excluded from every total).
+- **Reads go through `active_transactions`** in the balance recompute (§6); the
+  write targets base `transactions` (correct). Household scoping is the same
+  `household_id = (SELECT … FROM household_members WHERE user_id = %s)` predicate
+  `account_balances` uses, and the account lookup additionally requires
+  `kind <> 'external' AND deleted_at IS NULL` — the two `None`-return tests
+  (foreign account, `external` itself) confirm both refusals with unchanged row
+  counts.
+
+**Findings**
+
+1. **Non-blocking (maintainability / future silent-drift risk) —
+   `kanakko/db/reconcile.py:44-58` duplicates the entire balance formula from
+   `kanakko/db/accounts.py:153-165`, credit-sign `CASE` and all.** This is the
+   "second copy is a warning" case CLAUDE.md names ("One definition per thing…
+   two places that must agree will eventually disagree"). It is **correct
+   today** — I diffed the two blocks and they are byte-for-byte the same
+   arithmetic. The risk is prospective: if `account_balances` ever gains a new
+   balance-affecting term (a new transaction type, a rule change), `reconcile`'s
+   recompute silently diverges and `create_adjustment` writes a *wrong-sized*
+   transfer — a silent money error, not a crash. The tests guard the tested
+   scenarios (they assert the post-write balance via `account_balances`) but
+   not a newly-added term. Suggested fix when split 2/2 or any balance change
+   lands: have `create_adjustment` reuse `account_balances(conn, user_id)` (pick
+   the row for `account_id`, read its `balance`/`kind`) plus a one-line lookup
+   for `external_account_id`, so the formula lives in exactly one place — or
+   promote the formula to a real SQL `VIEW` both query. Not blocking because the
+   code is correct and covered as shipped; flagging so the third copy never
+   arrives.
+
+**Verdict:** the write path does what §18 and the task asked — a visible ledger
+row plus a distinguishable audit row, correct sign convention, household-scoped,
+zero-drift no-op, `external` refused. The tick is honest (a complete, tested
+function, no stub), and the split boundary matches how 014/015 shipped
+refunds/recurring. ✅ DONE.
+
+---
+
+## 2026-08-13 — `734faf5` split handlers.py: confirm-card core → `kanakko/confirm_flow.py` (Phase 10 follow-up)
+
+**Status: ✅ DONE**
+
+Pure refactor, the follow-up split after the six command slices. Moves the six
+confirm-card handlers (`handle_confirm`/`handle_cancel`/`handle_category`/
+`handle_account_choice`/`handle_change_amount_request`/`handle_amount_reply`)
+plus the two `CHANGE_AMOUNT*` prompt constants out of `handlers.py` into a new
+sibling module `kanakko/confirm_flow.py`. `app.py` imports them from
+`confirm_flow` now; `handlers.py` drops the imports only those handlers needed
+(`cancel_pending`/`confirm_pending`/`set_pending_*`/`request_amount_change`,
+`answer_callback_query`/`delete_message`/`edit_message_text`,
+`ALL_CATEGORIES`/`CATEGORY_PREFIX`/`ACCOUNT_PREFIX`/`SKIP_LABEL`/`settled_card`,
+`Transaction`/`parse_amount`). Three docstring/comment cross-references
+(`confirm.py`, `db/pending.py`, `commands/__init__.py`) retargeted from
+`handlers.` to `confirm_flow.`. No behaviour change: no money math, no
+timezone/boundary logic, no SQL, no auth surface is touched — only where code
+lives.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — the diff is a move plus import/reference bookkeeping,
+  nothing else.
+- **Verbatim move proven**, not assumed: extracted the six functions from
+  `HEAD~1:handlers.py` (from `def handle_confirm`, line 514 to EOF) and from
+  `confirm_flow.py` (line 49 to EOF) and `diff`'d them → **exit 0, identical**.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!** (this is the real
+  guard here — it would flag any dropped import still referenced by the code
+  that stayed, or any unused import left behind; both would be silent otherwise).
+- `uv run pytest -q` → **457 passed**, same count as the pre-split baseline
+  recorded in `TASKS.md`.
+- **Red-without-fix verified independently.** The moved handlers call
+  `answer_callback_query`/`edit_message_text`/`delete_message`/`send_message`,
+  which the tests monkeypatch. If a patch stayed on `handlers` it would be a
+  silent no-op *only if the symbol still existed there* — so I confirmed those
+  symbols are **gone** from `handlers.py` (`grep` → no matches), then reverted
+  one retarget (`confirm_flow` → `handlers`) in
+  `test_handle_confirm_writes_the_ledger_row_and_acknowledges` and reran:
+  `AttributeError: <module 'kanakko.handlers'> has no attribute
+  'answer_callback_query'` at `test_webhook.py:687`. Restored via
+  `git checkout`; tree clean. So the retarget is load-bearing, not cosmetic —
+  a stale patch fails loudly rather than passing while the real network call
+  fired.
+- No import cycle: `confirm_flow` imports `ButtonPress`/`TextMessage` from
+  `handlers`, and `handlers` does not import `confirm_flow`; `app.py` imports
+  both. Confirmed the module graph loads (the whole suite imports `app`).
+- `handlers.py` 728 → 491 lines; `confirm_flow.py` 263. Still over the 300-line
+  guideline for the spine, which the commit message and `TASKS.md` both state
+  openly rather than claim done — not a finding.
+
+**Findings:** none. `TASKS.md` ticks the follow-up-split box, which now matches
+reality: the confirm core lives in its own module, the tests exercise it there,
+and the box's own note keeps the "spine still > 300 lines" caveat visible.
+
+---
+
+## 2026-08-13 — `b9675c8` split handlers.py: `/refund` → `kanakko/commands/refund.py` (Phase 10, slice 6/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, the last of the six planned command slices and the same shape
+as 1–5. Moves the `refund` surface — `REFUND_WORD`/`REFUND_PREFIX`/
+`REFUND_USAGE`/`REFUND_BAD_AMOUNT`/`REFUND_NO_CANDIDATES`/`REFUND_GONE`/
+`REFUND_OVER_LIMIT`, `_is_refund`, `_refund_keyboard`, `handle_refund`,
+`handle_refund_choice` — verbatim into a new module; `app.py` reimports them
+from `kanakko.commands.refund`; `handlers.py` drops the now-orphaned
+`create_refund`/`refund_candidates` db imports, `date`/`Decimal`, the
+`InlineKeyboard*` imports, and `kanakko.parse.today`.
+
+**What I checked (commands run, actual output):**
+
+- `git show HEAD` — confirmed the moved code is byte-for-byte identical
+  (the removed handlers.py block and the added refund.py block match line for
+  line; no logic changed in the move).
+- `grep` for `handle_refund|_is_refund|REFUND_|refund_candidates|create_refund|_refund_keyboard`
+  across `kanakko/` — the only live (non-docstring, non-`.pyc`) references
+  outside the new module are `kanakko/app.py:31` (import) and its use sites at
+  `app.py:192,226,242` (`is_parse` exclusion, dispatch, callback routing). No
+  stale import of the moved names remains in `handlers.py`.
+- `uv run python -c "import kanakko.app; import kanakko.commands.refund; import kanakko.handlers"`
+  → `imports OK`. `refund.py` imports `TextMessage`/`ButtonPress`/
+  `_command_arg` from `handlers`, and `handlers` no longer imports `refund`,
+  so no import cycle — matches slices 1–5.
+- `uv run ruff check kanakko/ tests/` → `All checks passed!` (no dead imports
+  left behind by the move).
+- `uv run pytest -q` → **457 passed**, 1 unrelated Starlette deprecation
+  warning. Matches the commit claim exactly.
+- `uv run pytest tests/test_refund_ux.py tests/test_webhook.py -q` → **64
+  passed**. The refund UX tests now patch `refund_command.send_message`/
+  `edit_message_text`/`answer_callback_query` and read `refund_command.REFUND_*`/
+  `_is_refund` — i.e. they exercise the new module, so they would have failed
+  (stale-patch `AttributeError` / real-send leak) had the split been wrong,
+  the same red-without-fix class the commit documents.
+
+**Spec fit:** nothing money-related changed. `handle_refund_choice` still
+routes writes through `db.create_refund`, whose over-limit guard is migration
+014's trigger (`RaiseException` caught → `REFUND_OVER_LIMIT` reply, not a 500);
+amounts stay `Decimal` via `parse_amount`; the untrusted-button re-scope by
+presser is unchanged. No `float`, no direct `transactions` read, no new
+dependency, no confidence score introduced.
+
+**Findings:** none blocking.
+
+- (minor, pre-existing, out of scope) Docstrings in `kanakko/webapp/recent.py`,
+  `kanakko/db/refunds.py`, and `kanakko/db/reports.py` still refer to
+  `handlers.handle_refund`/`handlers.handle_refund_choice`, which now live in
+  `kanakko.commands.refund`. Cosmetic only, not introduced by this commit, and
+  the same drift the earlier slices left — worth a sweep when the follow-up
+  spine split lands, not a fix for this iteration.
+
+The follow-up task the commit filed (`handlers.py` still 728 lines vs the
+300-line guideline, confirmed by `wc -l`) is correctly left unchecked in
+`TASKS.md`. The ticked box is real, not a stub.
+
+---
+
+## 2026-08-13 — `8e5afbf` split handlers.py: `/recurring` → `kanakko/commands/recurring.py` (Phase 10, slice 5/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slices 1–4. Moves the `/recurring` surface —
+`RECURRING_*` constants, `_is_recurring`, `_match_category_and_account`,
+`handle_recurring` — out of `handlers.py` into a new
+`kanakko/commands/recurring.py`, rewires `app.py`'s imports, drops the now-stale
+`create_recurring_rule`/`household_accounts`/`EXPENSE_CATEGORIES` imports from
+`handlers.py`, retargets `tests/test_recurring_command.py`, and fixes a stale
+docstring reference in `db/recurring.py`. The shared spine
+(`TextMessage`/`_command_arg`) stays in `handlers.py` and is imported by the new
+module. No money, timezone, soft-delete, `active_transactions`, or SQL path is
+touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the block
+  deleted from `handlers.py` (both guards, `_match_category_and_account`,
+  `handle_recurring`, all six `RECURRING_*` strings) is character-identical to
+  the block added in `kanakko/commands/recurring.py`. No logic, validation, or
+  `EXPENSE_CATEGORIES` sourcing changed — the category side is still
+  `EXPENSE_CATEGORIES` from `kanakko/categories.py`, accounts still come from
+  `household_accounts`, never a literal.
+- **No stale references left in `handlers.py`.** `grep -nE
+  'EXPENSE_CATEGORIES|create_recurring_rule|household_accounts|_is_recurring|handle_recurring|RECURRING_'
+  kanakko/handlers.py` → no output. The three dropped imports
+  (`create_recurring_rule`, `household_accounts`, `EXPENSE_CATEGORIES`) are gone
+  from `handlers.py` and nothing there still needs them; `ALL_CATEGORIES`/
+  `CATEGORY_PREFIX` correctly stay (still used by `handle_category`).
+- **Routing intact.** `app.py:30` imports `_is_recurring, handle_recurring` from
+  `kanakko.commands.recurring`; dispatch at `app.py:194,227-228` is unchanged by
+  the move. `test_webhook.py`'s routing test patches `app_module` directly, so
+  it is unaffected — confirmed still green in the full run.
+- **Only importers of the moved symbols are the new module and its test.**
+  `grep` across `kanakko`/`tests`: `recurring.py` imports `TextMessage,
+  _command_arg` from `handlers`; the test imports `TextMessage` from `handlers`
+  and everything else from `recurring_command`. Nothing else reaches into
+  `handlers` for the moved names.
+- **`uv run pytest -q` → 457 passed, 1 warning** (17.5s). Matches the commit
+  claim exactly.
+- **`uv run ruff check` on all three changed modules → All checks passed!** —
+  confirms no unused import was left behind after the drop.
+- **Red-without-fix verified independently.** Copied the test, repointed
+  `_stub_send` to patch `handlers.send_message` (the pre-move module) instead of
+  `recurring_command.send_message`, and reran: all 10 tests failed with
+  `RuntimeError: TELEGRAM_BOT_TOKEN is not set` (`kanakko/tg.py:31`) — the stub
+  never intercepted, so the real send path ran. This proves the retargeted
+  patch actually binds to the module `handle_recurring` now calls, not a stale
+  no-op. Same failure class the commit reported.
+
+### Findings
+
+None. This is a mechanical, behaviour-preserving move; the test binding was
+verified to still exercise the moved code, and no money/timezone/soft-delete
+surface is in scope. `handlers.py` is now 864 lines — still over the 300-line
+convention, but that is the explicit purpose of this incremental split
+(slice 6/6, `/refund`, remains), not a regression from this commit.
+
+---
+
+## 2026-08-13 — `7ca3917` split handlers.py: `/invite` + `/invite_signup` → `kanakko/commands/invite.py` (Phase 10, slice 4/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slices 1–3 (`/transfer`, `/account`, `/remove`). Moves
+both `/invite*` surfaces — `INVITE_*`/`INVITE_SIGNUP_*` constants, `_is_invite`,
+`_is_invite_signup`, `handle_invite`, `handle_invite_signup` — out of
+`handlers.py` into a new `kanakko/commands/invite.py`, rewires `app.py`'s
+imports, drops the now-stale `secrets`/`is_admin`/`get_bot_username`/
+`create_household_invite`/`create_signup_invite` imports from `handlers.py`, and
+retargets `tests/test_invite.py` and `tests/test_invite_signup.py`. The shared
+spine (`TextMessage`/`_command_arg`) stays in `handlers.py` and is imported by
+the new module. No behaviour, money, timezone, soft-delete, or SQL path is
+touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the block
+  deleted from `handlers.py` (both handlers, both guards, all `INVITE_*`
+  constants, the `h-`/`s-` code prefixes, the `is_admin` and
+  `create_household_invite` owner gates) is character-identical to the block
+  added in `kanakko/commands/invite.py`. No logic, string, or §16
+  authorization changed.
+- **Routing intact.** `grep` of `app.py`: lines 24–29 import `_is_invite`,
+  `_is_invite_signup`, `handle_invite`, `handle_invite_signup` from
+  `kanakko.commands.invite`; the dispatch block (189–219) is unchanged by the
+  diff — `git diff HEAD~1 HEAD -- kanakko/app.py` touches only imports, not the
+  `elif` chain. `_is_invite_signup` is still tested before `_is_invite` so
+  `/invite_signup` never falls through to the household handler (confirmed by
+  `test_is_invite_signup_recognises_the_command`).
+- **No dangling references.** `grep` across `kanakko/` and `tests/` for the
+  moved names: every consumer now points at `kanakko.commands.invite`
+  (`app.py`, `test_invite.py`, `test_invite_signup.py`).
+  `test_webhook.py:926` patches `app_module.handle_invite`, which still resolves
+  since `app.py` re-imports it into its own namespace.
+- **Test retarget is correct, incl. the two-module patch.** `test_invite.py`
+  drives only `handle_invite` (now using `invite_command.send_message`/
+  `get_bot_username`), so its single-module patch is right.
+  `test_invite_signup.py`'s end-to-end consume test also drives `handle_start`,
+  which stays in `handlers.py` and sends through `handlers.send_message`; its
+  stub patches **both** modules, so no real send path leaks. This matches the
+  commit's stated guard rationale.
+- **Live run.**
+  - `uv run pytest tests/test_invite.py tests/test_invite_signup.py tests/test_webhook.py -q` → **61 passed**.
+  - `uv run pytest -q` → **457 passed**, 1 unrelated Starlette deprecation warning.
+  - `uv run ruff check` → **All checks passed!**
+  - All three match the commit message's claims exactly.
+
+### Findings
+
+None. A clean, behaviour-preserving code move; imports, routing, and tests are
+consistent, and the full suite is green. `handlers.py` is now 994 lines
+(1116 → 994), continuing the Phase 10 split toward the 300-line target.
+
+---
+
+## 2026-08-13 — `d59e511` split handlers.py: `/remove` → `kanakko/commands/remove.py` (Phase 10, slice 3/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slices 1/6 (`/transfer`) and 2/6 (`/account`). Moves
+the `/remove` surface — the `REMOVE_*` constants, `_REMOVE_WARNING`,
+`_is_remove`, `_removal_keyboard`, `handle_remove`, and `handle_remove_choice`
+— out of `handlers.py` into a new `kanakko/commands/remove.py`, rewires
+`app.py`'s imports, drops the now-stale `check_removal`/`remove_member` db
+imports from `handlers.py`, and retargets `tests/test_member_removal.py` and
+`tests/test_webhook.py` at the new module. The shared spine
+(`TextMessage`/`ButtonPress`/`_command_arg`) stays in `handlers.py`. No
+behaviour, money, timezone, soft-delete, or SQL path is touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the block
+  deleted from `handlers.py` is character-identical to the block added in
+  `kanakko/commands/remove.py` (constants, warning template, both handlers,
+  `_is_remove`, `_removal_keyboard`). No logic, string, or `§16` authorization
+  changed. Money/tz/soft-delete not in scope of a move.
+- **Routing intact.** `grep` of `app.py`: line 24 imports
+  `REMOVE_PREFIX, _is_remove, handle_remove, handle_remove_choice` from
+  `kanakko.commands.remove`; dispatch still calls `_is_remove` (190, 220),
+  `handle_remove` (221), and routes `REMOVE_PREFIX`-prefixed callbacks to
+  `handle_remove_choice` (242–243). The re-auth-on-tap design (`remove_member`
+  keyed by presser, not button) is preserved unchanged.
+- **No circular import.** `remove.py` imports `TextMessage`/`ButtonPress`/
+  `_command_arg` from `handlers.py`; `handlers.py` no longer references
+  anything in `remove.py`. `uv run python -c "import kanakko.app; import
+  kanakko.commands.remove; import kanakko.handlers"` → `imports ok`.
+- **Shared spine / stale imports.** `grep` confirms `TextMessage` (67),
+  `ButtonPress` (96), `_command_arg` (245) remain in `handlers.py`;
+  `check_removal`/`remove_member`/`_is_remove` no longer appear there
+  (correctly dropped/moved).
+- **No stale monkeypatches.** `grep "handlers\." tests/test_member_removal.py`
+  → no matches; all `send_message`/`edit_message_text`/`answer_callback_query`
+  patches and `REMOVE_*` reads now target `remove_command`. A patch left on
+  `handlers` would silently no-op (the finding class the commit guards against);
+  none remain. `test_webhook.py` patches `app_module.handle_remove*`
+  (routing-level, valid since `app` imports them into its own namespace).
+- **Suite + lint.** `uv run pytest` → **457 passed**; `uv run ruff check` on
+  the three touched modules → **All checks passed!**. `handlers.py` is **1116
+  lines** and `remove.py` **184** — both match the commit message.
+
+### Findings
+
+None. Verbatim move, routing and tests intact, `TASKS.md` box correctly ticked.
+
+## 2026-08-13 — `d14980a` split handlers.py: `/account` → `kanakko/commands/account.py` (Phase 10, slice 2/6)
+
+**Status: ✅ DONE**
+
+Pure refactor, mirroring slice 1/6. Moves `/account` — the `ACCOUNT_*`
+constants, `_is_account`, `_looks_like_amount`, `_find_locked_account`,
+`_handle_account_query`, and `handle_account` — out of `handlers.py` into a new
+`kanakko/commands/account.py`, rewires `app.py`'s imports, drops the now-stale
+`locked_account_totals`/`set_account_opening_balance` db imports from
+`handlers.py`, and retargets `tests/test_account_command.py`'s monkeypatch and
+`ACCOUNT_*` reads at the new module. `handle_account_choice` (confirm-card core)
+stays in `handlers.py`. No behaviour, money, timezone, or SQL path is touched.
+
+### What I checked
+
+- **Code move is verbatim.** Read the full `git show HEAD` diff: the removed
+  block in `handlers.py` and the added body in `account.py` are the same
+  constants, predicates, query handler, and `handle_account` — identical logic,
+  including the query-lookup-before-bad-kind ordering that resolved F4 against
+  `aaaeb21`. The new file adds only its module docstring and imports.
+- **No dangling references.** `grep locked_account_totals|set_account_opening_balance`
+  over `handlers.py` → no matches, so dropping those two db imports is safe and
+  `handle_account_choice` (which stays) doesn't use them. `grep` for
+  `_is_account`/`handle_account` shows the only production callers are
+  `app.py:195/227/228`, both now importing from `kanakko.commands.account`.
+- **No import cycle.** `account.py` imports `TextMessage`/`_command_arg` from
+  `handlers.py`; `handlers.py` imports nothing from `commands.account`.
+  `uv run python -c "import kanakko.commands.account"` succeeds.
+- **`test_webhook.py:1047`'s `app_module.handle_account` patch still valid** —
+  `app.py` binds `handle_account` into its own namespace via the new import, so
+  the webhook-routing test patches the right name.
+- **The retargeted monkeypatch is meaningful, not cosmetic.** Verified the
+  binding mechanism: `kanakko.commands.account.send_message is
+  kanakko.handlers.send_message` are distinct module-level bindings — patching
+  `handlers.send_message` leaves `account.send_message` pointing at the real
+  `tg.send_message`, which raises `RuntimeError: TELEGRAM_BOT_TOKEN is not set`.
+  So the commit's red-without-fix claim (14 failures when patching the old
+  module) holds, and the test genuinely intercepts the real send path.
+
+### Commands run
+
+- `uv run pytest tests/test_account_command.py -q` → **14 passed**.
+- `uv run pytest -q` → **457 passed**, 1 unrelated Starlette deprecation
+  warning. Matches the commit message.
+- `uv run ruff check kanakko/commands/account.py kanakko/handlers.py kanakko/app.py`
+  → **All checks passed** (confirms the dropped db imports left nothing unused).
+- `uv run python -c "import kanakko.handlers as h, kanakko.commands.account as a; ..."`
+  → confirmed distinct `send_message` bindings.
+
+No findings. The money/spec decisions (`Decimal`/`NUMERIC`,
+`active_transactions`, `AT TIME ZONE`, category source) are not in scope for a
+mechanical move, and none were disturbed. `TASKS.md` box for slice 2/6 is
+correctly ticked.
+
+---
+
+## 2026-08-13 — `74e6c1b` split handlers.py: design pass + `/transfer` → `kanakko/commands/` (Phase 10, slice 1/6)
+
+**Status: ✅ DONE**
+
+Pure refactor. Moves `/transfer` (`_is_transfer`, `handle_transfer`, its six
+`TRANSFER_*` constants) out of `handlers.py` into a new
+`kanakko/commands/transfer.py`, rewires `app.py`'s imports, and retargets the
+monkeypatches in `tests/test_transfer.py` at the new module. No behaviour,
+money, timezone, or SQL path is touched — the money/spec decisions
+(`Decimal`/`NUMERIC`, `active_transactions`, `AT TIME ZONE`, categories source)
+are not in scope for this diff.
+
+### What I checked
+
+- **Code move is byte-identical.** Diffed the removed block in `handlers.py`
+  against the new `transfer.py` body — same constants, same predicate, same
+  handler line-for-line. No logic changed in the move.
+- **Imports are correct and complete.** `transfer.py` imports everything it
+  uses (`time`, `psycopg`, `get_or_create_user`/`household_roster`/
+  `transfer_ownership` from `db`, `log_event`/`ms_since`, `TextMessage`/
+  `_command_arg` from `handlers`, `send_message`). `app.py` now pulls
+  `_is_transfer, handle_transfer` from `kanakko.commands.transfer` and drops
+  them from the `handlers` import block.
+- **No leftover / no orphaned imports.** `transfer_ownership` was removed from
+  `handlers.py`'s `db` import — grep confirms it has no other user there.
+  `household_roster` is *kept* because `/remove` still uses it (handlers.py:611,
+  730). `ruff check kanakko/ tests/` → **All checks passed!** (would flag an
+  unused import, so this is a real check, not a claim).
+- **No circular import.** `transfer.py` imports from `kanakko.handlers`;
+  `handlers.py` does not import `kanakko.commands.*`. `app.py` importing
+  `kanakko.commands.transfer` loads cleanly. `uv run python -c "import
+  kanakko.app"` and the full suite import without error.
+- **Dispatch wiring intact.** `app.py:195/226-227` still gate on `_is_transfer`
+  and call `handle_transfer` — now via the new import, same call site.
+- **The commit's central claim — the monkeypatch-retargeting gotcha — is real.**
+  Confirmed at the namespace level: `handle_transfer` resolves the unqualified
+  `send_message` in `kanakko.commands.transfer`'s module namespace, so a test
+  that patched `handlers.send_message` (the pre-move target) would *silently
+  fail to intercept* — the stub never fires, and the handler runs the real send.
+  That is exactly the "guard/stub that reports safety it doesn't provide" class:
+  the test would still exercise the code but stop asserting anything about the
+  reply. The test correctly moved its patch to `transfer_module`, and all its
+  assertions on `TRANSFER_USAGE`/`TRANSFER_NOT_OWNER` reference the new module.
+- **Tests, run not trusted.** `uv run pytest tests/test_transfer.py -q` → **9
+  passed**. `uv run pytest -q` (full suite) → **457 passed, 1 warning** —
+  matches the commit message exactly.
+
+### Findings
+
+None. The refactor is faithful, the retargeting was genuinely necessary (not
+cosmetic), the guard against it (ruff + the passing retargeted tests) is real,
+and `TASKS.md` accurately records this as slice 1/6 with the remaining five
+still unchecked — nothing is falsely ticked. The ticked box claims a design
+pass plus one command moved, which is precisely what the diff does.
+
+One note for the implementer, not a finding: `handlers.py` is now 1462 lines —
+still far past the 300-line guideline. That is expected and honestly recorded;
+slices 2–6 in `TASKS.md` are unchecked, so "missing is not wrong."
+
+---
+
+## 2026-08-13 — `be98eab` — recurring rules: the creation surface, `/recurring` command (Phase 10)
+
+**Status: ✅ DONE**
+
+Scope: adds `/recurring <amount> <day> <category> <account>` (`handle_recurring`
++ `_is_recurring` + `_match_category_and_account` in `handlers.py`), wires it into
+`app.py`'s webhook dispatch and the `is_parse` no-meter exclusion, lists it in
+`HELP_TEXT`, and calls task 1125's previously-uncalled `create_recurring_rule`.
+Also flags `handlers.py` (1541 lines) as a new undesigned split task in `TASKS.md`.
+
+### What I checked
+
+- **`uv run pytest`** → `457 passed, 1 warning in 18.12s`. The 11 new tests
+  (`test_recurring_command.py`, plus the webhook-routing test and the `test_help.py`
+  addition) all pass.
+- **The brute-force category/account split is a real guard, not tautological.**
+  Ran the naive positional split the commit says it replaced:
+  `"Bills & Utilities Bank".partition(" ")` → category `"Bills"`, which is **not**
+  in `EXPENSE_CATEGORIES` (`in EXPENSE? False`), so `_match_category_and_account`
+  would return `None` and `handle_recurring` would refuse a valid command. The
+  shipped brute-force match returns `('Bills & Utilities', 1, 'Bank')`. The
+  multi-word-category test genuinely fails under the naive split.
+- **Metering/routing wire-up.** `_is_recurring` is added to both the `is_parse`
+  OR-chain (so a rule set-up is never counted against the daily cap and never
+  triggers an LLM call) and the dispatch `elif` ladder, consistent with `/account`.
+  `test_webhook_routes_recurring_to_handle_recurring_and_never_meters_it` asserts
+  `claims == [None]` (unmetered) and that it routes to `handle_recurring`, not
+  `handle_text`. Confirmed the branch ordering has no collision — `_is_recurring`
+  matches only `words[0] == "/recurring"` (bare or `@bot`), so `/recurringfoo`
+  correctly falls through to the parser.
+- **Money path.** `amount` is a `Decimal` end-to-end: `parse_amount` rejects
+  `float`/`bool`, `create_recurring_rule` inserts into `NUMERIC(12,2) CHECK
+  (amount > 0)`, and `format_amount` refuses a non-`Decimal`. No float anywhere.
+  Logging `amount=` a `Decimal` is safe — `file_sink` serialises with
+  `json.dumps(..., default=str)` and `log_event` never raises.
+- **`account` never a literal (§18).** Comes from `household_accounts(conn, user_id)`,
+  household-scoped and `kind <> 'external'`, `deleted_at IS NULL`. `category` is
+  validated against `EXPENSE_CATEGORIES` from `categories.py` (auto-debits are
+  always an expense — matches `jobs.recurring`'s hardcoded `type="expense"`), never
+  a string literal.
+- **Validation ordering / no crash.** Verified each refusal path returns `None`,
+  sends the right message, stores nothing, and logs `status="noop"`: bare command,
+  <3 args, unparseable amount, non-numeric day, out-of-range day (`0`/`32`),
+  unmatched category+account, and no-household-yet. Day bound `1 ≤ n ≤ 31` matches
+  migration 015's `CHECK (day_of_month BETWEEN 1 AND 31)`.
+- **Transaction ownership.** `handle_recurring` does not commit; the webhook's
+  `with connect() as conn:` commits on block exit, so the insert and the update
+  claim share one transaction. Correct.
+
+### Findings
+
+None blocking. Two non-issues noted for the record, neither a defect:
+
+- `_match_category_and_account` picks the first category (in `EXPENSE_CATEGORIES`
+  order) whose prefix matches *and* whose remainder is a live account. An
+  incorrect earlier split only wins if its remainder is itself a real account
+  name, which requires an account named to collide with the tail of a category —
+  not reachable with the default account nouns. It also correctly keeps scanning
+  when a prefix matches but the remainder isn't an account (no early `None`).
+- The command always creates an active rule with no dedup, so running it twice
+  makes two identical rules. This matches the stated design (creation is always
+  active; the dashboard's pause/delete manages the rest) and §18 — not a finding.
+
+The `handlers.py` size flag in `TASKS.md` is honest: 1541 lines is well past the
+300-line guideline with no carved exception (unlike `db.py`), and it's correctly
+left as its own design task rather than guessed at here.
+
+---
+
+## 2026-08-13 — `7c6172e` — recurring rules: "Change amount" on the cron's confirm card (Phase 10, split 3b/3)
+
+**Status: ✅ DONE**
+
+Scope: migration `017` adds `pending_transactions.awaiting_amount BOOLEAN NOT
+NULL DEFAULT false`; `confirm.confirm_card` gains a `change_amount_button` param
+and a `CHANGE_AMOUNT` callback constant (`SKIP_LABEL` moved from
+`jobs/recurring.py` into `confirm.py`); `db.pending` gains
+`request_amount_change` / `pending_awaiting_amount` / `set_pending_amount`;
+`handlers` gains `handle_change_amount_request` / `handle_amount_reply`; the
+webhook checks `pending_awaiting_amount` up front for every `TextMessage` and
+routes an awaited reply to `handle_amount_reply`, unmetered; `jobs.recurring`
+now passes `change_amount_button=True`. 17 new tests.
+
+### What I checked (and what it returned)
+
+- **Full suite.** `uv run pytest -q` → **446 passed** (1 pre-existing Starlette
+  deprecation warning), matching the commit message.
+- **Guard #1 real (money/state scope).** Reverted the `AND awaiting_amount`
+  clause in `set_pending_amount`'s SELECT, ran
+  `test_set_pending_amount_refuses_a_row_that_is_not_awaiting_one` → **FAILED**
+  (a row never marked awaiting got silently rewritten). Restored → passes. The
+  guard fails for the reason it exists: a stray text after the card settled
+  elsewhere cannot rewrite an amount.
+- **Guard #2 real (§16 cost control).** Removed `awaiting_message_id is None`
+  from the `is_parse` predicate in `app.py`, ran
+  `test_webhook_routes_an_awaited_amount_reply_and_never_meters_it` → **FAILED**
+  (`claims == [1]` instead of `[None]` — the free amount-reply tap would have
+  been metered and counted against the daily cap). Restored → passes.
+- **Money path (§9).** `set_pending_amount` re-validates the typed reply through
+  `money.parse_amount` in `handle_amount_reply` (Decimal), stores it as
+  `str(amount)` inside `Transaction.model_validate` → `model_dump(mode="json")`,
+  so `parsed["amount"]` is `"7500.00"` (string, asserted by
+  `test_set_pending_amount_updates_the_amount_and_clears_awaiting`). No float
+  reaches the row; only `amount` changes, category/account/note survive.
+- **Transaction shape.** `set_pending_amount` uses the same
+  `with conn.transaction(), conn.cursor()` SELECT-then-UPDATE pattern as its
+  siblings `set_pending_category` / `set_pending_account`; caller owns the outer
+  commit. Consistent.
+- **Routing ordering.** The `pending_awaiting_amount` query runs *after* the
+  `is_authorized` gate and *after* `get_or_create_user`, so an unrecognised user
+  is still refused before any pending lookup (§16 unchanged). `/start` still
+  short-circuits before the gate.
+- **Internal consistency of the re-render.** `awaiting_amount` can only be set by
+  `request_amount_change`, reachable only via a `CHANGE_AMOUNT` tap, which only
+  `jobs.recurring`'s card renders — so an awaiting card is always a recurring
+  card, and re-rendering it with `cancel_label=SKIP_LABEL, change_amount_button=True`
+  is correct. The pending row's `recurring_rule_id` survives the UPDATE (only
+  `parsed`/`awaiting_amount` are written).
+- **Spec fit.** `docs/DECISIONS.md` §18 (line 836) names exactly "Confirm /
+  Change amount / Skip"; the cron card now renders all three
+  (`test_run_sends_a_confirm_card_and_links_the_pending_row_to_the_rule` asserts
+  Skip + Change amount present, Cancel absent). Migration 017 puts the state on
+  the pending row, "not a new table", as the task directed.
+
+### Findings
+
+No blocking issues.
+
+**Low / informational — an abandoned "Change amount" tap intercepts all later
+text until Skip/Confirm** (`kanakko/app.py:174`, `kanakko/db/pending.py:311`).
+Once a user taps "Change amount", the card's row stays `awaiting_amount = true`
+until the user replies with a valid amount, or taps Skip/Confirm on the card
+(both delete the row). Nothing else clears it — there is no TTL. While it is set,
+`pending_awaiting_amount` diverts *every* subsequent `TextMessage` (including a
+real new expense like `coffee 200`, `/undo`, `/help`) into `handle_amount_reply`,
+where it fails `parse_amount` and returns the retry prompt rather than being
+logged. This is a genuinely new failure mode (before this commit a typed expense
+always parsed), but it is **not silent** — the user gets
+`CHANGE_AMOUNT_RETRY_PROMPT` every time — and it is **one tap to recover** (the
+card with its Skip button is still in the chat). It is also consistent with the
+task's explicit design ("the next text message is a replacement amount") and the
+§18 no-conversation-state-machine stance, so it is recorded for awareness, not as
+a change request. If it ever bites in real use, the cheap fix is to clear
+`awaiting_amount` (or expire the row) when a reply can't be parsed after N tries,
+or to scope the interception to replies that actually look like a bare amount —
+but the exact-match caution in the greeting task argues against the latter.
+
+---
+
+## 2026-08-13 — `5f893bd` — recurring rules: cron send, Confirm/Skip half (Phase 10, split 3a/3)
+
+**Status: ✅ DONE**
+
+Scope: migration 016 adds a nullable `recurring_rule_id` (`ON DELETE SET NULL`)
+to `pending_transactions` and `transactions` and recreates `active_transactions`;
+`db.pending.save_pending`/`confirm_pending` thread it through; new
+`db.recurring.due_rules_today` (cross-household cron read); new
+`kanakko/jobs/recurring.py` (per-rule fan-out sending the ordinary confirm card
+with a "⏭️ Skip" relabel); a `cancel_label` param on `confirm.confirm_card`; an
+08:00 IST crontab line; and 7 new tests.
+
+### What I checked (and what it returned)
+
+- **Full suite.** `uv run pytest -q` → **435 passed** (1 deprecation warning),
+  matching the commit message.
+- **Guard is real, not a claim.** Reverted the fix by hand — changed
+  `confirm_pending`'s INSERT to store `None` instead of `recurring_rule_id` —
+  and re-ran `test_recurring_rule_id_flows_from_pending_to_the_settled_transaction`
+  plus `tests/test_jobs_recurring.py`: **4 failed** (the flow guard and the three
+  job tests). Restored; suite green again. The provenance guard fails for the
+  reason it exists.
+- **Money path.** `rule["amount"]` is `NUMERIC(12,2)` from `recurring_rules`,
+  carried into `Transaction(amount=...)` and never through `float`; the card
+  renders `5,000.00`. No `float` introduced.
+- **Reads/view.** Migration recreates `active_transactions` *after* the
+  `ALTER TABLE`s (correct order) so the appended column is exposed; the
+  soft-delete filter is unchanged. `due_rules_today` joins `accounts` with
+  `a.deleted_at IS NULL` — verified red/green by
+  `test_due_rules_today_skips_a_rule_whose_account_was_later_soft_deleted`.
+- **Timezone.** Day-of-month is taken from `today_ist()` (a `date` in
+  `Asia/Kolkata`), reused from `jobs.evening`, not a UTC `date.today()`.
+- **Failure isolation.** `jobs.recurring.run` copies `fan_out`'s exact shape —
+  one `conn.transaction()` savepoint per rule, `conn.commit()` before raising
+  `DeliveryFailures`. `test_one_blocked_recipient_does_not_silence_the_others`
+  exercises it: the blocked recipient writes no pending row, the other survives.
+- **Send shape.** `send_message(chat_id, text, reply_markup)` and the real Bot
+  API response (`response["result"]["message_id"]`) line up with the code.
+- **Secrets / boundaries.** No token literals; no ORM/Celery/Redis added. Crontab
+  line matches the `EXPECTED` map pinned in `test_crontab.py`.
+
+### Findings
+
+No blocking issues. Two non-blocking observations for a later split, neither a
+spec violation (§18 is silent on both, and both degrade the way §18 prefers —
+*no* prompt rather than a silently-wrong insert):
+
+1. **`day_of_month` in short months silently skips** —
+   `kanakko/jobs/recurring.py:44` / `db/recurring.py:due_rules_today`. A rule
+   with `day_of_month` 29/30/31 (migration 015 allows `BETWEEN 1 AND 31`) is
+   matched by `r.day_of_month = %s` against today's actual day, so a SIP set for
+   the 31st never fires in April/June/Sept/Nov, and 29–31 never fire in
+   February. §18 names no last-day clamping, and a missed prompt is the graceful
+   failure mode, so this is not blocking — but whoever builds the creation
+   surface (split 3c) should decide clamp-to-month-end vs. reject days > 28, and
+   a guard should pin the choice.
+2. **View column is untested and unconsumed** — `migrations/016...sql:24`. The
+   recreated `active_transactions` now carries `recurring_rule_id`, but nothing
+   reads it through the view yet (the flow test reads `transactions` directly),
+   and no test asserts the view exposes it. If a future edit dropped the view
+   recreation, the miss would be silent until the "account-acting note" reader
+   lands. Cheap to guard now; not blocking while unconsumed.
+
+Also noted (no action): re-running the cron in a day re-sends every due rule's
+card (no per-day dedup log), the same property `jobs.evening` already has —
+consistent with the codebase, and the cron fires once daily.
+
+---
+
+## 2026-08-13 — `05f28e5` — recurring-rule dashboard pause/delete (Phase 10, split 2/3)
+
+**Status: ✅ DONE**
+
+Scope: two new Mini App routes (`POST /app/recurring/active`,
+`POST /app/recurring/delete`) in a new `kanakko/webapp/recurring.py`, a
+`recurring_list` renderer + `dashboard_html` wiring in `render.py`, the
+`list_recurring_rules` fetch in `routes.py`, CSS/JS in `shell.py`, router
+registration in `app.py`, and 10 new tests. Both routes call the
+`set_recurring_rule_active`/`delete_recurring_rule` functions that landed and
+were tested directly in `2d6c421` (split 1/2).
+
+### What I checked (and what it returned)
+
+- **Full suite.** `uv run pytest` → **428 passed** (1 deprecation warning),
+  matching the commit message. `tests/test_webapp.py` alone → 90 passed.
+- **The household-scoping guard is real, not a surface-form check.** Temporarily
+  dropped the `AND household_id = (…)` clause from `set_recurring_rule_active`'s
+  UPDATE and reran `test_recurring_active_route_foreign_household_is_404` →
+  **1 failed** (a stranger's toggle returned 204 and flipped `active` instead of
+  404). Restored; `git status` clean, `git diff --stat` empty. The guard fails
+  for the reason it exists — foreign/non-existent `rule_id` resolves to no row,
+  route returns 404.
+- **Auth / replay.** Both routes call `authenticated_user(request,
+  max_age=timedelta(hours=24))` before touching the DB, then `permitted_user`
+  (resolves, never creates). `test_recurring_routes_reject_a_stale_init_data`
+  proves a genuine-but-old `initData` is 401 on both — the §13 mutation rule.
+- **Body validation can't be smuggled past.** `active` is rejected unless it is a
+  real `bool` (explicit `TypeError` before the permissive `int()`/`bool()`
+  coercion); `test_recurring_active_route_rejects_a_bad_body` covers missing
+  `id`, missing `active`, and the string `"false"` → all 400.
+- **No XSS.** `recurring_list` escapes `category` and `account_name` with
+  `html.escape`; `amount` goes through `format_amount` (Decimal), `rule_id` and
+  `day_of_month` are DB ints. Nothing user-typed reaches the markup unescaped.
+- **Money path.** `amount` stays `Decimal` end to end (DB `NUMERIC` →
+  `format_amount`); no float touches it. No confidence score, no ORM, no new
+  dependency. Categories are only displayed here, sourced from the DB row the
+  closed-set-validated `create_recurring_rule` wrote.
+- **JS handler ordering.** `.rule-toggle` and `.rule-del` are matched (and return
+  early) before the existing `.del` handler; `closest('.del')` does not match the
+  single-token `rule-del` class, so no cross-firing. Toggle sends the *opposite*
+  of `data-active` (current state), matching the route contract.
+- **Commit/transaction semantics.** Routes use `with connect() as conn:`; the
+  db functions deliberately don't commit, and psycopg3's connection context
+  manager commits on clean exit — the same pattern the already-shipped
+  `/app/delete` uses, and the household-scoped-pause test confirms the row is
+  actually persisted (`SELECT active … == (False,)`).
+
+### Findings
+
+None blocking. The 10 new tests cover the money-adjacent, auth, scoping, and
+event-log paths that would otherwise fail silently. Marking **✅ DONE**.
+
+Note (not a finding, for split 3/3): `list_recurring_rules` `JOIN accounts`
+without a `deleted_at IS NULL` filter, so a rule pinned to a since-soft-deleted
+account would still render with that account's name. Harmless for display and
+out of this commit's scope (the function shipped in `2d6c421`), but worth a
+glance when the cron send lands and actually acts on a rule's account.
+
+---
+
+## 2026-08-13 — `2d6c421` — recurring-rule schema, guard and household-scoped CRUD (Phase 10, split 1/2)
+
+**Status: ✅ DONE**
+
+Scope: `migrations/015_recurring_rules.sql` (the `recurring_rules` table +
+two indexes), `kanakko/db/recurring.py` (create/list/pause-resume/delete,
+household-scoped), the `kanakko/db/__init__.py` re-exports, three new tests in
+`tests/test_migrate.py`, and the split of the TASKS.md recurring-rules entry
+into 1/2 (this) and 2/2 (cron send + dashboard controls, still unchecked).
+
+### What I checked
+
+- **Full suite, live.** `uv run pytest -q` → **418 passed, 1 warning** (the
+  pre-existing Starlette/httpx deprecation, unrelated). `uv run pytest
+  tests/test_migrate.py -q` → **20 passed**. Matches the commit message's
+  claim of 418 (3 new).
+- **Migration auto-discovery.** `migrate.py` globs `migrations/*.sql` in name
+  order, so `015` is picked up without a registry edit; the migration tests
+  run `migrate(conn)` end-to-end, so the DDL actually applies.
+- **Account-resolution guard is red-without-fix (verified, not trusted).** I
+  temporarily weakened the `create_recurring_rule` join to
+  `JOIN accounts a ON a.account_id = %s` (dropping the household match, the
+  `kind <> 'external'` and `deleted_at IS NULL` filters), reran
+  `test_recurring_rule_account_must_belong_to_the_caller_household` → **FAILED**,
+  then restored the file (`git status` clean, test green again). The guard
+  genuinely refuses a foreign-household account, the structural `external`
+  account, and a soft-deleted account — it mirrors `edit_transaction_field`'s
+  `EXISTS` shape (`kanakko/db/edits.py:115`).
+- **CHECK constraints do the work at the DB, not in Python.**
+  `test_recurring_rule_amount_and_day_of_month_are_checked` inserts `amount=-5`
+  and `day_of_month=32` via raw SQL (bypassing the module) and asserts
+  `psycopg.errors.CheckViolation` — so the guard is the column constraint
+  itself (`migrations/015_recurring_rules.sql:33-34`), not an app-side check
+  that a raw insert could sidestep.
+- **Household-scoping on pause/resume/delete/list.**
+  `test_recurring_rules_are_scoped_and_can_be_paused_and_deleted` confirms a
+  housemate (not the creator) can pause/delete, a stranger in another household
+  gets `None`/`[]` from every operation, and `list_recurring_rules` never leaks
+  a foreign household's rules. The scalar subquery
+  `(SELECT household_id FROM household_members WHERE user_id = %s)` is safe:
+  `household_members.user_id` is `UNIQUE` (`migrations/006_households.sql:24`),
+  so exactly one row — same pattern refunds/edits already use.
+- **Spec fit (§18, §16, §9).** Fields are exactly amount/category/account/
+  day-of-month/active. `amount` is `NUMERIC(12,2) CHECK (amount > 0)` and
+  carried as `Decimal` through the module — no `float` touches it. `category`
+  carries no CHECK, matching the convention that `categories.py` is the one
+  place category strings live (CLAUDE.md), same as `transactions.category`.
+  Delete is a real `DELETE` (a rule is a standing instruction, not a §6 ledger
+  row); nothing references a `rule_id` yet, so there is nothing to orphan.
+  Household-scoped, not creator-scoped — correct per §16's shared ledger, and
+  consistent with `refunds.py`.
+- **No caller yet** — this is split 1/2, the same shape `create_refund` landed
+  in 014. The task box is ticked for the schema + write path only; the cron
+  send and dashboard controls are a separate unchecked 2/2 entry, not a stub
+  hidden under a tick.
+
+### Findings
+
+None blocking.
+
+**Note for split 2/2 (not a defect in this commit):**
+`list_recurring_rules` (`kanakko/db/recurring.py:63`) joins `accounts`
+*without* a `deleted_at IS NULL` filter, so a rule whose account is
+soft-deleted *after* creation still lists (and stays `active`). That is correct
+for a pause/delete surface — you must see the rule to remove it. But the cron
+in 2/2 must not blindly debit a rule pointing at a soft-deleted account; it
+should skip or surface it. Flagging so the money path in the next task doesn't
+inherit this silently.
+
+---
+
+## 2026-08-13 — `590c740` — remove `Refund` from `INCOME_CATEGORIES` (Phase 10, §11/§18)
+
+**Status: ✅ DONE**
+
+Scope: drops `"Refund"` from `INCOME_CATEGORIES` in `kanakko/categories.py`,
+updates the hand-transcribed spec fixtures in `tests/test_categories.py`, and
+ticks the task in `TASKS.md` with a recorded decision on existing rows.
+
+### What I checked
+
+- **Spec fit.** `docs/DECISIONS.md:826` (§18) states verbatim: "**`Refund` is
+  removed from the income category list** (§11), where it currently sits and
+  quietly inflates income." The change does exactly that. The commit correctly
+  did *not* edit §11's line 246 (which still lists `Refund`) to match — §18 is
+  the explicit amendment and CLAUDE.md forbids editing the spec to match code.
+- **Guard fails for its reason.** Restored `"Refund"` to the tuple and ran
+  `uv run pytest tests/test_categories.py -q` → all three tests fail
+  (`test_categories_match_the_spec_verbatim`, `test_schema_enum_is_the_deduped_union`,
+  `test_keyboard_mirrors_the_constant`). Reverted; they pass. The fixtures are
+  hand-transcribed (not imported from the module under test), so the guard is
+  real, not tautological.
+- **No orphaned literal.** `grep -rni refund kanakko/ webapp/ --include=*.py`
+  turns up only the `refund` *transaction-type* feature (routes, panels, CSS) —
+  no module carries `"Refund"` as a category string, so removing it from the
+  tuple can't leave a dangling reference.
+- **Existing-row claim.** `migrations/001_init.sql:18-20` confirms `category`
+  has no CHECK ("no CHECK here — the DB would be a second place to edit them"),
+  so old `income`/`Refund` rows are untouched and valid. Traced
+  `_category_select` (`kanakko/webapp/recent.py:27-33`): `known =
+  current in CATEGORIES_BY_TYPE[...]` is now `False` for `"Refund"`, so such a
+  row renders the disabled "Uncategorised" placeholder and is reclassifiable in
+  one tap — exactly as the commit describes.
+- **Full suite.** `uv run pytest -q` → **415 passed** (one unrelated Starlette
+  deprecation warning).
+
+### Findings
+
+None. Spec-mandated one-line removal, guard verified red-without-fix, no
+orphaned references, existing-row behaviour matches the recorded decision.
+
+---
+
+## 2026-08-13 — `ed36051` — refund Mini App dashboard action (Phase 10, split 3/3)
+
+**Scope:** a per-row "Refund" toggle on `expense` rows in the Mini App reveals a
+hidden panel (`recent._refund_panel`, amount pre-filled, own submit) that POSTs
+to a new `POST /app/refund` route. The route lives in its own module
+(`kanakko/webapp/refund.py`, `APIRouter` included in `app.py`) and calls the same
+`db.refunds.create_refund` the bot's `handle_refund_choice` does — 24h `max_age`,
+household-scoped (§16), trigger `RaiseException` → 409, gone/foreign/non-expense →
+404, bad body → 400, success 204. CSS + click dispatch added to `shell.py`. New
+suite in `tests/test_webapp.py`.
+
+**Status: ✅ DONE** — no blocking findings. Money stays `Decimal` end to end,
+the route reuses the shared `create_refund` (no second write path), it is
+household-scoped as §16 requires, the over-limit guard genuinely fails when
+defeated, and the line-count guideline is respected (sibling module, not a fifth
+route in the 300-line `routes.py`). One low-severity UX note below, not blocking.
+
+### What I checked (commands run, and what they returned)
+
+- **`uv run pytest -q` → `415 passed`** (17.06s). Full suite green, not just the
+  new file. **`uv run pytest tests/test_webapp.py -q` → `80 passed`.**
+- **Defeated the over-limit guard.** Edited `refund.py` to catch
+  `psycopg.errors.DataError` instead of `RaiseException`, ran
+  `test_refund_route_over_limit_is_409_and_writes_nothing` → **FAILED** (the
+  trigger's `RaiseException` propagated out as an unhandled 500). Restored the
+  file via `Edit` and confirmed `git diff` is empty. The guard fails for the
+  reason it exists.
+- **Money path.** `parse_amount` (money.py) rejects `float`, `bool`, non-finite,
+  `<= 0`, and over-`NUMERIC(12,2)` before the value reaches `create_refund`;
+  amount stays `Decimal` through the insert and the `refund.created` log
+  (`test_refund_route_logs_the_money_mutation` asserts `Decimal("200.00")`). No
+  `float` anywhere on the path.
+- **Reads/scoping.** `create_refund` (db/refunds.py) reads
+  `active_transactions`, scopes to `household_members WHERE user_id = %s`, and
+  only accepts a live `expense`. `test_refund_route_is_household_scoped…` proves
+  a second member can refund the owner's expense (204). `permitted_user` resolves
+  without creating (403 for an unadmitted caller — verified by the amended
+  `test_mini_app_mutations_refuse_an_unadmitted_user`, now covering `/app/refund`).
+- **`initData`.** Route passes `max_age=timedelta(hours=24)` like the other
+  mutating routes; `test_refund_route_rejects_a_stale_init_data` → 401. Bad body
+  (missing `id`/`amount`, unparsable amount) → 400 via the shared
+  `(ValueError, TypeError, KeyError)` catch — `json.JSONDecodeError` is a
+  `ValueError` subclass, so a non-JSON body is also 400.
+- **Commit semantics.** Route follows the sibling pattern exactly: `with
+  connect() as conn:` (autocommit off) commits on clean exit; the `_Reuse` test
+  stand-in shares one connection so writes are visible before rollback. Same
+  proven shape as `/app/delete`, `/app/edit`, `/app/category`.
+- **Render gating.** `test_recent_list_no_refund_control_for_income_or_transfer`
+  confirms the toggle/panel appear only for `type_ == "expense"`; income,
+  refund, and transfer rows get nothing.
+
+### Findings
+
+**Low — 1. The refund toggle is offered on already-fully-refunded expenses and
+pre-fills the full original amount; the resulting failed tap gives the user no
+feedback.** `recent.py:190` renders the toggle for every `expense` row (not just
+those with remaining > 0), and `_refund_panel` (`recent.py:117`) defaults the
+input to the row's full `amount`, not its remaining balance. Scenario: a ₹500
+expense already refunded ₹200; the user opens the panel (pre-filled ₹500), taps
+Refund → 200+500 > 500 → trigger `RaiseException` → 409 → the client's
+`.then(r => { if (r.ok) load(); })` (`shell.py:202`) does nothing, so the tap
+silently accomplishes nothing with no explanation. **No data is written or
+corrupted** (verified: `test_refund_route_over_limit_is_409_and_writes_nothing`
+asserts zero rows), and this silent-on-error handling is identical to the
+existing `/app/delete`, `/app/edit`, `/app/category` clients — so it is a
+pre-existing UX pattern, not a regression. It is worth noting because the bot
+side is stronger here: `refund_candidates` filters fully-refunded expenses out of
+the chooser (`HAVING remaining > 0`) and `handle_refund_choice` shows a
+`REFUND_OVER_LIMIT`/`REFUND_GONE` toast. *Suggested (non-blocking):* surface a
+brief message on a non-OK response, and/or default the input to the remaining
+balance. Not required for correctness.
+
+---
+
+## 2026-08-13 — `75c0d3e` — refund bot-facing UX: chooser and write (Phase 10, split 2/3)
+
+**Scope:** `refund <amount>` lists live, not-fully-refunded expenses
+(`db.refunds.refund_candidates`), one tap (`handle_refund_choice`) calls
+`create_refund`. New `_is_refund` predicate wired into `app.py`'s `is_parse`
+exclusion and callback dispatch. Over-limit taps caught (migration 014's
+trigger `RaiseException`) rather than 500. New suite `tests/test_refund_ux.py`,
+plus webhook-routing and help-discoverability coverage.
+
+**Status: ✅ DONE** — no blocking findings. Money stays `Decimal`, both sides of
+the candidate join read `active_transactions`, the over-limit guard genuinely
+fails when defeated, and the routing is unmetered as intended. Two low-severity
+UX notes below, neither blocking.
+
+### What I checked (commands run, and what they returned)
+
+- **`uv run pytest -q` → `406 passed`** (17.03s). The full suite is green, not
+  just the new file.
+- **`uv run pytest tests/test_refund_ux.py tests/test_webhook.py::…refund… tests/test_help.py -q` → `18 passed`.**
+- **Defeated the over-limit guard.** Edited `handle_refund_choice` to catch
+  `psycopg.errors.NoDataFound` instead of `RaiseException`, then ran
+  `test_handle_refund_choice_over_limit_is_caught_not_500` → **FAILED**, with the
+  trigger's `refund total 600.00 exceeds transaction 1 (amount 500.00)`
+  propagating out. Restored the file (`git checkout`). The guard fails for the
+  reason it exists, and the same test also asserts the connection is still usable
+  afterward (`create_refund` takes its own `conn.transaction()` savepoint, so the
+  outer transaction is not poisoned).
+- **Money path.** `refund_candidates` computes `remaining` as
+  `t.amount - coalesce(sum(r.amount),0)` in SQL over `NUMERIC(12,2)`; the handler
+  passes `Decimal` amounts (`parse_amount`) end to end; no `float` anywhere on
+  the amount path.
+- **`active_transactions` (§6).** Read `refund_candidates` — both `t` (expense)
+  and `r` (refund) sides join `active_transactions`, never base `transactions`,
+  so a soft-deleted refund can't understate `remaining` and a soft-deleted
+  expense can't reappear. `create_refund`'s scope SELECT also reads the view.
+  (`test_read_paths.py`'s bypass guard covers this and passes.)
+- **Timezone (§10).** `handle_refund_choice` dates the refund
+  `date.fromisoformat(today())`, and `today()` is `Asia/Kolkata`, not UTC.
+- **Household scope (§16) / forged buttons.** `create_refund` re-scopes to the
+  *presser's* household keyed by `user_id`, not the button — a forged `txn_id`
+  from another household returns `None` (verified by
+  `test_handle_refund_choice_reauthorizes_a_forged_household` and
+  `…_gone_expense`). The button carries no trust; `txn_id`/`amount` are re-parsed
+  and re-validated.
+- **Metering (§13).** `_is_refund` is in `app.py`'s `is_parse` exclusion (no LLM
+  call, so it must not count against the daily cap) and routed before
+  `handle_text`. `test_webhook_routes_refund_to_handle_refund_and_never_meters_it`
+  confirms it routes to the chooser (not the parser) and the claim is unmetered.
+- **Categories (§11).** No category string literals introduced; the test fixture
+  sources from `EXPENSE_CATEGORIES`.
+- **Spec fit (§18).** "`refund 500` lists recent candidates — amount-matched
+  first — and one tap picks the row" — matches. The `ORDER BY (t.amount = %s)
+  DESC, t.created_at DESC` puts the amount match first. TASKS.md honestly records
+  that the spec's "reuse `/remove`'s chooser keyboard" is stale (that chooser is a
+  static Keep/Delete, not an N-candidate list) rather than editing the spec.
+- **TASKS.md tick** is real, not a stub: the query, both handlers, routing, and
+  tests all exist and are exercised.
+
+### Findings (both low severity, non-blocking)
+
+1. **`kanakko/handlers.py:315` — the candidate button shows the original amount,
+   not what's left.** `_refund_keyboard` labels each row
+   `format_amount(c['amount'])`, but `refund_candidates` returns `remaining` and
+   lists partially-refunded expenses. A ₹500 expense with ₹200 already refunded
+   shows "₹500.00" in the list; typing "refund 500" and tapping it produces
+   `REFUND_OVER_LIMIT` — correct and safely handled, but the label misled the
+   user about what was tappable. Not a correctness bug (money is right, the over
+   limit case is caught); a UX polish item. Suggestion: show `remaining` when it
+   differs from `amount` (e.g. `… · ₹200 left`).
+
+2. **`kanakko/handlers.py:315` — a NULL-category expense renders the literal
+   string "None" in the button.** `category` is nullable (`migrations/001…`,
+   `TEXT`), and `refund_candidates` lists expenses regardless of category; the
+   f-string interpolates `c['category']` directly. Cosmetic only — downstream
+   `create_refund` copies the (possibly NULL) category consistently and reports
+   group by it fine. Suggestion: `c['category'] or 'Uncategorised'` in the label.
+
+Neither blocks the tick. Change is sound; recommend proceeding to split 3/3.
+
+---
+
+## 2026-08-12 — `3bfbf58` — serialize the refund-sum guard against concurrent refunds
+
+**Scope:** the follow-up fix to finding 1 of the `256ba0b` review. Adds
+`FOR UPDATE` to migration 014's trigger `SELECT amount INTO original_amount`,
+plus a two-connection regression test
+(`test_concurrent_refunds_against_the_same_original_do_not_both_commit`) and a
+REVIEWS.md status update. No production code paths touched beyond the trigger.
+
+**Status: ✅ DONE** — no findings. The race is genuinely fixed, the guard fails
+for the reason it exists, and the deferral of finding 2 is honest.
+
+### What I checked
+
+- Read the full diff (`git show HEAD`) and the whole of `migrations/014_refunds.sql`.
+- **Verified the lock is at the right row.** `FOR UPDATE` locks the *original*
+  transaction (`WHERE txn_id = NEW.refund_of_txn_id`), which is the single row
+  every concurrent refund against that original contends on. Under READ
+  COMMITTED, the second refund blocks until the first commits, then its
+  `refunded_so_far` aggregate re-reads the now-committed row and the sum check
+  rejects it. Correct serialization point.
+- **No deadlock risk introduced.** Each `create_refund` transaction takes at
+  most one row lock (the original, via the trigger). `create_refund`
+  (`kanakko/db/refunds.py:50-71`) does an unlocked `SELECT` on
+  `active_transactions` then an `INSERT`; concurrent refunds queue on the same
+  original row rather than forming a lock cycle.
+- **Ran the guard against its own defeat.** `uv run pytest
+  tests/test_migrate.py::test_concurrent_refunds_against_the_same_original_do_not_both_commit -v`
+  → **PASSED**. Temporarily removed `FOR UPDATE` from migration 014 and re-ran →
+  **1 failed** (both ₹600 refunds commit, `got {'a': 'committed', 'b':
+  'committed'}`). Restored the line; `git status` clean. The check fails for the
+  reason it exists.
+- **Full suite.** `uv run pytest -q` → **390 passed, 1 warning** in 15.68s —
+  matches the commit's claim (was 389). Working tree clean afterward.
+- **The test is not order-dependent.** Whichever connection acquires the lock
+  first commits; the other is rejected. The `time.sleep(0.3)` on connection "a"
+  only widens the window to keep the RED case reliable — it does not decide the
+  winner, and the assertion sorts `outcomes` so it accepts either ordering.
+- **Deferral of finding 2 is honest.** Finding 2 (deleting/editing an original
+  that has live refunds) is the delete/edit path, untouched here; correctly
+  carried forward to that task rather than silently dropped.
+- **Spec/conventions.** Money stays `NUMERIC(12,2)`; the sum query keeps its
+  `deleted_at IS NULL` filter; §18's "sum of refunds can never exceed the
+  original" invariant now holds under concurrent writes, which is what makes
+  `refunds.py`'s docstring claim (previously false, per finding 1) actually true.
+- **Editing migration 014 rather than adding 015** is correct here: 014 was
+  introduced in the immediately-preceding commit on this unmerged branch and has
+  never been applied to production (the `256ba0b` review that gated it was
+  ⚠️ CHANGES REQUESTED). Editing an unreleased migration in place is right;
+  the "add a new migration" rule protects already-applied ones.
+
+### Findings
+
+None. The fix is minimal, targets the root cause, and ships a check that is red
+without it.
+
+---
+
+## 2026-08-12 — `256ba0b` — refund schema, guard trigger and write path (Phase 10, split 1/2)
+
+**Scope:** migration 014 adds a `refund` transaction type, `refund_of_txn_id`,
+a structural link CHECK, and a `BEFORE INSERT OR UPDATE` trigger enforcing "the
+sum of refunds against a transaction can never exceed it" (§18). `db/refunds.py`
+adds `create_refund` (household-scoped write path). `reports.py` nets refunds
+out of `day_summary`, `month_summary` (total + per-category), and
+`accounts.py` counts them as account inflows.
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — finding 1
+(the race) fixed in the follow-up commit; finding 2 was explicitly deferred to
+the delete/edit-of-a-refunded-original task, not this one.
+
+> **RESOLVED.** `migrations/014_refunds.sql`'s trigger now takes
+> `SELECT amount INTO original_amount FROM transactions WHERE txn_id = ... FOR
+> UPDATE` — the exact fix this review verified live. That serializes concurrent
+> refunds against the same original: the second connection blocks on the row
+> lock until the first commits, then re-reads the now-committed sum. New guard
+> `test_concurrent_refunds_against_the_same_original_do_not_both_commit`
+> (`tests/test_migrate.py`) opens two real connections, has both insert a ₹600
+> refund against the same ₹1,000 expense before either commits, and asserts
+> exactly one of the two commits — dropping `FOR UPDATE` reddens it (`1 failed`,
+> verified by temporarily reverting the migration and restoring it). `uv run
+> pytest -q` → **390 passed** (was 389).
+
+### What I checked
+
+- Read the full diff (`git show HEAD`) against §18 of `docs/DECISIONS.md`.
+- `uv run pytest -q` → **389 passed, 1 warning** in 15.67s. The two new tests
+  (`test_refund_sum_cannot_exceed_the_original`,
+  `test_refund_reduces_category_and_account_but_never_income`) pass.
+- **Concurrency probe (the finding below).** Wrote a throwaway test opening two
+  real connections to the same test cluster, each inserting a ₹600 refund
+  against the same ₹1,000 expense before either commits. Result:
+  `CONCURRENCY VIOLATION: 1200.00 refunded against a 1000 original` — both
+  committed. The DB-level invariant §18 calls "the constraint that makes it
+  trustworthy" is violated under ordinary concurrent writes.
+- **Verified the proposed fix.** Added `FOR UPDATE` to the trigger's
+  `SELECT amount INTO original_amount ... WHERE txn_id = NEW.refund_of_txn_id`
+  and re-ran: the second connection's trigger now blocks on the first's row
+  lock (my single-threaded probe self-deadlocks, which is the proof the lock
+  engages — in two real threads the first commits, the second unblocks, re-reads
+  the now-committed ₹600, and rejects). Reverted both the probe and the edit;
+  working tree is clean.
+- Confirmed money stays `Decimal`/`NUMERIC(12,2)` throughout; reads go through
+  `active_transactions`; the view is rebuilt so `refund_of_txn_id` is visible;
+  no `Refund` removed from `INCOME_CATEGORIES` yet (correctly deferred to its
+  own task, per the commit).
+
+### Findings
+
+**1. (High — silent money corruption) The refund-sum guard is not race-safe,
+and the write path claims it is.**
+`migrations/014_refunds.sql:50-51`, claim at `kanakko/db/refunds.py:5-9`.
+
+The trigger reads `refunded_so_far` with a plain aggregate `SELECT` and no row
+lock. Under Postgres's default READ COMMITTED isolation, two concurrent
+transactions each inserting a refund cannot see each other's uncommitted rows,
+so each passes the check independently. **Verified live:** two ₹600 refunds
+against a ₹1,000 expense both commit → ₹1,200 refunded against ₹1,000. This is
+exactly the §18 invariant ("the sum of refunds against a transaction can never
+exceed it") that the commit's own test claims to protect, and `refunds.py`'s
+docstring asserts the opposite of what happens: *"a race between two concurrent
+refunds still lands on the correct, DB-enforced answer rather than a
+check-then-write gap."* Per CLAUDE.md, a guard that reports safety it does not
+provide is worse than none. Two household members refunding the same expense
+(a shared ledger, §16) is the realistic trigger, not a contrived one.
+
+Failure scenario: expense ₹1,000; member A taps refund ₹600, member B taps
+refund ₹600 within the same instant → both succeed → the expense is over-refunded
+by ₹600, and its category total in `month_summary` goes negative (or is dropped
+by the `HAVING <> 0`), silently.
+
+Suggested fix: lock the original row inside the trigger so concurrent refunds
+against the same transaction serialize —
+`SELECT amount INTO original_amount FROM transactions WHERE txn_id = NEW.refund_of_txn_id FOR UPDATE;`
+(verified above). Add a two-connection test to `test_migrate.py` so this
+regression stays red without the lock — the current single-connection test
+cannot exercise it.
+
+**2. (Low — note, no fix required this commit) No guard prevents deleting or
+editing an expense that has live refunds.**
+`kanakko/db/reports.py` netting assumes the original still exists. If an expense
+with a ₹300 refund is later soft-deleted, `active_transactions` drops the
+₹1,000 expense but the ₹300 refund row survives, so the category nets to −₹300.
+Delete/edit-of-a-refunded-original is out of scope for this commit (the delete
+path isn't touched here), but it should be handled when split 2/2 or the edit
+path lands — flagging so it isn't forgotten.
+
+### Not issues
+
+- `day_summary` netting a refund by the refund's *own* `occurred_on` (so a day
+  can show negative `spent`) is a documented design choice, not a bug.
+- Deferring `INCOME_CATEGORIES` cleanup and the bot/dashboard UX to later tasks
+  is correct and clearly marked in `TASKS.md`.
+- The `txn_id <> NEW.txn_id` self-exclusion on INSERT (NULL comparison) is
+  correct.
+
+---
+
+## 2026-08-12 — `aad95a6` — split Mini App data routes out of `app.py`
+
+**Scope:** pure refactor. Moves `/app/data`, `/app/delete`, `/app/category`,
+`/app/edit`, plus the `authenticated_user`/`permitted_user` helpers and
+`_parsed_edit_value`, from `kanakko/app.py` into a new
+`kanakko/webapp/routes.py` `APIRouter` included by `app.py`. `connect` moves
+with them; `tests/test_webapp.py` repoints its `app_module` import at the new
+module. Doc touch-ups in `AGENTS.md`/`TASKS.md`. No behaviour intended to change.
+
+**Status: ✅ DONE** — no findings. The move is byte-faithful, the routes are
+actually served, the load-bearing test import is verified red-without-fix, and
+the ticked task is real.
+
+### What I checked (commands, and what they returned)
+
+- **The move is faithful, not a rewrite.** Diffed the removed vs. added code
+  lines (normalising `@app.get/post` → `@router.get/post`); the only lines
+  removed-and-not-re-added are import reshuffles, the docstring, and the
+  `AGENTS.md`/`TASKS.md` prose. No route-body logic was dropped. Every handler,
+  the two auth helpers, and `_parsed_edit_value` are character-for-character the
+  same, so the money path (`parse_amount` → `Decimal`), the `active_transactions`
+  reads inside `month_summary`/`recent_transactions`, the IST period boundaries
+  (`current_month_ist`/`current_week_ist`/`previous_month_first`), the closed
+  `ALL_CATEGORIES`/`EDITABLE_TRANSACTION_FIELDS` whitelists, the 24h `max_age` on
+  the three mutating routes, and the user-scoping are all untouched.
+- **The routes are really served, not just defined.** `app.routes` shows the
+  moved routes nested under an `_IncludedRouter` entry (so a flat scan misleadingly
+  omits them), so I exercised them: `TestClient` `GET /app/data`, `POST
+  /app/delete`, `POST /app/category`, `POST /app/edit` each returned **401**
+  (`authenticated_user` rejecting the missing `initData`) — a matched route, not a
+  404. `include_router` wired them up correctly.
+- **`uv run pytest -q` → 387 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Unchanged count from the prior review.
+- **The test import change is load-bearing (guard-that-guards).** Temporarily
+  reverted just that one line back to `from kanakko import app as app_module` and
+  reran `tests/test_webapp.py` → **19 failed, 52 passed**, the failures raising
+  `RuntimeError: DATABASE_URL is not set` because `monkeypatch.setattr(app_module,
+  "connect", ...)` was patching a name the routes no longer look up. Restored the
+  line; `git status` clean. Exactly the 19-failure result the commit message
+  claimed.
+- **No dead imports left in `app.py`.** `CATEGORY_PREFIX` (callback routing),
+  `claim_update`/`connect`/`get_or_create_user` (webhook), and `SHELL_HTML` (shell
+  route) are all still referenced. `app.py` is 222 lines, `routes.py` 299 — both
+  within CLAUDE.md's 300-line guideline, matching the commit.
+- **Doc edits accurate.** `AGENTS.md`'s `db/` line reflects the already-existing
+  `kanakko/db/` package (prior work), and the new `webapp/` line is correct. The
+  `TASKS.md` tick is genuine work, not a stub.
+
+### Findings
+
+None. This is a mechanical, verified-faithful split with the one subtle risk (the
+monkeypatch target moving with `connect`) explicitly proven to still hold.
+
+---
+
+## 2026-08-12 — `b14eeeb` — edit a dashboard row: amount, date, note, account (Phase 10)
+
+**Scope:** adds the four remaining editable fields (amount, date, note, account)
+to the recent-transactions list — category already had task 101's control. One
+generic `db.edit_transaction_field` behind a closed `EDITABLE_TRANSACTION_FIELDS`
+whitelist, one `POST /app/edit` route, a hidden per-row edit panel, migration 013
+widening the audit `action` CHECK to admit `'edit'`, and two file splits
+(`db/edits.py` off `reports.py`, `webapp/recent.py` off `render.py`).
+
+**Status: ✅ DONE** — no blocking findings. The money path stays `Decimal`, every
+mutation is user-scoped and audited, both new guards fail red without the fix, and
+the ticked task is real work with tests.
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **387 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the commit's "15 new tests; 387 passed".
+- **Cross-household account guard, red-without-fix:** temporarily replaced the
+  `EXISTS` account-membership clause in `edit_transaction_field` with an empty
+  string and reran the edit tests →
+  `test_edit_route_rejects_an_account_id_outside_the_caller_household` **FAILED**
+  (a forged `account_id` naming another household's account relocated the row);
+  the transfer-refusal test stayed green because it is guarded separately by the
+  `type_ == "transfer"` short-circuit. Restored the file. The guard defends a real
+  behaviour (cross-household relocation), not a surface string.
+- **Migration 013 audit guard:** confirmed `003_transaction_events.sql` originally
+  had `CHECK (action IN ('confirm','undo','delete','recategorise'))` — no `'edit'`
+  — and 013 drops/re-adds it with `'edit'`. So
+  `test_edit_route_writes_an_audit_row_with_before_and_after`, which writes
+  `action='edit'` through `_record_event`, genuinely depends on 013; without it
+  the INSERT would raise `CheckViolation`. The migration's constraint-name
+  assumption (`transaction_events_action_check`) is validated by the fact that
+  `migrate()` runs clean in every test (a wrong name would fail the `DROP`).
+- **Money path:** amount edits parse through `money.parse_amount` →
+  `Decimal`, which rejects `float`/`bool`, non-positive, and `> NUMERIC(12,2)`;
+  `test_edit_route_rejects_a_non_positive_amount` covers the reject path. The
+  number `<input>`'s `value="{amount}"` renders the plain `Decimal` string. No
+  `float` enters the amount path.
+- **View discipline:** both reads in `edit_transaction_field` and
+  `set_transaction_category` go through `active_transactions` and carry a
+  `household_id` predicate; the `UPDATE` targets `transactions` but only via a
+  subquery that re-selects from the view, so a soft-deleted or foreign id matches
+  nothing and returns `None`. `recent_transactions` still reads the view; its new
+  column 9 is `t.account_id`.
+- **Timezone:** reports bucket on `occurred_on` (a `DATE`), so editing the date
+  re-buckets correctly with no UTC/IST hazard.
+- **Auth / scope:** `/app/edit` calls `authenticated_user(..., max_age=24h)` like
+  the other mutating routes, and the row is scoped to the signed user;
+  `test_edit_route_cannot_change_another_users_row` (404, unchanged) and
+  `test_edit_route_rejects_an_unknown_field` (400, column allowlist) both pass.
+- **Task honesty:** `TASKS.md` ticks the dashboard-edit task with a truthful
+  resolution note and *adds a new unticked task* for the deferred `app.py`
+  (497-line) split, with the reason (`test_webapp.py` monkeypatches
+  `kanakko.app.connect`). Not a falsely-ticked box.
+
+### Findings
+
+None blocking. Minor notes, no action required:
+
+- `EDITABLE_TRANSACTION_FIELDS` is a `frozenset` fed into an f-string only after
+  membership is confirmed (route rejects unknown `field` with 400 *and*
+  `edit_transaction_field` raises `ValueError` on a non-member) — the column name
+  can never carry attacker input. Correct.
+- Non-`account_id` `None`-return paths commit an empty `conn.transaction()`
+  (nothing written, no audit row). Harmless.
+- A user with no household yet renders empty account `<select>`s
+  (`accounts=()`); such a user has no transactions to edit, so it never surfaces.
+
+---
+
+## 2026-08-12 — `a833485` — query lookup runs before bad-kind heuristic in `/account` routing (Phase 10)
+
+**Scope:** resolves **F4** against `aaaeb21`. `handle_account` now looks up
+`_find_locked_account(conn, user_id, arg)` before the `ACCOUNT_BAD_KIND` check,
+so a two-word `locked` account name whose second word parses as an amount
+("Goa 2026", "Car 2025") resolves as a query when such an account exists,
+instead of being misrouted to the "unknown kind" refusal. The lookup is hoisted
+out of `_handle_account_query` and passed in as a `match` parameter.
+
+**Status: ✅ DONE** — the fix is correct, minimal, and the new test fails for
+the reason it exists. No blocking findings.
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **372 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the diff's +1 test on top of 371.
+- **Verified the new test goes red without the fix.** Replaced only
+  `kanakko/handlers.py` with its `HEAD~1` version (keeping the new test), then
+  `uv run pytest tests/test_account_command.py -q` →
+  `test_year_suffixed_locked_account_name_is_reachable_as_a_query` **FAILED**
+  (the account exists but `/account Goa 2026` returned the bad-kind refusal,
+  never its totals). Restored `handlers.py` afterward.
+  - Note: reverting also cascaded a second failure in
+    `test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind`. That is an
+    artifact of the module-scoped `conn` fixture (`tests/conftest.py:75`) having
+    no per-test rollback — when the first test raises before its trailing
+    `conn.rollback()`, the uncommitted `locked` account leaks into the next
+    test. Pre-existing pattern across the whole file, not introduced here; the
+    new test follows it correctly and all pass in the committed state.
+- **Traced the routing by hand for each branch:**
+  - `/account Goa 2026` with the account present → `kind="goa"` ∉ {credit,
+    locked}, `match` found, bad-kind guard `match is None and …` is False →
+    query. ✅ (message: `Goa 2026 — put in ₹0.00, got back ₹0.00, started with
+    ₹500.00.`)
+  - `/account cash 500` with no such account → `match is None`, second word
+    looks like an amount → `ACCOUNT_BAD_KIND` still fires. ✅ (existing
+    `test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind` covers it.)
+  - `/account Savings` (single-word, existing) → `len(parts)==1` so the bad-kind
+    condition is False regardless, query with the hoisted `match`. Equivalent to
+    the old inline lookup — no double query, no behaviour change.
+
+### Notes (non-blocking)
+
+- The hoist is a net simplification: the lookup moved from inside
+  `_handle_account_query` to `_find_locked_account` and is done exactly once per
+  call, same as before. No extra DB round-trip.
+- Money paths untouched — `format_amount`/`Decimal` handling is unchanged; the
+  diff only reorders control flow and passes the already-computed row through.
+- If a user genuinely names a `locked` account "cash 500", `/account cash 500`
+  now queries it rather than refusing — that is the intended and correct
+  consequence of "an existing account wins over the onboarding guess."
+
+---
+
+## 2026-08-12 — `aaaeb21` — multi-word locked names, opening-balance visibility, `/account credit` usage hint (Phase 10)
+
+**Scope:** resolves the three findings against `285b835` — F1 (multi-word
+`locked` names unreachable via `/account <name>`), F2 (a freshly-onboarded pool
+reports "put in ₹0.00"), F3 (`/account credit` with no amount misread as a
+query). Touches `db.locked_account_totals` (now also returns `opening_balance`),
+`handle_account`'s routing, a new `_looks_like_amount` heuristic, and the query
+message.
+
+**Status: ⚠️ CHANGES REQUESTED** — F1/F2/F3 as originally scoped are correctly
+fixed and each new guard fails for the right reason. But F1's fix does not close
+the whole class it named: a plausible subclass of auto-created `locked` names
+still misroutes to the very "unknown kind" message F1 set out to eliminate
+(**F4**).
+
+**F4 resolved:** `handle_account` now looks up `_find_locked_account(conn,
+user_id, arg)` before the bad-kind check; only falls to `ACCOUNT_BAD_KIND` when
+no live `locked` account matches the full argument. "Goa 2026" now resolves as
+a query when that account exists. Added
+`test_year_suffixed_locked_account_name_is_reachable_as_a_query`, confirmed red
+against the pre-fix `handlers.py` (`1 failed`) and green after restoring it.
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **371 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the diff's +4 tests on top of 367.
+- `uv run pytest tests/test_account_command.py -q` → **13 passed**.
+- **Verified all four new/changed guards go red without the fix.** Reverted only
+  the source (`git checkout HEAD~1 -- kanakko/handlers.py kanakko/db/accounts.py`)
+  while keeping the new tests, then reran the file →
+  **4 failed, 9 passed**: `test_bare_name_reports_...` (F2, no "started with"
+  line), `test_multi_word_locked_account_name_is_reachable_as_a_query` (F1),
+  `test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind` (F1 heuristic),
+  `test_credit_or_locked_with_no_amount_is_a_usage_hint_not_a_query` (F3). The
+  F3 failure showed the old code answering `/account credit` with
+  `"I don't have a locked account named \"credit\"..."` instead of the usage
+  hint — the exact regression F3 named. Restored source afterward.
+- Read `docs/DECISIONS.md` §18. Confirmed F2 is spec-safe: `contributed`
+  (sum of `transfer` rows landing on the account via `to_account_id`) and
+  `paid_out` are unchanged, and `opening_balance` is stored in its own column by
+  `set_account_opening_balance` (not as a `transfer` row), so surfacing it as a
+  separate "started with" fact neither double-counts against `contributed` nor
+  folds a position into an event. This is the exact option the `285b835` review
+  offered. For a `locked` account `signed = amount` (no negation), so
+  "started with ₹X" reads with the right sign. `if match["opening_balance"]`
+  suppresses the clause on a `Decimal('0.00')` opening balance (falsy) — correct.
+- Read `locked_account_totals` (`accounts.py:171`): still `NUMERIC → Decimal`,
+  reads `active_transactions` (§6), household-scoped via `household_members`
+  (§16), `kind = 'locked'`, `deleted_at IS NULL`. The `opening_balance` addition
+  changes nothing about the two gross sums.
+- **Probed the routing directly** (`/tmp/probe_route.py`, throwaway) with the
+  live `_looks_like_amount`: `'Kids Fund' → query`, `'Goa Trip 2026' → query`,
+  `'cash 500' → ACCOUNT_BAD_KIND`, **but `'Goa 2026' → ACCOUNT_BAD_KIND` and
+  `'Car 2025' → ACCOUNT_BAD_KIND`** — see F4.
+
+### Findings
+
+**F4 — medium — F1's heuristic leaves year/amount-suffixed `locked` names
+unreachable, misrouted to `ACCOUNT_BAD_KIND`.** `handlers.py:992-998`: when the
+first word isn't `credit`/`locked`, a two-word arg whose *second* word parses as
+an amount is treated as a botched onboarding call and refused with
+`ACCOUNT_BAD_KIND`, never reaching the query. `_looks_like_amount('2026')` is
+`True` (confirmed), so a `locked` pool auto-created (`new_locked_account`, free
+text — see `d2c2e80`) with a common name like **"Goa 2026", "Car 2025", "Trip
+2024"** cannot be queried: `/account Goa 2026` →
+`"I only set up credit … and locked … this way"`, the *exact* symptom F1 was
+raised to remove, for a narrower but very plausible class of names. Three-word
+names ("Goa Trip 2026") are unaffected because the tail no longer parses as an
+amount. The guard `_looks_like_amount` stays green in the test suite while this
+real behaviour breaks — a guard that protects a surface case ("cash 500") at the
+cost of the behaviour it was meant to preserve.
+*Fix (strictly better, and drops the heuristic's ambiguity):* attempt the query
+first — if the whole `arg` matches a live `locked` account, return it; only when
+there is **no** match do you fall to `ACCOUNT_BAD_KIND` for the
+`len(parts) == 2 and _looks_like_amount(parts[1])` case, else `ACCOUNT_NOT_LOCKED`.
+Then "Goa 2026" (exists) resolves as a query and "cash 500" (no such account)
+stays a bad-kind refusal; the only residual ambiguity is the vanishing case of
+someone onboarding "cash 500" who also happens to own a `locked` account
+literally named "cash 500".
+
+### Not findings (checked, fine)
+
+- F2's "started with" line: sign, zero-suppression, and no double-count against
+  `contributed` all verified above.
+- Case-insensitive match on the full `arg` (`t["name"].lower() == name.lower()`)
+  is preserved and correct for the multi-word path.
+- No `float` introduced; opening balance flows `NUMERIC → Decimal → format_amount`.
+
+---
+
+## 2026-08-12 — `285b835` — per-account contribution/payout totals for locked accounts (Phase 10)
+
+**Resolved 2026-08-12:** F1 and F2 fixed, F3 fixed as a side effect of F1's own
+fix (see below); the optional F3 wording was going to change regardless once
+F1 stopped treating every single-word arg as a query. F2 was resolved by
+adding the "surface the opening position as a third line" option the review
+itself offered, rather than folding it into `contributed` — `contributed`/
+`paid_out` keep meaning exactly what they meant before. Details in the
+implementer commit that follows this entry.
+
+**Scope:** `db.locked_account_totals` (gross transfer-in / transfer-out per
+`locked` account) and the read side of `/account <name>` in `handlers.py`,
+delegated to a new `_handle_account_query`.
+
+**Status: ⚠️ CHANGES REQUESTED** — the core sum is correct, `Decimal`-safe,
+household-scoped and soft-delete-safe, and its guards fail for the right reason.
+But two behaviours need a decision before this is done: a whole class of the
+accounts this feature exists to report on is unreachable through the command
+(F1), and a freshly-onboarded pool reports "put in ₹0.00" (F2).
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **367 passed, 1 warning** (the pre-existing
+  Starlette/httpx deprecation). Matches the diff's 3 new tests on top of 364.
+- Read the spec I judge against: `docs/DECISIONS.md` §18 — the `locked` kind
+  ("Contributions in, maturity out. **Contributions only, never market
+  value**"), "knows what you put in and what came back", transfers excluded from
+  every total, and the table at line 767 that models an opening balance as a
+  `transfer external → the account`.
+- Read `kanakko/db/accounts.py:171` (`locked_account_totals`) against its sibling
+  `account_balances` (line 121): same two transfer subqueries, `to_account_id`
+  for contributions and `from_account_id` for payouts, reads
+  `active_transactions` (§6), scoped by `household_members` (§16), `kind =
+  'locked'`, `deleted_at IS NULL`. Sums are gross, not netted, and never touch
+  `opening_balance`. `NUMERIC → Decimal` preserved end to end (asserted by
+  `test_locked_account_totals_are_gross_sums_not_a_balance`).
+- **Verified both guards go red for the right reason** (asserting effects, not
+  spellings): the gross-sum test asserts `contributed == 7000.00` /
+  `paid_out == 3000.00` separately, so folding the 1000 opening balance in, or
+  summing net, reddens it; it also plants a second household's `SIP` (must not
+  appear, §16) and a soft-deleted `9999` contribution (must not count, §6). The
+  case-insensitive test queries lowercase `savings` against `Savings`; an
+  exact-case match would return `None` and `result["name"]` would raise. Good.
+- **Exercised the routing against a live DB** (throwaway test, since removed)
+  and confirmed the three findings below with actual output, not assumption.
+
+### Findings
+
+**F1 — medium — multi-word `locked` account names are unreachable via
+`/account <name>`.** `handlers.py:957` splits the argument with
+`arg.split(maxsplit=1)`, so any query of two or more words is read as
+`kind`+`amount` and falls into the onboarding branch. The *immediately prior*
+commit (`d2c2e80`) lets a `locked` account be auto-created with a free-text name
+from natural language ("put 5000 in my kids fund" → a pool named `Kids Fund`),
+and nothing normalises that to one word. Live probe: with a `locked` account
+`Kids Fund`, `/account Kids Fund` →
+`"I only set up credit … and locked … this way"` (`ACCOUNT_BAD_KIND`) — the read
+path silently misroutes to a message about *creating* an account. So the feature
+cannot report on a whole class of the very accounts it was built for.
+*Fix:* if `parts[0]` isn't `credit`/`locked`, treat the entire `arg` (not just
+the first word) as the account name and query it; only a leading
+`credit`/`locked` should enter the onboarding branch.
+
+**F2 — medium (spec fit) — a freshly-onboarded pool reports "put in ₹0.00".**
+`/account locked 20000` stores `20000` as `opening_balance` and the query
+deliberately excludes it, so `/account <name>` immediately after shows
+`"… — put in ₹0.00, got back ₹0.00."` (asserted by the commit's own
+`test_bare_name_reports_…` with `1000`). The onboarding prompt calls that number
+"what's already in it" and §18 says a `locked` account "knows what you put in";
+telling a user who just said they have 20 000 in an FD that they put in ₹0.00 is
+misleading. It also diverges from §18's own model (line 767: an opening balance
+*is* a `transfer external → account` — which, stored as a row, would count as a
+contribution here). The implementer's exclusion is documented and defensible
+(an opening balance is a net *position*, not purely contributions, so folding
+all of it into `contributed` is also not strictly right) — which is exactly why
+this needs a spec-owner decision rather than a silent choice in code. *Fix:*
+either surface the opening position as a third line ("started with …"), or
+have the spec owner confirm the "starting position is invisible to this report"
+reading and note it in §18 so it isn't re-litigated.
+
+**F3 — low — a missing-amount onboarding typo now yields the "not locked"
+message.** Before this commit, `/account credit` (amount forgotten) fell through
+to `ACCOUNT_USAGE`. Now `len(parts) == 1` routes it to the query path: live
+probe `/account credit` → `'I don't have a locked account named "credit" …'`.
+A user fumbling the onboarding command gets a reply about a nonexistent account
+instead of the usage hint. Minor. *Fix (optional):* if `parts[0]` is
+`credit`/`locked` with no amount, keep showing `ACCOUNT_USAGE`.
+
+**Nit (non-blocking):** the commit body says "Two guards verified
+red-without-fix" while `TASKS.md` says "Three guards" — the prose disagrees with
+itself; harmless.
+
+None of these corrupts a total: the sums themselves are correct, gross, and
+soft-delete-safe. The findings are about which accounts the command can *reach*
+(F1) and what an onboarded opening balance *reports* (F2).
+
+---
+
+## 2026-08-12 — `d2c2e80` — auto-create a locked account on first mention (Phase 10)
+
+**Scope:** `new_locked_account` free-text field on the parse schema/`Transaction`,
+its confirm-card question, and `confirm_pending` get-or-creating the `locked`
+account on Confirm.
+
+**Status: ✅ DONE** — behaviour is correct and well-guarded; two low-severity,
+non-blocking notes below (neither corrupts a total or a balance).
+
+### What I checked (commands, and what they returned)
+
+- `uv run pytest -q` → **364 passed, 1 warning** (the pre-existing Starlette/httpx
+  deprecation). Matches the commit's claim of 364 / 10 new.
+- Read the spec I judge against: `docs/DECISIONS.md` §18 (accounts, `locked` kind,
+  "contributions only, never market value", transfers excluded from all totals,
+  "show the account, never ask for it"). The change fits it.
+- Traced the full path end to end: `parse.py` (`parse_schema` gate,
+  `Transaction` field + validator), `handlers.py:358` (a transfer routes to
+  `confirm_card`, never `category_prompt`, so a null-category new-pool transfer
+  is not misrouted), `confirm.py` (card + settled receipt), `db/pending.py`
+  (`confirm_pending` get-or-create), migration `011`'s transfer CHECK.
+- **Money path:** `amount` stays `Decimal` — serialized as a string in
+  `save_pending`, read back through `Transaction`/`money.parse_amount`. No float
+  introduced by this diff. `NUMERIC(12,2)` unchanged.
+- **Reads/soft-delete:** the get-or-create SELECTs filter `deleted_at IS NULL`;
+  balance reads still go through `account_balances`/`active_transactions`
+  (unchanged here). No new raw `transactions` read.
+- **Maturities-need-no-code claim:** verified `list_accounts`
+  (`db/accounts.py:112`) returns every kind except `external`, so once a `locked`
+  pool exists its name is in the parse enum and an ordinary transfer
+  (`from_account` = pool) already handles a payout. Claim holds.
+- **Guard spot-check (red-without-fix):** ran `/tmp/probe.py` against the
+  `Transaction` validator directly — a new-pool transfer that also names
+  `to_account`, one missing `from_account`, one on a non-transfer type, and a
+  blank/whitespace pool name are each refused; a clean `new_locked_account`
+  transfer validates with `to_account=None`. Matches the four schema/validator
+  guards.
+
+### Findings (both LOW, non-blocking)
+
+1. **LOW — `kanakko/parse.py:313` — no distinctness guard on the new-pool path
+   (bounded, no money impact).** `_transfer_names_two_distinct_ends` enforces
+   `from_account != to_account` on the ordinary transfer path but not
+   `from_account != new_locked_account` on the new-pool path (the field is
+   deliberately unchecked against the closed set). Confirmed live:
+   `Transaction.model_validate({... from_account:"Bank", to_account:None,
+   new_locked_account:"Bank"})` is accepted. If the model emits
+   `new_locked_account` equal to an existing account that is also the
+   `from_account`, `confirm_pending`'s get-or-create reuses that account, so
+   `from_account_id == to_account_id` — a self-transfer, which migration 011's
+   CHECK permits (it requires only that both ends are non-null). **Why it's low:**
+   a self-transfer nets zero in `account_balances` (inflow +X, outflow −X on the
+   same account) and is excluded from every spending/income total, so no number
+   is wrong — the artifacts are a junk ledger row plus a misleading `New savings
+   account "Bank"?` card. The model is also guided against naming an existing
+   account. Suggested one-line fix if worth it: in the `new_locked_account`
+   branch also `raise` when `self.new_locked_account == self.from_account`.
+
+2. **LOW — `kanakko/db/pending.py:70-74,115-135` — "reuses rather than mints a
+   duplicate" holds for the stale-card case it describes, but not for true
+   concurrency.** There is no `UNIQUE(household_id, name)` on `accounts`
+   (migration 009), so the SELECT-before-INSERT prevents a duplicate only when the
+   racing pool's INSERT has already committed (the sequential stale-card scenario
+   the docstring literally names — verified by
+   `test_confirm_reuses_an_existing_account_...`). Two genuinely simultaneous
+   Confirms of the same new pool could each SELECT-miss and both INSERT. **Why
+   it's low:** negligible at household scale, and duplicate `locked` accounts split
+   history rather than corrupt a total. Noting it only because the docstring's
+   "racing a housemate's pool" wording reads slightly stronger than the guard
+   delivers.
+
+### Not findings (checked, fine)
+
+- The ticked box is not a false tick: auto-create works (minted `locked`, kind
+  and household asserted in `test_confirm_mints_...`), contributions are transfers,
+  maturities reuse the existing transfer path. The per-account in/out total was
+  split into a new *unchecked* bullet — a genuinely separate report with no query
+  to extend, a fair split, not scope-dodging.
+- Single-account households: `new_locked_account` rides the same `len(accounts) > 1`
+  gate, so their schema stays byte-for-byte unchanged (pinned test still green).
+- No secret, no float, no ORM/Celery/Redis, no charting lib, no confidence score
+  introduced.
+
+---
+
+## 2026-08-12 — `7210fff` — credit card semantics end to end: transfers, not double spending (Phase 10)
+
+**Scope:** adds a `transfer` transaction type end to end — `parse_schema` gains
+`transfer` + `from_account`/`to_account` (gated on `len(accounts) > 1`),
+`_ACCOUNT_GUIDANCE` teaches bill-payment-as-transfer, `Transaction` gains the two
+endpoints + a model validator mirroring migration 011's CHECK, `confirm_pending`
+writes a transfer with NULL `account_id`/`category` and resolved endpoints,
+`confirm_card`/`settled_card` render "Bank → Card", and `handle_text` skips the
+category picker for transfers. Closes the TASKS.md "Credit card semantics end to
+end" box.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches `TASKS.md`, `kanakko/{confirm,parse,handlers}.py`,
+  `kanakko/db/pending.py`, and four test files. Nothing outside Phase 10's scope.
+- **Spec fit against `docs/DECISIONS.md` §18 and `migrations/011_transfer_type.sql`.**
+  The model validator (`parse.py:344`) reproduces 011's CHECK exactly: a transfer
+  names both ends, every other type names neither, and the two ends must differ.
+  `confirm_pending`'s transfer branch (`db/pending.py:100`) leaves `account_id`
+  and `category` NULL and resolves the two endpoints by name within the
+  household — the row shape 011's CHECK requires.
+- **The double-count is excluded from totals, not just claimed.** `db/reports.py`
+  `month_summary` reads `FROM active_transactions` with
+  `FILTER (WHERE type = 'expense'/'income')` (`reports.py:37-39`), so a `transfer`
+  row is invisible to both totals and the category breakdown by construction. The
+  read goes through the soft-delete view, not `transactions` directly.
+- **End-to-end confirm path.** `handle_confirm` (`handlers.py:974-977`) passes
+  `confirm_pending`'s returned row straight into `settled_card`; the row now
+  carries `from_account`/`to_account`, and `settled_card` reads them only inside
+  its `type == "transfer"` branch — no `KeyError` on the ordinary path.
+- `uv run pytest` → **354 passed** (10 new), 15.2s. Matches the commit claim.
+- **Guards verified red-without-fix (I reverted each and re-ran):**
+  - Reverted `handlers.py:355` to `if txn.category is None:` (dropping the
+    `type != "transfer"` exclusion): `test_handle_text_shows_a_confirm_card_not_a_
+    category_picker_for_a_transfer` **failed**. Restored → passes.
+  - Disabled `confirm_pending`'s transfer branch (`if False and txn.type == ...`):
+    both `test_confirm_writes_a_transfer_with_two_endpoints_and_no_account` and the
+    task's own `test_credit_card_swipe_then_bill_payment_does_not_double_count_
+    spending` **failed**. Restored → both pass.
+  - The parse validator's three refusal tests (missing endpoint, self-transfer,
+    non-transfer carrying an endpoint) each assert a `ValidationError` and a retry
+    (`len(calls) == 2`) — these fail if the `model_validator` is removed.
+- Working tree confirmed clean (`git diff --stat` empty) after all reverts.
+
+### Findings
+
+None blocking.
+
+One non-blocking observation, not a defect: the schema still `required`s
+`category` for a `transfer`, and neither the schema nor the model validator
+forbids a transfer arriving with a *non-null* category. It causes no wrong
+outcome — `confirm_pending` forces `category = None` on the write regardless, and
+both cards ignore category for transfers — so the ledger and every total stay
+correct. Left as-is; flagging only so a future reader knows it was considered.
+
+---
+
+## 2026-08-12 — `7dd5871` — teach the parse prompt the account vocabulary (Phase 10)
+
+**Status: ✅ DONE**
+
+**Scope.** Prompt-only change: `_ACCOUNT_GUIDANCE` in `kanakko/parse.py` is
+appended to the system prompt in `build_request`, gated on
+`accounts and len(accounts) > 1`. Maps spending vocabulary onto account *kinds*
+("swiped"/"on card" → credit, "UPI"/"paid cash" → spending, "SIP"/"FD"/"chit" →
+locked) so the model routes to the right pool. Plus one new test and a `TASKS.md`
+tick.
+
+**What I checked.**
+
+- `git show HEAD` — the whole diff is the guidance string, the two-line gate in
+  `build_request`, one test, and doc updates. No money path, no SQL, no
+  timezone code touched.
+- **Gate matches the schema exactly.** `build_request`'s
+  `if accounts and len(accounts) > 1` (`kanakko/parse.py:168`) is the same
+  condition `parse_schema` uses to add the `account` enum
+  (`kanakko/parse.py:117`). Guidance appears iff the enum does — a
+  single-account or no-account household's prompt is byte-for-byte unchanged,
+  as claimed.
+- **Spec fit (§18).** The three kind mappings match the §18 table (SIP/FD/chit →
+  locked, credit swipe → credit, everyday spend → spending). "UPI is a payment
+  rail, not a pool of money, so never invent or pick an account named after it"
+  is exactly §18's rule. Guidance teaches by kind, not literal account name, so
+  it composes with the per-request enum (§18: "the account list comes from the
+  accounts table, never a literal") — no second source of truth.
+- **Tests.** `uv run pytest tests/test_parse.py -q` → 25 passed;
+  `uv run pytest -q` → **344 passed** (matches the claimed count, 1 new).
+- **The guard is real.** Removed the gate (made the append unconditional) and
+  reran the new test:
+  `test_account_vocabulary_guidance_appears_only_with_a_real_account_choice`
+  → **1 failed** on the one-account assertion. Restored with
+  `git checkout`. The test also asserts the positive direction (guidance present
+  with two accounts), so it pins the gate in both directions — it fails for the
+  reason it exists.
+
+**Findings.** None blocking.
+
+- *(nit, not a finding)* "paid cash" maps to "the everyday spending account",
+  but §18's ATM example implies a household may hold a distinct `Cash` account
+  (also `spending` kind). The guidance can't disambiguate two spending accounts —
+  but the enum carries the literal names, this is guidance not a constraint, and
+  a wrong guess is one tap to fix on the confirm card (§18). Acceptable by
+  design; noting only so it isn't rediscovered as a surprise.
+
+---
+
+## 2026-08-12 — `bb51f4a` — gate the account enum on a real choice, not just non-empty
+
+**Status: ✅ DONE**
+
+Scope: `git show HEAD` — `kanakko/parse.py` (+11/−4), `tests/test_parse.py`
+(rewrites two tests, adds one), `REVIEWS.md` (resolution note). Fixes the
+⚠️ CHANGES REQUESTED I raised on `68e49cf`: the `account` enum was gated on
+`if accounts:`, so a one-account household — every onboarded user — got the
+extra property and required key, growing the daily-path prompt and violating the
+task's acceptance line.
+
+### What I checked (commands and results)
+
+- Read the whole diff and the full `kanakko/parse.py`. The gate is now
+  `if accounts and len(accounts) > 1:` (`kanakko/parse.py:99`). A one-account or
+  empty/omitted `accounts` returns the byte-for-byte pre-accounts schema.
+- **Spec fit:** `docs/DECISIONS.md:783-786` §18 — *"Every user gets a default
+  account … a transaction that names no account lands there. … Accounts become
+  visible only when a second one exists."* The gate on `len > 1` is exactly this
+  rule; the prior truthy gate contradicted it. Task acceptance line
+  (`TASKS.md:820`) — *"A household with one account must produce the same prompt
+  cost and the same behaviour as today"* — is now met.
+- `uv run pytest -q` → **335 passed** (matches the commit message).
+- **Verified the guard fails for the reason it exists.** Reverted the gate to
+  `if accounts:` and ran `uv run pytest tests/test_parse.py -q`:
+  `test_account_enum_is_absent_without_a_real_choice` and
+  `test_a_household_with_one_account_behaves_like_no_accounts_at_all` both went
+  **red** (2 failed, 22 passed). Restored → 24 passed. The old test asserted the
+  inverted claim (`one - bare == {"account"}`), which is why the regression
+  shipped green; the flip to `parse_schema(accounts=["Bank"]) == parse_schema()`
+  is a real equality check that a one-account schema must satisfy.
+- The new `test_account_enum_appears_only_once_a_second_account_exists`
+  (`tests/test_parse.py:114`) covers the two-account case the old test's *name*
+  promised but never isolated — asserts the `anyOf` enum, the null branch, and
+  `account` in `required`.
+- **Blast radius:** grepped every `parse_schema` caller — only `build_request`
+  (`kanakko/parse.py:159`), which threads `accounts` from
+  `handlers.handle_text:318`. Nothing relies on a one-account enum. The Pydantic
+  `_account_is_known` validator still receives `context={"accounts": [...]}` for
+  a one-account household, but the schema now omits `account` +
+  `additionalProperties: false`, so the model can't return one; `account` stays
+  `None` → the default account. Consistent, no dead path.
+
+Money paths, timezone bucketing, and `active_transactions` are untouched by this
+commit; nothing to check there.
+
+### Findings
+
+None blocking. One minor, non-blocking note:
+
+- **Stale prose (not code):** `TASKS.md:826-831` still describes the enum
+  appearing "only when `accounts` is truthy" and cites the old test name
+  `test_account_enum_is_absent_without_accounts` (renamed to
+  `…_without_a_real_choice`). The behaviour and tests it documents are now the
+  superseded ones. Not a correctness issue — the box is correctly ticked and the
+  work is done — but the Done: annotation now misdescribes the shipped gate.
+  Worth a one-line fix next time this file is touched.
+
+---
+
+## 2026-08-12 — `68e49cf` — per-request account enum in the parse schema
+
+**Scope:** `parse_schema` / `build_request` / `call` / `parse_message` gain an
+`accounts` param; `parse_schema` appends a nullable `account` `anyOf` enum when
+`accounts` is non-empty. New `db.list_accounts(conn, user_id)` (household-scoped
+names, `external` excluded, default-first). `Transaction` gains
+`account: str | None` validated against the caller's accounts via Pydantic
+context. `handlers.handle_text` looks the accounts up and threads them into both
+`build_request` and `parse_message`.
+
+**Status: ⚠️ CHANGES REQUESTED** — the account list is correctly sourced from
+the table (never a literal), validation is wired both first-call and retry, and
+the empty/no-household edge case is safe. But the change violates the one
+requirement the task states explicitly — *"A household with one account must
+produce the same prompt cost and the same behaviour as today"* — and the test
+named to assert that requirement asserts the opposite, so the violation ships
+green.
+
+**Resolved 2026-08-12:** `parse_schema` now gates the `account` enum on
+`accounts and len(accounts) > 1` (`kanakko/parse.py:99`) — a one-account
+household gets byte-for-byte the pre-accounts schema. `test_a_household_with
+_one_account_behaves_like_no_accounts_at_all` (`tests/test_parse.py:103`) now
+asserts `parse_schema(accounts=["Bank"]) == parse_schema()` instead of the
+inverted claim; `test_account_enum_is_absent_without_a_real_choice` extends the
+absence check to a single account; a new
+`test_account_enum_appears_only_once_a_second_account_exists` covers the
+two-account case the old test's name promised but never isolated. Verified the
+guard fails for the reason it exists: reverted the gate to `if accounts:`, both
+tests went red, restored it, `uv run pytest -q` → 335 passed.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — read the whole diff (10 files, +276/−31); scope is the parse
+  schema, `list_accounts`, and the `handle_text` wiring.
+- `docs/DECISIONS.md` §18 — the account enum is per-request from the table
+  (implemented correctly), *and* "Accounts become visible only when a second one
+  exists" (§18, onboarding), i.e. one account = daily path unchanged.
+- `TASKS.md` line 74–78 — the ticked task's explicit acceptance line: one-account
+  household → same prompt cost and same behaviour as today.
+- `uv run pytest -q` → **334 passed**.
+- Schema comparison, one-account vs pre-accounts (below) — the daily path's
+  request grows and gains a required field.
+
+### Findings
+
+**1. (blocking) One-account households — i.e. every onboarded user — get a
+larger prompt and a changed schema, which the task forbids.**
+`kanakko/parse.py:98` gates the enum on `if accounts:` (any non-empty list).
+Every household is minted with exactly one usable account, `Bank`
+(`create_default_accounts`, `kanakko/db/accounts.py:36-41`; `external` is
+excluded by `list_accounts`). So `handle_text` calls `parse_message(text,
+["Bank"])` for the ordinary daily user, and the schema now carries an `account`
+property **and lists it in `required`** (strict mode):
+
+```
+$ uv run python -c "...build_request('spent 500 on tea', accounts=['Bank'])..."
+bare request bytes : 1378
+1-acct request bytes: 1469      # +91 bytes on every daily-path request
+account required in 1-acct: True
+```
+
+Failure scenario: input "spent 500 on tea" from a normal single-account user →
+the model is now handed a strictly larger schema and *required* to emit an
+`account` field it never had to before. The task's acceptance line ("same prompt
+cost and the same behaviour as today" for a one-account household) is not met;
+§18's "accounts become visible only when a second one exists" points the same
+way — with one account, `null → default` already covers it and the enum buys
+nothing.
+Suggested fix: gate the enum on a real choice existing, e.g. in `parse_schema`
+`if accounts and len(accounts) > 1:`. Then a one-account household is byte-for-byte
+today's schema; the enum appears only once a second account is onboarded.
+
+**2. (blocking, same root) The guard for that requirement asserts the opposite
+of the requirement — it is green while the requirement is violated.**
+`tests/test_parse.py:461` `test_a_household_with_one_account_behaves_like_no_accounts_at_all`
+is named to certify the one-account case is unchanged, but its body asserts it
+*differs*:
+
+```python
+assert one["properties"].keys() - bare["properties"].keys() == {"account"}
+assert one["required"] == bare["required"] + ["account"]
+```
+
+That is CLAUDE.md's "a guard that reports safety it doesn't provide is worse than
+no guard" — a reader scanning the suite sees a green "one account behaves like no
+accounts at all" and trusts the daily path is untouched, when it isn't. After
+fix #1 this test should assert `one == bare` (no `account` property, unchanged
+`required`), and a separate test should cover the two-account case where the enum
+*does* appear. That flipped test is the one that fails for the reason it exists.
+
+### What is correct (not findings)
+
+- `list_accounts` (`kanakko/db/accounts.py:99`) sources from the table, excludes
+  the structural `external` kind, filters `deleted_at IS NULL`, orders
+  default-first — never a literal (§11/§18). Empty for a user with no household,
+  matching the no-household edge case. Tests cover both.
+- Validation context is passed on both the first call and the single retry
+  (`parse.py:236-247`), and no-context / empty-accounts correctly skips the
+  membership check, so pre-accounts callers are unaffected. An out-of-set account
+  raises `ValidationError` and is retried exactly once — verified by the suite.
+- No `float` on any amount path; no reads of `transactions` bypassing the view;
+  no secret introduced.
+
+---
+
+## 2026-08-12 — `e54bd61` — show transfers in the dashboard's recent list
+
+**Scope:** `recent_transactions` (`kanakko/db/reports.py`) now `LEFT JOIN`s
+`accounts` twice to return the from/to account names (NULL for non-transfers);
+`recent_list` (`kanakko/webapp/render.py`) renders a `transfer` as "Bank → SIP"
+instead of an empty category `<select>`, and drops the −/+ sign and income tint
+(§18); the hero panel's flow stat is renamed "Balance" → "Net". Two new tests
+plus fixture updates to the six existing `recent_list` rows.
+
+**Status: ✅ DONE** — the change matches §18, the two new tests fail for the
+reason they exist (verified red by reverting the branch), the full suite passes,
+and the user-typed account names are HTML-escaped. No blocking findings.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — read the whole diff; scope is display-only (SQL SELECT +
+  Python rendering + a hero-stat rename), no write path, no money-total change.
+- **Spec fit (§18, DECISIONS lines 748–809).** A transfer "is excluded from
+  every spending and income total" and "is neither spending nor income", so
+  dropping its sign/tint and the category dropdown (a transfer structurally has
+  no category) is correct. §18 also gives "Balance" a distinct stock meaning
+  (`opening_balance + inflows − outflows`, line 807), so renaming the period's
+  income−expenses *flow* stat away from "Balance" removes a real name clash.
+- **Reads through the view.** The query is `FROM active_transactions t LEFT JOIN
+  accounts …`. `active_transactions` is `SELECT * FROM transactions WHERE
+  deleted_at IS NULL` and migration 011 recreated it after adding
+  `from_account_id`/`to_account_id`, so those columns are visible. Soft-delete
+  filter preserved. Confirmed the view/columns in `migrations/011_transfer_type.sql`.
+- **Money.** `amount` still comes back as `NUMERIC`→`Decimal`; the "Net" stat is
+  `period.income - period.expenses`, exact `Decimal` subtraction. No `float`.
+- **`uv run pytest -q`** → **323 passed**, 1 warning (pre-existing httpx
+  deprecation). Matches the commit's claim.
+- **Exercised `recent_list` directly** with a mixed batch (transfer, expense,
+  income, transfer with a NULL from-account): transfer renders "Bank → SIP",
+  produces no `cat-select`, no sign on ₹5,000.00; NULL endpoint renders "? → SIP";
+  expense keeps its "−" and income keeps `amt in`. `cat-select` count = 2 (only
+  the non-transfer rows).
+- **Red-without-fix, verified.** Reverted the `if type_ == "transfer"` branch to
+  the old unconditional `_category_select` + sign logic and ran
+  `pytest -k transfer` → both new tests **FAILED**
+  (`test_recent_list_transfer_shows_accounts_not_a_category_dropdown`,
+  `…_has_no_income_or_expense_sign`). Restored; `git status` clean.
+- **XSS.** `from_account`/`to_account` are user-named account strings; both go
+  through `html.escape(... or "?")`. The note escaping test was updated in place
+  and still asserts the escaped bytes.
+
+### Findings
+
+None blocking.
+
+**Non-blocking note (not introduced by this commit, out of scope):**
+`kanakko/jobs/monthly.py:58` still labels the income−expenses figure in the
+Telegram monthly summary "Balance:". That is the same name §18 now reserves for
+account stock — the exact clash this commit fixed on the dashboard. It's a text
+message far from any `account_balances` figure, so the ambiguity is lower, and
+no task covers it. Flagging only so it isn't forgotten if §18 balances later
+reach that surface.
+
+---
+
+## 2026-08-12 — `b7b4287` — migration 012: enforce `account_id` NOT NULL, except transfers
+
+**Scope:** Adds `migrations/012_transactions_account_not_null.sql` — a CHECK
+(`account_id IS NOT NULL OR type = 'transfer'`) enforcing the account axis on
+every non-transfer row, the write-wiring half deferred by migration 010. The
+rest of the diff is test-fixture surgery: `household_of()` now delegates to
+`create_household_of_one` (so test households get the default account production
+mints), a new `default_account_of()` helper looks it up, and ~20 raw-SQL inserts
+across 6 test files now stamp `account_id`. One new test covers the CHECK.
+
+**Status: ✅ DONE** — the migration is correct, the guard fails for the reason
+it exists (verified both directions), the production prereq genuinely holds, and
+the full suite passes. No blocking findings.
+
+### What I checked (commands and results)
+
+- **`uv run pytest -q` → `321 passed`.** Matches the commit message.
+- **The guard fails for the right reason — both directions.** Neutered the CHECK
+  to `CHECK (true)` and ran the new test
+  (`test_transactions_account_id_is_required_except_for_transfers`) → **FAILED**
+  (the "non-transfer with no account_id is refused" assertion reddens).
+  Separately tightened the CHECK to `CHECK (account_id IS NOT NULL)` (dropping
+  the transfer exemption) → **FAILED** (the "transfer with only from/to ends is
+  accepted" assertion reddens). So both halves of the exemption are actually
+  tested, not asserted-in-name-only. Restored the file; `git diff --stat` clean.
+- **The production prereq holds — no reachable NULL-account path.** The only
+  `INSERT INTO households` in the codebase is in `create_household_of_one`
+  (`kanakko/db/households.py:32`), which calls `create_default_accounts`
+  (line 46) minting the default `spending` pool. `confirm_pending`
+  (`kanakko/db/pending.py:88-95`) resolves `account_id` from that default via a
+  LEFT JOIN. I grepped `kanakko/db/accounts.py` for any soft-delete/close path
+  that could strip a household of its live default — there is none (only create,
+  set-opening-balance, and read). So a NULL `account_id` on a non-transfer
+  confirm is unreachable in production; the CHECK never fires on the money path.
+- **`ADD CONSTRAINT` won't fail on existing data.** Migration 010 backfilled
+  every existing non-transfer row's `account_id`, and nothing writes a
+  `transfer` row yet (011 only added the type), so the constraint validates
+  cleanly against current data.
+- **Migration ordering.** `kanakko/migrate.py:28` applies `sorted(*.sql)`, so 012
+  runs after 011 (the transfer type it references exists). `type = 'transfer'` in
+  the CHECK is a valid enum value per `011_transfer_type.sql`.
+- **Test-fixture changes are faithful to the new reality.** The
+  `test_balances_are_household_scoped` assertion change
+  (`tests/test_accounts.py:122`) — `{"Mine"}` → `{"Mine", "External"}` — is
+  correct: `household_of` now mints both structural accounts, so the untouched
+  `external` counterparty legitimately shows up. The `_account` helper's
+  `is_default=True` branch (renames/re-opens the existing default via UPDATE
+  rather than inserting a second, which the partial unique index would reject) is
+  correct; it ignores a requested `kind`, but every `is_default=True` caller
+  asks for `kind="spending"`, matching the minted default, so it's harmless.
+- **Money/timezone/soft-delete surfaces untouched.** The migration adds a table
+  constraint only; no report query, boundary computation, or view changed. The
+  backfill-preservation tests (`test_transactions_household_backfill_preserves_totals`,
+  `test_account_backfill_leaves_every_report_number_unchanged`) correctly drop
+  the new CHECK for the span they simulate a pre-account world, and roll back.
+
+### Minor observation (not blocking, out of this diff)
+
+- `confirm_pending`'s docstring (`kanakko/db/pending.py:59-62`) still says a
+  household with no default "yields NULL, which `accounts.account_id` still
+  permits until the NOT NULL write-wiring task lands." That task has now landed,
+  so the sentence is stale — a NULL there would now raise `CheckViolation`, not
+  be permitted. It's unreachable in practice (no path deletes the default), and
+  the line isn't in this commit's diff, so it's not a finding here — just worth a
+  one-line docstring fix next time that file is touched.
+
+---
+
+## 2026-08-12 — `b29eced` — `/account` no longer crashes when the sender has no household
+
+**Scope:** Fixes the one blocking finding from the `70b6cc4` review — a
+reachable unhandled `TypeError` when a user in open-signup mode sends `/account
+credit|locked <amount>` before `/start` mints a household.
+`set_account_opening_balance` now returns `None` on an empty `RETURNING` instead
+of unpacking it; `handle_account` treats that `None` as a refusal
+(`ACCOUNT_NO_HOUSEHOLD`, "Send /start first"). Adds one regression test.
+
+**Status: ✅ DONE** — the fix is correct, minimal, and matches the existing
+refusal pattern in `handle_account`. No money-path, timezone, soft-delete, or
+security surface is touched. No new findings.
+
+### What I checked (commands and results)
+
+- **Read the fix in context.** `set_account_opening_balance`
+  (`kanakko/db/accounts.py:49-96`): the no-household case is exactly the INSERT
+  branch. `SELECT account_id ... WHERE household_id = (SELECT household_id FROM
+  household_members WHERE user_id = %s)` returns no row (the subquery is NULL,
+  so `household_id = NULL` never matches), falls to the INSERT `... SELECT ...
+  FROM household_members WHERE user_id = %s`, which selects zero rows, so
+  `RETURNING` is empty and `cur.fetchone()` is `None` → the new `if row is None:
+  return None` fires. The existing account (UPDATE) branch is unreachable
+  without a household, so no path unpacks a `None`. Correct.
+- **Read the caller.** `handle_account` (`kanakko/handlers.py:930-935`) checks
+  `account is None`, sends `ACCOUNT_NO_HOUSEHOLD`, logs `status="noop"`, returns
+  `None` — the same shape as the three refusal branches above it
+  (`ACCOUNT_USAGE`, `ACCOUNT_BAD_KIND`, `ACCOUNT_BAD_AMOUNT`). Consistent.
+- **`uv run pytest -q tests/test_account_command.py`** → `7 passed`.
+- **Verified the guard fails for the reason it exists.** Temporarily reverted
+  the `row is None` check to the bare `(account_id,) = cur.fetchone()` and ran
+  `test_no_household_is_refused_not_a_crash` → `1 failed` (the `TypeError` the
+  fix prevents). Restored the fix.
+- **`uv run pytest -q`** (full suite) → `320 passed, 1 warning`.
+
+No `float` on an amount, no read bypassing `active_transactions`, no timezone
+boundary, no secret — none of those surfaces are in this diff. The commit
+message's claims (320 passed, guard reddens on revert) are accurate.
+
+---
+
+## 2026-08-12 — `70b6cc4` — `/account` onboarding ask + default account per household (Phase 10)
+
+**Scope:** `create_household_of_one` now mints the two structural accounts every
+household needs (`spending`/'Bank' default + `external`) via new
+`create_default_accounts`. New `/account credit|locked <amount>` command
+(`handle_account` + `set_account_opening_balance`) sets a signed `opening_balance`
+— credit's reported amount negated (§18 "same column, different question"), one
+account per kind (repeat = update, not duplicate). `confirm_pending` now stamps
+each new transaction's `account_id` from the household default. Webhook routes
+`/account` to `handle_account` and excludes it from metering. WELCOME/HELP_TEXT
+updated. Adds `tests/test_account_command.py` (6) + accounts/db/webhook tests.
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — one
+reachable unhandled crash (open-mode edge), fixed. Money logic, sign
+convention, routing, and metering are correct.
+
+> **RESOLVED.** `set_account_opening_balance` (`kanakko/db/accounts.py`) now
+> checks the INSERT's `RETURNING` row before unpacking it and returns `None`
+> when it's empty — the no-household case — instead of raising `TypeError:
+> cannot unpack non-iterable NoneType object`. `handle_account`
+> (`kanakko/handlers.py`) treats that `None` as a refusal: it sends
+> `ACCOUNT_NO_HOUSEHOLD` ("Send /start first — ...") and logs a `noop`, the
+> same pattern `handle_transfer`/`handle_remove` already use for their own
+> refusal branches, rather than letting the exception reach the webhook and
+> 500. Added `test_no_household_is_refused_not_a_crash`
+> (`tests/test_account_command.py`), which seeds a user with no
+> `create_household_of_one` call and sends `/account credit 5000`. Verified the
+> guard fails for the reason it exists: reverting the `row is None` check back
+> to the bare `(account_id,) = cur.fetchone()` reddens exactly that test
+> (`1 failed`); restoring it greens the full suite. `uv run pytest -q` →
+> **320 passed**.
+
+### What I checked (commands and results)
+
+- `git show HEAD --stat` / full diff — 11 files, matches the commit message scope.
+- `uv run pytest -q` → **319 passed**, 1 warning. No pre-existing test regressed.
+- **Credit-negation guard reddens without the fix.** Replaced
+  `signed = -amount if kind == "credit" else amount` with `signed = amount` in
+  `set_account_opening_balance` (accounts.py:66) and re-ran the account tests →
+  `test_set_account_opening_balance_negates_credit_and_updates_on_a_repeat`,
+  `test_credit_amount_is_stored_negated_and_reads_back_as_owed`, and
+  `test_repeat_call_updates...` **FAILED**; 7 passed. Restored (`git checkout`).
+  So the money guard fails for the reason it exists, not on a surface string.
+- Confirmed the sign convention end-to-end: credit stores `-amount`,
+  `account_balances` multiplies credit by `-1`, so a `/account credit 5000` reads
+  back `Decimal("5000.00")` owed — money stays `Decimal`, no float. ✅
+- Confirmed `confirm_pending` derives `household_id` via a `LEFT JOIN accounts`
+  on `is_default AND deleted_at IS NULL`; migration 009's partial unique index
+  (`accounts_one_default_per_household`) guarantees ≤1 live default, so the join
+  can't multiply the pending row. NULL household → `(None, None)` → NOT NULL
+  refuses (unchanged behaviour; `test_confirm_without_a_household_is_refused`
+  still passes). ✅
+- Webhook: `/account` is in the non-parse set (never metered) and routes to
+  `handle_account`; `test_webhook_routes_account...` passes and asserts
+  `claims == [None]`. ✅
+
+### Findings
+
+**1. (Medium — blocking) `/account` before `/start` crashes with an unhandled
+`TypeError`, no user reply, and loops on redelivery.**
+`kanakko/db/accounts.py:82-89` (`set_account_opening_balance`, INSERT branch) /
+`kanakko/handlers.py:406`.
+
+In `open` signup mode (`SIGNUP_MODE=open`, a supported config), a brand-new
+user is admitted by `is_authorized`, `get_or_create_user` mints their user row,
+but **no household exists until `/start`**. If their first message is
+`/account credit 5000`, `set_account_opening_balance`'s `INSERT ... SELECT ...
+FROM household_members WHERE user_id = %s` inserts zero rows, so
+`(account_id,) = cur.fetchone()` unpacks `None`.
+
+Reproduced against the test DB (temp test, since removed):
+```
+DB RAISED: TypeError: cannot unpack non-iterable NoneType object
+HANDLER RAISED: TypeError: cannot unpack non-iterable NoneType object
+```
+The webhook catches, logs `update.handled status=error`, and re-raises → 500.
+The `claim_update` rolls back with it, so Telegram redelivers and the 500
+repeats; the user gets no message. The sibling command `handle_transfer`
+degrades gracefully here (`household_roster` returns empty → usage/no-match
+reply), so this handler breaks a pattern the others hold.
+Failure scenario: open mode, first-ever message `/account credit 5000` →
+repeated 500s, nothing stored, silent to the user.
+Suggested fix: in `handle_account` (or `set_account_opening_balance`), detect the
+no-membership case and send a "send /start first" hint instead of unpacking a
+possibly-empty `RETURNING`. (Gated on open mode — in the default `invite` mode an
+authorized user always has a household, so this is edge, not a hot path.)
+
+### Not findings (checked, fine)
+
+- Existing pre-009 households have an `external` (backfilled by migration 009)
+  but no `spending` default, so their confirms stamp NULL `account_id`. The
+  `confirm_pending` docstring calls this out as permitted until the "Enforce
+  `account_id` NOT NULL" task lands; consistent with spec intent, not a defect
+  of this commit.
+- `create_default_accounts` has no existence guard, but it is only called from
+  the genuinely-new-household branch of `create_household_of_one`, and the
+  partial unique index would reject a second live default anyway.
+
+---
+
+## 2026-08-12 — `87be3ac` — derive account balances from the ledger (Phase 10)
+
+**Scope:** New `db.account_balances(conn, user_id)` computes
+`opening_balance + inflows − outflows` per account in the caller's household from
+one query — no stored total (§18). Income/expense sum by `account_id`, transfers
+by `to_account_id`/`from_account_id`; a `credit` account's asset balance is negated
+so it reads as what is *owed*. Reads `active_transactions` (§6), household-scoped
+(§16). Adds `kanakko/db/accounts.py`, the `__init__` export, and
+`tests/test_accounts.py` (2 tests). No source path consumes it yet — this is the
+query, the write/UI wiring lands later.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches only `kanakko/db/accounts.py` (new, 65),
+  `kanakko/db/__init__.py` (export), `tests/test_accounts.py` (new, 112),
+  `TASKS.md` (tick). No existing behaviour changed.
+- `uv run pytest tests/test_accounts.py -q` → **2 passed**.
+- `uv run pytest -q` → **309 passed**, 1 warning.
+- **Verified the credit-negation guard reddens without the fix.** Replaced the
+  `CASE WHEN a.kind = 'credit' THEN -1 ELSE 1 END` factor with `1`, re-ran
+  `tests/test_accounts.py` → `test_balances_derive_...credit_sign_convention`
+  **FAILED**, the other passed. Restored the file; `git diff` clean. So the check
+  genuinely fails for the reason it exists (Card would read −4000 held instead of
+  +4000 owed), not on a surface string.
+- Read `DECISIONS.md` §18 (711–809): balance is derived never stored; a `credit`
+  account "reads as what is owed"; a transfer is "excluded from every spending and
+  income total". The query matches all three — transfers move only the two endpoint
+  columns, never a spending/income sum, and net to zero across the household.
+- Read `migrations/009–011`: `opening_balance NUMERIC(12,2)` signed (a credit debt
+  is a negative opening), `account_id` on every row (010 backfill), transfer
+  endpoints + the `type='transfer' ⇔ both endpoints set` CHECK (011). The query's
+  four sub-sums line up with that schema.
+- **Household scoping is safe against the scalar-subquery footgun.** The predicate
+  `a.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)`
+  would raise `more than one row` if a user could belong to two households, but
+  `migrations/006` puts a `UNIQUE` on `household_members.user_id` (noted in 006/007
+  and relied on by `households.py`), so the subquery is always ≤1 row. An unknown
+  user → NULL → empty result, no error. Matches the existing pattern in
+  `db/households.py`.
+- Confirmed `Decimal`, never float: `opening_balance` and every `sum(amount)` are
+  `NUMERIC`; `integer * numeric` and `coalesce(numeric, 0)` stay `numeric`, so
+  psycopg returns `Decimal`. The test asserts `isinstance(..., Decimal)` on every
+  balance.
+
+### Findings
+
+None blocking. Two notes, neither a defect in this commit:
+
+- The per-account sub-sums filter only on `account_id`/`to_account_id`/
+  `from_account_id`, not household — correct today because an `account_id` belongs
+  to exactly one household and the outer predicate confines `a` to the caller's.
+  Nothing to change; flagging that the invariant it leans on is "an account is in
+  one household," which the schema (FK + no cross-household transfer constraint)
+  does not itself enforce on transfer endpoints. When the transfer write path
+  lands, its validation must keep both endpoints in the same household, or a
+  cross-household transfer would silently move one side's balance.
+- The two tests cover `spending` and `credit`; `locked` and `external` kinds ride
+  the same `ELSE 1` branch as `spending`, so they are exercised by construction but
+  not named. Not a gap worth a test — the sign logic is one CASE, already covered.
+
+## 2026-08-12 — `b4ecffb` — migration 011: the `transfer` type, excluded from both totals (Phase 10)
+
+**Scope:** Adds §18's fourth transaction type `transfer`: widens the `type` CHECK
+to `('expense','income','transfer')`, adds nullable `from_account_id`/`to_account_id`
+FKs → `accounts`, a structural CHECK that both endpoints are set iff `type='transfer'`,
+and recreates `active_transactions` so the two columns surface. `db/reports.py`
+unchanged — its `FILTER (WHERE type = 'expense'/'income')` sums exclude a transfer
+row by construction. One new test guards the exclusion and the CHECK invariant.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD --stat` / `git show HEAD` — diff touches only
+  `migrations/011_transfer_type.sql` (new, 44 lines), `tests/test_migrate.py`
+  (+82), and `TASKS.md` (tick + note). No source change.
+- `uv run pytest tests/test_migrate.py -q` → **13 passed**.
+- `uv run pytest -q` → **307 passed**, 1 warning — matches the commit's claim.
+- Read `migrations/001_init.sql` to confirm the dropped constraint name: `type`
+  is an inline column CHECK, the only one on that column, so Postgres names it
+  `transactions_type_check` — the exact name `011` drops. The full suite applying
+  `011` cleanly (via `migrate()`) proves the DROP found the constraint live.
+- Read `DECISIONS.md` §18 (748–809): `transfer` carries `from_account`/`to_account`
+  and is "excluded from every spending and income total". The migration matches.
+- **Confirmed the exclusion holds codebase-wide, not just in the tested pair.**
+  Grepped every `sum(amount)` / `type =` site: the only money totals are in
+  `db/reports.py` (`day_summary` 37–38, `month_summary` 66–67, category breakdown
+  75–79), all type-filtered. The dashboard (`app.py:175–190`) and the evening/
+  monthly jobs route through these, so no total sees a transfer.
+  `recent_transactions` (a list, not a total) is the only reader that would show
+  one — and no write path mints transfers yet.
+- **Verified the guard actually reddens.** Temporarily changed `day_summary`'s
+  expense FILTER to `type <> 'income'` (the exact defeat the commit names), ran
+  `test_transfer_is_excluded_from_spending_and_income_totals` → **FAILED**
+  ("transfer leaked into the spend total"). Reverted; `git diff --stat` clean.
+- The test also exercises the `011` CHECK both ways — a transfer missing an
+  endpoint, and a non-transfer smuggling one — both raise `CheckViolation`.
+  Confirmed these are inside `conn.transaction()` blocks so a raised violation
+  doesn't poison the outer connection.
+
+### Findings
+
+None blocking.
+
+**Observations (out of this task's scope, not defects):**
+
+- The `transactions_transfer_accounts_check` invariant enforces *presence* of
+  both endpoints on a transfer, but not that `from_account_id <> to_account_id`
+  nor that both accounts share the transaction's `household_id`. A transfer to
+  its own account (a no-op) or referencing another household's account would
+  pass. This wasn't in the task (extend CHECK, add columns, exclude from totals)
+  and there's no write path creating transfers yet — worth a CHECK/FK-scope note
+  when the transfer *write* task lands, not a fix now.
+- `day_summary`'s `count(*)` counts a transfer as an "entry" (the entry_count
+  return value). That is not a money total, so it's outside §18's "spending and
+  income total" rule and arguably correct (a transfer is an entry). Noting only
+  so it's a conscious choice if the day card's count is ever shown.
+
+---
+
+## 2026-08-12 — `2b14bc4` — migration 010: `account_id` on every transaction, backfilled (Phase 10)
+
+**Scope:** Adds `transactions.account_id` (nullable, FK → `accounts`), mints one
+default `spending`/'Cash' account per existing household, backfills every row
+into its household's default, and recreates `active_transactions` so the new
+column surfaces. `SET NOT NULL` is deliberately deferred to a new task. A pure
+relocation — no report number should move.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands and results)
+
+- `git show HEAD` — diff touches `migrations/010_transactions_account.sql`
+  (new, 50 lines), `tests/test_migrate.py` (+ before/after check), `TASKS.md`
+  (tick + split note). Nothing else.
+- `uv run pytest tests/test_migrate.py -q` → **12 passed**.
+- `uv run pytest -q` → **306 passed**, 1 warning — matches the commit's claim.
+- Read `migrations/009_accounts.sql`, `DECISIONS.md` §18 (711–885), and
+  `kanakko/db/reports.py:48` to confirm `month_summary` reads
+  `active_transactions` (line 68), never `transactions` — so the new column is
+  invisible to totals by construction.
+- **Verified the money-path guard actually reddens.** Temporarily patched the
+  migration's backfill `UPDATE` to match no rows
+  (`AND t.account_id IS NULL AND false`), ran
+  `test_account_backfill_leaves_every_report_number_unchanged` → **FAILED** (the
+  `account_id IS NULL == 0` row-level assertion). Reverted; `git diff` clean.
+  The guard fails for the reason it exists.
+- **Verified the NOT NULL deferral is justified, not an excuse.** Read
+  `kanakko/db/pending.py:83` — `confirm_pending`'s INSERT omits `account_id`.
+  Read `kanakko/db/households.py:12` — `create_household_of_one` mints no default
+  account. So enforcing NOT NULL now *would* break the first confirm of any
+  household created after the migration. The deferral reasoning is true.
+- Confirmed the split-and-tick matches the established repo convention:
+  `TASKS.md:414` ticked the `household_id` task the same way (007 nullable +
+  backfill ticked, NOT NULL split to a later task). This is precedent, not a
+  silently half-done tick — the split, the reason, and the new NOT NULL task
+  (`TASKS.md:718`) are all written down.
+
+### Correctness notes
+
+- Money path clean: no `float` anywhere; `account_id` is `BIGINT`, opening
+  balances stay `NUMERIC(12,2)` from 009. Reads still route through
+  `active_transactions` (view recreated with `CREATE OR REPLACE`, soft-delete
+  filter unchanged).
+- Backfill cannot cross households — the `UPDATE` joins on
+  `a.household_id = t.household_id`, and the 009 partial unique index guarantees
+  exactly one live default per household, so the placement is deterministic.
+- One default per household (not per user) is correct here: it matches both the
+  009 `accounts_one_default_per_household` index and the task's own wording
+  ("every existing row belongs to its household's default account"). §18's "every
+  user gets a default" is the onboarding task, still unchecked.
+- Statement order is right: mint accounts → `ADD COLUMN` → backfill → recreate
+  view. Idempotency guards (`NOT EXISTS`, `account_id IS NULL`) are belt-and-
+  suspenders on top of `schema_migrations` tracking; harmless.
+
+### Non-blocking observations (do not fix now)
+
+- The before/after `month_summary` equality is a weak assertion on its own — it
+  passes trivially because `account_id` never enters `month_summary`. The author
+  says so in the docstring, and the row-level check (every row homed, none NULL,
+  all to the one default) carries the real weight. Fine as written.
+- The test uses a single household, so a hypothetical cross-household
+  misplacement wouldn't be caught by the `DISTINCT account_id == [default]`
+  assertion. Structurally prevented by the `UPDATE`'s join, so not worth a second
+  household — noted only for completeness.
+
+---
+
 ## 2026-08-08 — `27fc55f` — /help + exact-greeting short-circuit, answer a lost user without an LLM call (Phase 9)
 
 **Scope:** A non-transaction message ("How do I use this?") used to be answered

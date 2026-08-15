@@ -4,7 +4,11 @@ One LLM call per inbound message. The model returns a structured transaction via
 `response_format: {type: "json_schema", ...}`, and `require_parameters: true` in
 the provider preferences forces OpenRouter to route only to providers that honour
 the schema parameters. The schema's `category` enum is generated from
-`categories.py`, so the model can never invent a category.
+`categories.py`, so the model can never invent a category. The `account` enum
+(§18) is the one departure from that pattern — it is per household, so it is
+built per request from the caller's own accounts rather than a module-level
+constant, and validated the same way through Pydantic context instead of a
+class-level set.
 
 `amount` is a **string** in the schema, not a number: JSON numbers decode to
 `float` and float loses paise (DECISIONS §9). Keeping it a string means
@@ -24,7 +28,14 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from kanakko.categories import ALL_CATEGORIES, schema_enum
 from kanakko.money import parse_amount
@@ -51,10 +62,53 @@ _SYSTEM_PROMPT = (
     "date as YYYY-MM-DD. `note` preserves the user's original wording."
 )
 
+# §18: only appended when the schema actually offers an `account` enum (a real
+# choice — the same `len(accounts) > 1` gate `parse_schema` uses), so a
+# single-account household's prompt is byte-for-byte unchanged. Teaches the
+# vocabulary that maps onto each account *kind* rather than naming a literal
+# account: the household's own account names are the enum, this just tells the
+# model which phrases point at which kind of pool. A wrong guess is not a
+# failure — the confirm card shows the account with one tap to fix it (§18) —
+# so this is guidance, not a constraint the model must get exactly right.
+_ACCOUNT_GUIDANCE = (
+    " `account` is which of the household's accounts the money moved through, "
+    "or null if the message doesn't say. \"swiped\", \"on card\", \"credit "
+    "card\" mean the credit-card account. \"UPI\", \"GPay\", \"PhonePe\", "
+    "\"net banking\" and \"paid cash\" all mean the everyday spending account "
+    "— UPI is a payment rail, not a pool of money, so never invent or pick an "
+    "account named after it. \"put 5000 in SIP\", \"FD 1 lakh\", \"paid chit\" "
+    "mean the locked/savings account."
+    " Paying a credit card bill is not spending a second time — the swipe "
+    "already was. \"paid the credit card bill 2000\", \"paid off my card\" is "
+    "`type` \"transfer\", `from_account` the everyday spending account, "
+    "`to_account` the credit card account, `category` null."
+    " If the message puts money into a locked/savings pool by name — \"SIP\", "
+    "\"FD\", \"RD\", \"chit\" — and that name matches none of the accounts "
+    "above, set `new_locked_account` to the pool's short name, `type` "
+    "\"transfer\", `from_account` the everyday spending account, `to_account` "
+    "null, `category` null. Only for money going in — a pool that has never "
+    "been mentioned before has nothing to pay out yet."
+)
 
-def parse_schema() -> dict:
-    """The JSON schema handed to the model for one transaction (§2, §3)."""
-    return {
+
+def parse_schema(accounts: list[str] | None = None) -> dict:
+    """The JSON schema handed to the model for one transaction (§2, §3).
+
+    `accounts` is the caller's household's account names, built per request from
+    the accounts table (§18) — never a literal, the same rule §11 applies to
+    categories. Omitted, empty, or a single account (no household yet, or one
+    that hasn't onboarded a second account) leaves the schema exactly as it was
+    before accounts existed: no `account` property, no behaviour change, no
+    added prompt cost.
+
+    A `transfer` `type` and its `from_account`/`to_account` endpoints appear
+    under the same gate: a transfer needs two accounts to move money between, so
+    it is meaningless without a real choice (§18). Credit-card semantics is the
+    first user of this — "paid the credit card bill" is a transfer, not a second
+    expense — so a swipe and its bill payment never double-count the month's
+    spending.
+    """
+    schema = {
         "type": "object",
         "properties": {
             "type": {"type": "string", "enum": ["expense", "income"]},
@@ -84,6 +138,38 @@ def parse_schema() -> dict:
         "required": ["type", "amount", "category", "date", "note"],
         "additionalProperties": False,
     }
+    if accounts and len(accounts) > 1:
+        # A single-account household has no real choice to make — null already
+        # means "the default account" — so the enum only appears once a second
+        # account exists (§18: "accounts become visible only when a second one
+        # exists"). Below that, the schema is byte-for-byte what it was before
+        # accounts existed: no added prompt cost, no behaviour change.
+        #
+        # §18: nullable like category — null means "the default account", so the
+        # model is never forced to guess when the message names no account.
+        def account_or_null():
+            return {"anyOf": [{"type": "string", "enum": list(accounts)}, {"type": "null"}]}
+
+        schema["properties"]["account"] = account_or_null()
+        schema["properties"]["type"]["enum"].append("transfer")
+        schema["properties"]["from_account"] = account_or_null()
+        schema["properties"]["to_account"] = account_or_null()
+        # §18 (investment accounts): a locked pool mentioned for the first time
+        # isn't in `accounts` yet, so it can't be a `to_account` enum value — this
+        # is free text, the escape valve `to_account`'s closed set can't offer.
+        # `confirm_pending` mints the account and resolves the id.
+        schema["properties"]["new_locked_account"] = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": (
+                "Short name for a locked/savings pool (SIP, FD, chit, RD) this "
+                "message moves money into, when that pool's name doesn't match "
+                "any account above. Null otherwise."
+            ),
+        }
+        schema["required"] += [
+            "account", "from_account", "to_account", "new_locked_account"
+        ]
+    return schema
 
 
 def today() -> str:
@@ -102,19 +188,27 @@ def resolve_model(model: str | None = None) -> str:
 
 
 def build_request(
-    message: str, model: str | None = None, today_str: str | None = None
+    message: str,
+    model: str | None = None,
+    today_str: str | None = None,
+    accounts: list[str] | None = None,
 ) -> dict:
     """The OpenRouter request body for parsing `message`.
 
     §10: today's `Asia/Kolkata` date is injected into the system prompt so the
     model can resolve "yesterday"/"last Friday" instead of guessing. `today_str`
     is injectable for deterministic tests; production reads the wall clock.
+    `accounts` is threaded straight into `parse_schema` (§18); the account
+    vocabulary guidance is appended under the same gate as that schema's
+    `account` enum, so a single-account household's prompt is unchanged.
     """
     system = (
         f"{_SYSTEM_PROMPT} Today's date is {today_str or today()} "
         "(Asia/Kolkata). Resolve any relative date in the message "
         "(\"yesterday\", \"last Friday\") against it."
     )
+    if accounts and len(accounts) > 1:
+        system += _ACCOUNT_GUIDANCE
     return {
         "model": resolve_model(model),
         "messages": [
@@ -126,7 +220,7 @@ def build_request(
             "json_schema": {
                 "name": "transaction",
                 "strict": True,
-                "schema": parse_schema(),
+                "schema": parse_schema(accounts),
             },
         },
         "provider": {"require_parameters": True},
@@ -146,11 +240,26 @@ class Transaction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["expense", "income"]
+    type: Literal["expense", "income", "transfer"]
     amount: Decimal
     category: str | None  # §3: null when the model cannot tell → show buttons
     date: date
     note: str
+    # §18: null means "the default account" — nullable for the same reason as
+    # category. No closed set at class level, unlike category: the account list
+    # is per household, not a module-level constant, so it can only be checked
+    # against the caller's own accounts, passed in as validation context.
+    account: str | None = None
+    # §18: a transfer's two endpoints — set exactly when `type` is "transfer",
+    # the same structural invariant migration 011's CHECK enforces on the row.
+    # Checked against the caller's own accounts the same way `account` is.
+    from_account: str | None = None
+    to_account: str | None = None
+    # §18 (investment accounts): a locked pool named for the first time — free
+    # text, deliberately not checked against the closed account set, since the
+    # whole point is that it isn't in it yet. Set only on a transfer, in place
+    # of `to_account` (`confirm_pending` mints the account and resolves the id).
+    new_locked_account: str | None = None
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -172,12 +281,70 @@ class Transaction(BaseModel):
             raise ValueError(f"unknown category: {value!r}")
         return value
 
+    @field_validator("account", "from_account", "to_account")
+    @classmethod
+    def _account_is_known(cls, value: str | None, info: ValidationInfo) -> str | None:
+        # §18: the model must not invent an account any more than a category
+        # (§11) — but the closed set is per household, so it travels as
+        # validation context rather than a class-level constant. No context (or
+        # no accounts in it) skips the check: today's tests and callers that
+        # never pass `accounts` keep working unchanged. One validator for all
+        # three account-shaped fields — they share the same closed set.
+        accounts = (info.context or {}).get("accounts") if info.context else None
+        if accounts and value is not None and value not in accounts:
+            raise ValueError(f"unknown account: {value!r}")
+        return value
 
-def call(message: str) -> dict:
+    @field_validator("new_locked_account")
+    @classmethod
+    def _new_locked_account_name_is_not_blank(cls, value: str | None) -> str | None:
+        # Deliberately not checked against the closed account set (the point of
+        # this field is that it isn't in it yet) — but a blank name is still a
+        # bad parse, not a pool.
+        if value is not None and not value.strip():
+            raise ValueError("new_locked_account must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _transfer_names_two_distinct_ends(self) -> "Transaction":
+        # Mirrors migration 011's structural CHECK: a transfer names both ends,
+        # every other type names neither — so a bad parse fails validation (and
+        # retries) here rather than reaching confirm_pending's insert as an
+        # IntegrityError. Two different ends: a self-transfer moves no money and
+        # is never what "paid the credit card bill" means.
+        if self.type == "transfer":
+            if self.new_locked_account is not None:
+                # §18: a pool mentioned for the first time has no existing
+                # `to_account` to name — confirm_pending mints it. Only ever a
+                # contribution: you cannot get money out of a pool that has
+                # never been mentioned before.
+                if self.from_account is None:
+                    raise ValueError("a new-pool transfer needs a from_account")
+                if self.to_account is not None:
+                    raise ValueError(
+                        "a new-pool transfer must not also name to_account"
+                    )
+            elif self.from_account is None or self.to_account is None:
+                raise ValueError("a transfer needs both from_account and to_account")
+            elif self.from_account == self.to_account:
+                raise ValueError("a transfer needs two different accounts")
+        elif (
+            self.from_account is not None
+            or self.to_account is not None
+            or self.new_locked_account is not None
+        ):
+            raise ValueError(
+                "from_account/to_account/new_locked_account only apply to a transfer"
+            )
+        return self
+
+
+def call(message: str, accounts: list[str] | None = None) -> dict:
     """Send `message` to OpenRouter and return the model's parsed JSON.
 
     Raises `RuntimeError` if `OPENROUTER_API_KEY` is unset. Network and HTTP
-    errors propagate as `httpx` exceptions.
+    errors propagate as `httpx` exceptions. `accounts` is threaded straight into
+    `build_request` (§18).
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -186,7 +353,7 @@ def call(message: str) -> dict:
     response = httpx.post(
         OPENROUTER_URL,
         headers={"Authorization": f"Bearer {api_key}"},
-        json=build_request(message),
+        json=build_request(message, accounts=accounts),
         timeout=30.0,
     )
     response.raise_for_status()
@@ -194,16 +361,22 @@ def call(message: str) -> dict:
     return json.loads(content)
 
 
-def parse_message(message: str) -> Transaction:
+def parse_message(message: str, accounts: list[str] | None = None) -> Transaction:
     """Parse `message` into a validated `Transaction`, retrying once (§2).
 
     OpenRouter does not guarantee schema compliance, so the model's JSON is
     validated with Pydantic. On a schema failure — a `ValidationError` or
     non-JSON content — the call is retried exactly once; a second failure
     propagates. Network/HTTP errors and a missing key are not schema failures and
-    are not retried.
+    are not retried. `accounts` (§18) is the caller's household's account names —
+    threaded into the request schema and passed to Pydantic as context so a
+    returned account name is checked against that same closed set.
     """
     try:
-        return Transaction.model_validate(call(message))
+        return Transaction.model_validate(
+            call(message, accounts), context={"accounts": accounts}
+        )
     except (ValidationError, json.JSONDecodeError):
-        return Transaction.model_validate(call(message))
+        return Transaction.model_validate(
+            call(message, accounts), context={"accounts": accounts}
+        )

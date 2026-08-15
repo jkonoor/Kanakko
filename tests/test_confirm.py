@@ -9,7 +9,14 @@ from datetime import date
 from decimal import Decimal
 
 from kanakko.categories import EXPENSE_CATEGORIES
-from kanakko.confirm import CANCEL, CONFIRM, confirm_card
+from kanakko.confirm import (
+    ACCOUNT_PREFIX,
+    CANCEL,
+    CHANGE_AMOUNT,
+    CONFIRM,
+    confirm_card,
+    settled_card,
+)
 from kanakko.parse import Transaction
 
 
@@ -66,3 +73,91 @@ def test_category_buttons_are_on_the_card_for_one_tap_correction():
     assert set(f"cat:{c}" for c in EXPENSE_CATEGORIES) <= set(data)
     # ...and they come from categories.py, not a literal list living here.
     assert "cat:Food" in data and "cat:Bills & Utilities" in data
+
+
+def test_no_account_line_or_buttons_without_a_real_choice():
+    # §18: "accounts become visible only when a second one exists" — the daily
+    # path (no accounts, or exactly one) must not gain a line or a tap. This is
+    # the check the task names: a one-account household still confirms in one tap.
+    for accounts in (None, [], ["Bank"]):
+        text, keyboard = confirm_card(_txn(), accounts)
+        assert "Account:" not in text
+        data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+        assert not any(d.startswith(ACCOUNT_PREFIX) for d in data)
+
+
+def test_account_line_and_buttons_appear_once_a_second_account_exists():
+    # A real choice: the card names the account the parse chose (or the default,
+    # when null) and offers every account as an `acct:<name>` button, the same
+    # `cat:<name>` shape §5 already uses for category — reusing the pattern, not
+    # a second chooser.
+    text, keyboard = confirm_card(_txn(account=None), ["Bank", "Card"])
+    assert "Account: Bank" in text  # null account displays as the default (first)
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert {"acct:Bank", "acct:Card"} <= set(data)
+
+    text, _ = confirm_card(_txn(account="Card"), ["Bank", "Card"])
+    assert "Account: Card" in text  # a chosen account displays as itself
+
+
+def test_change_amount_button_only_appears_when_requested():
+    # §18: "Confirm / Change amount / Skip" — the third button is opt-in, since
+    # only `jobs.recurring`'s cron-sent card offers it. The daily path (every
+    # other caller) must not gain a tap it never asked for.
+    text, keyboard = confirm_card(_txn(), change_amount_button=True)
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert CHANGE_AMOUNT in data
+    labels = [b.text for r in keyboard.inline_keyboard for b in r]
+    assert "✏️ Change amount" in labels
+
+    text, keyboard = confirm_card(_txn())  # default: not requested
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert CHANGE_AMOUNT not in data
+
+
+def test_transfer_card_shows_no_category_and_no_pickers():
+    # §18: a transfer is neither spending nor income, so it has no category and
+    # renders its two account names instead — no category buttons, no account
+    # picker (the accounts are already fixed by the parse), just Confirm/Cancel.
+    txn = _txn(type="transfer", category=None, from_account="Bank", to_account="Card")
+    text, keyboard = confirm_card(txn, ["Bank", "Card"])
+    assert "Transfer" in text
+    assert "Bank → Card" in text
+    assert "Category:" not in text
+    assert "Account:" not in text
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert data == [CONFIRM, CANCEL]  # nothing else on the card
+
+
+def test_new_locked_account_transfer_card_asks_before_creating_it():
+    # §18 (investment accounts): "put 5000 in SIP" with no SIP account yet leads
+    # with the question the task names, and shows the destination by the pool's
+    # name even though `to_account` itself is still null (confirm_pending mints
+    # the account on Confirm — same Confirm/Cancel buttons, no extra tap).
+    txn = _txn(
+        type="transfer", category=None, from_account="Bank", to_account=None,
+        new_locked_account="SIP",
+    )
+    text, keyboard = confirm_card(txn, ["Bank"])
+    assert 'New savings account "SIP"?' in text
+    assert "Bank → SIP" in text
+    data = [b.callback_data for r in keyboard.inline_keyboard for b in r]
+    assert data == [CONFIRM, CANCEL]
+
+
+def test_settled_transfer_card_shows_accounts_not_category_none():
+    # settled_card's counterpart: a stored transfer row must never render
+    # "Category: None" — the same gap a null category would leave on any other
+    # settled receipt.
+    row = {
+        "amount": Decimal("2000.00"),
+        "type": "transfer",
+        "category": None,
+        "note": "paid the card bill",
+        "occurred_on": date(2026, 8, 6),
+        "from_account": "Bank",
+        "to_account": "Card",
+    }
+    text = settled_card(row)
+    assert "Bank → Card" in text
+    assert "Category" not in text

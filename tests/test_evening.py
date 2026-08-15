@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
-from conftest import household_of, join_household
+from conftest import default_account_of, household_of, join_household
 
 from kanakko import eventlog
 from kanakko.db import day_summary, get_or_create_user
@@ -22,12 +22,13 @@ from kanakko.migrate import migrate
 
 def _insert(conn, user_id, amount, type_, occurred_on, deleted=False):
     deleted_at = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc) if deleted else None
+    hh = household_of(conn, user_id)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO transactions"
-            " (user_id, household_id, amount, type, category, note, occurred_on, deleted_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (user_id, household_of(conn, user_id), amount, type_, None, None, occurred_on, deleted_at),
+            " (user_id, household_id, amount, type, category, note, occurred_on, account_id, deleted_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (user_id, hh, amount, type_, None, None, occurred_on, default_account_of(conn, hh), deleted_at),
         )
 
 

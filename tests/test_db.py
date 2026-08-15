@@ -10,21 +10,30 @@ from decimal import Decimal
 
 import psycopg
 import pytest
-from conftest import household_of
+from conftest import default_account_of, household_of
 
 from kanakko.categories import EXPENSE_CATEGORIES
 from kanakko.db import (
     confirm_pending,
+    create_household_of_one,
+    create_recurring_rule,
     day_summary,
     get_or_create_user,
+    month_summary,
+    pending_awaiting_amount,
     recent_transactions,
+    request_amount_change,
     save_pending,
+    set_account_opening_balance,
+    set_pending_account,
+    set_pending_amount,
     set_pending_category,
     set_transaction_category,
     soft_delete_transaction,
     undo_last,
 )
 from kanakko.migrate import migrate
+from kanakko.money import parse_amount
 from kanakko.parse import Transaction
 
 
@@ -110,6 +119,49 @@ def test_confirm_writes_the_transaction_and_clears_pending(conn):
     conn.rollback()
 
 
+def test_recurring_rule_id_flows_from_pending_to_the_settled_transaction(conn):
+    """`jobs.recurring`'s provenance survives Confirm untouched (§18).
+
+    `save_pending`'s `recurring_rule_id` is the only thing that tells
+    `confirm_pending` the card came from the cron, not a typed message — if
+    that column were dropped from either the SELECT or the INSERT, the stored
+    row would go back to `NULL` and there would be no way to ever tie a
+    settled transaction back to the rule that asked for it.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 12)
+    acc = default_account_of(conn, household_of(conn, user_id))
+    rule = create_recurring_rule(
+        conn, user_id, acc, EXPENSE_CATEGORIES[0], parse_amount("5000"), 5
+    )
+    save_pending(conn, user_id, 999, _txn(), recurring_rule_id=rule["rule_id"])
+
+    row = confirm_pending(conn, user_id, 999, source="cron", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT recurring_rule_id FROM transactions WHERE txn_id = %s", (row["txn_id"],)
+        )
+        assert cur.fetchone() == (rule["rule_id"],)
+    conn.rollback()
+
+
+def test_recurring_rule_id_defaults_to_null_for_an_ordinary_confirm(conn):
+    """Every non-cron caller of `save_pending` still stores no rule link."""
+    migrate(conn)
+    user_id = _seed_user(conn, 13)
+    save_pending(conn, user_id, 998, _txn())
+
+    row = confirm_pending(conn, user_id, 998, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT recurring_rule_id FROM transactions WHERE txn_id = %s", (row["txn_id"],)
+        )
+        assert cur.fetchone() == (None,)
+    conn.rollback()
+
+
 def test_confirm_homes_the_transaction_in_the_confirmers_household(conn):
     """A confirmed row lands in the entering user's household, never another's (§16).
 
@@ -131,6 +183,262 @@ def test_confirm_homes_the_transaction_in_the_confirmers_household(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT household_id FROM transactions WHERE txn_id = %s", (row["txn_id"],))
         assert cur.fetchone() == (ha,)  # A's household, not B's
+    conn.rollback()
+
+
+def test_confirm_stamps_the_households_default_account(conn):
+    """A confirmed row lands in the household's default account (§18).
+
+    `_seed_user`'s `household_of` is a raw test fixture that predates accounts and
+    mints no default (§18's `test_household_creation_mints_...` covers the real
+    onboarding path); this test uses `create_household_of_one` instead, the
+    production path, so the default `Bank` account actually exists to stamp.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (76) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    save_pending(conn, uid, 760, _txn("60.00"))
+    confirm_pending(conn, uid, 760, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.account_id, a.name FROM transactions t"
+            " JOIN accounts a ON a.account_id = t.account_id"
+            " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)",
+            (uid,),
+        )
+        account_id, name = cur.fetchone()
+    assert account_id is not None
+    assert name == "Bank"
+    conn.rollback()
+
+
+def test_confirm_uses_the_chosen_account_not_just_the_default(conn):
+    """A confirm honours `txn.account` when the card carries one (§18).
+
+    Task: "show the account on the confirm card with one tap to change it" is
+    dead UI unless the eventual Confirm actually stores the chosen account, not
+    always the household default `confirm_pending` fell back to before this
+    task. Mints a second account (`set_account_opening_balance`, the onboarding
+    path) so there is a real choice to pick.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (77) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+    set_account_opening_balance(conn, uid, "credit", Decimal("500.00"))  # mints "Card"
+
+    txn = Transaction.model_validate({**_txn("60.00").model_dump(mode="json"), "account": "Card"})
+    save_pending(conn, uid, 770, txn)
+    confirm_pending(conn, uid, 770, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.name FROM transactions t JOIN accounts a ON a.account_id = t.account_id"
+            " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)",
+            (uid,),
+        )
+        (name,) = cur.fetchone()
+    assert name == "Card"  # not "Bank", the default
+    conn.rollback()
+
+
+def test_confirm_writes_a_transfer_with_two_endpoints_and_no_account(conn):
+    """A confirmed transfer names both ends and neither `account_id` nor `category` (§18).
+
+    Mirrors migration 011's CHECK from the write side: `confirm_pending`'s
+    transfer branch resolves `from_account`/`to_account` by name within the
+    household instead of falling back to a default, and leaves `account_id`/
+    `category` NULL — the shape `test_transfer_is_excluded_from_spending_and_
+    income_totals` (test_migrate.py) already proves is invisible to every total.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (78) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)  # mints "Bank"
+    set_account_opening_balance(conn, uid, "credit", Decimal("0"))  # mints "Card"
+
+    txn = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "2000.00",
+            "category": None,
+            "date": "2026-08-05",
+            "note": "paid the card bill",
+            "from_account": "Bank",
+            "to_account": "Card",
+        }
+    )
+    save_pending(conn, uid, 780, txn)
+    row = confirm_pending(conn, uid, 780, source="webhook", update_id=None)
+    assert row["from_account"] == "Bank"
+    assert row["to_account"] == "Card"
+    assert row["category"] is None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.account_id, t.category, fa.name, ta.name FROM transactions t"
+            " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
+            " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"
+            " WHERE t.txn_id = %s",
+            (row["txn_id"],),
+        )
+        account_id, category, from_name, to_name = cur.fetchone()
+    assert account_id is None
+    assert category is None
+    assert (from_name, to_name) == ("Bank", "Card")
+    conn.rollback()
+
+
+def test_confirm_mints_a_new_locked_account_named_on_first_mention(conn):
+    """"Put 5000 in SIP" with no SIP account yet mints one, not a floating NULL (§18).
+
+    `confirm_pending`'s transfer branch resolves `new_locked_account` by minting a
+    `locked` account when Confirm is tapped, rather than trusting the account
+    already exists — the whole point of the field is that it doesn't yet. The
+    guard: the row's `to_account_id` names a real, freshly created `locked`
+    account, not NULL (which migration 011's CHECK would refuse for a transfer
+    anyway, but a silent fallback to the default account would slip past that
+    CHECK while still being the wrong account).
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (81) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)  # mints "Bank"
+
+    txn = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "5000.00",
+            "category": None,
+            "date": "2026-08-12",
+            "note": "put 5000 in SIP",
+            "from_account": "Bank",
+            "to_account": None,
+            "new_locked_account": "SIP",
+        }
+    )
+    save_pending(conn, uid, 810, txn)
+    row = confirm_pending(conn, uid, 810, source="webhook", update_id=None)
+    assert row["to_account"] == "SIP"  # the settled receipt names the new pool
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.kind, a.household_id FROM transactions t"
+            " JOIN accounts a ON a.account_id = t.to_account_id"
+            " WHERE t.txn_id = %s",
+            (row["txn_id"],),
+        )
+        kind, household_id = cur.fetchone()
+        cur.execute(
+            "SELECT household_id FROM household_members WHERE user_id = %s", (uid,)
+        )
+        (expected_household,) = cur.fetchone()
+    assert kind == "locked"
+    assert household_id == expected_household
+    conn.rollback()
+
+
+def test_confirm_reuses_an_existing_account_instead_of_a_second_new_locked_account(
+    conn,
+):
+    """A second "put 2000 in SIP" must land in the same pool, not mint a duplicate.
+
+    The get-or-create shape (not a bare INSERT) is what this proves: reverting
+    the SELECT-before-INSERT to an unconditional INSERT would mint a second "SIP"
+    account here and split the pool's history across two rows.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (82) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    first = Transaction.model_validate(
+        {
+            "type": "transfer", "amount": "5000.00", "category": None,
+            "date": "2026-08-12", "note": "put 5000 in SIP",
+            "from_account": "Bank", "to_account": None, "new_locked_account": "SIP",
+        }
+    )
+    save_pending(conn, uid, 811, first)
+    confirm_pending(conn, uid, 811, source="webhook", update_id=None)
+
+    second = Transaction.model_validate(
+        {
+            "type": "transfer", "amount": "2000.00", "category": None,
+            "date": "2026-08-13", "note": "put 2000 more in SIP",
+            "from_account": "Bank", "to_account": None, "new_locked_account": "SIP",
+        }
+    )
+    save_pending(conn, uid, 812, second)
+    confirm_pending(conn, uid, 812, source="webhook", update_id=None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM accounts"
+            " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            "   AND name = 'SIP' AND deleted_at IS NULL",
+            (uid,),
+        )
+        (count,) = cur.fetchone()
+    assert count == 1
+    conn.rollback()
+
+
+def test_credit_card_swipe_then_bill_payment_does_not_double_count_spending(conn):
+    """The task's own guard: a swipe and its bill payment must read as ₹2,000, not ₹4,000 (§18).
+
+    A swipe is an ordinary expense on the `credit` account — it already counts
+    once. Paying the bill is a transfer, `spending` → `credit` — excluded from
+    every total by migration 011's CHECK, the way `test_transfer_is_excluded_
+    from_spending_and_income_totals` proves at the SQL level. This proves the
+    same thing through the confirm path a real Telegram flow uses: if the bill
+    payment were ever confirmed as a second expense instead of a transfer, the
+    month's expense total would read ₹4,000 and this reddens.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (79) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+    set_account_opening_balance(conn, uid, "credit", Decimal("0"))  # mints "Card"
+
+    swipe = Transaction.model_validate(
+        {
+            "type": "expense",
+            "amount": "2000.00",
+            "category": EXPENSE_CATEGORIES[0],
+            "date": "2026-08-05",
+            "note": "dinner, swiped",
+            "account": "Card",
+        }
+    )
+    save_pending(conn, uid, 781, swipe)
+    confirm_pending(conn, uid, 781, source="webhook", update_id=None)
+
+    bill = Transaction.model_validate(
+        {
+            "type": "transfer",
+            "amount": "2000.00",
+            "category": None,
+            "date": "2026-08-06",
+            "note": "paid the card bill",
+            "from_account": "Bank",
+            "to_account": "Card",
+        }
+    )
+    save_pending(conn, uid, 782, bill)
+    confirm_pending(conn, uid, 782, source="webhook", update_id=None)
+
+    _, expenses, _ = month_summary(conn, uid, date(2026, 8, 1), date(2026, 9, 1))
+    assert expenses == Decimal("2000.00")  # not 4000.00 — the bill payment is a transfer
     conn.rollback()
 
 
@@ -240,6 +548,104 @@ def test_set_pending_category_is_scoped_to_the_user(conn):
         )
         (parsed,) = cur.fetchone()
     assert parsed["category"] == EXPENSE_CATEGORIES[0]  # B's row untouched
+    conn.rollback()
+
+
+def test_set_pending_account_updates_the_row(conn):
+    """An account tap re-writes the pending row's account and returns the txn (§18, §5).
+
+    `set_pending_category`'s counterpart: the stored `parsed` must carry the new
+    account so the eventual Confirm stamps it (`confirm_pending` reads
+    `txn.account`), and the amount survives untouched.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 31)
+    save_pending(conn, user_id, 556, _txn("250.00"))
+
+    txn = set_pending_account(conn, user_id, 556, "Card")
+    assert txn is not None
+    assert txn.account == "Card"
+    assert txn.amount == Decimal("250.00")  # amount survives the update
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 556")
+        (parsed,) = cur.fetchone()
+    assert parsed["account"] == "Card"
+    conn.rollback()
+
+
+def test_set_pending_account_unknown_message_returns_none(conn):
+    """Setting an account on a card with no pending row is a no-op, not an error."""
+    migrate(conn)
+    assert set_pending_account(conn, 42, 999_999, "Card") is None
+    conn.rollback()
+
+
+def test_request_amount_change_marks_the_row_and_pending_awaiting_amount_finds_it(conn):
+    """The "Change amount" write pair (§18): mark, then look the mark back up.
+
+    `request_amount_change` is `handle_change_amount_request`'s write, and
+    `pending_awaiting_amount` is what `app.py`'s webhook calls on every text
+    message to decide whether it's a replacement amount. Before the tap,
+    nothing is awaiting; after it, the same card's `telegram_message_id` comes
+    back.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 32)
+    save_pending(conn, user_id, 557, _txn("250.00"))
+
+    assert pending_awaiting_amount(conn, user_id) is None
+    pending_id = request_amount_change(conn, user_id, 557)
+    assert pending_id is not None
+    assert pending_awaiting_amount(conn, user_id) == 557
+    conn.rollback()
+
+
+def test_request_amount_change_unknown_message_returns_none(conn):
+    migrate(conn)
+    assert request_amount_change(conn, 42, 999_999) is None
+    conn.rollback()
+
+
+def test_set_pending_amount_updates_the_amount_and_clears_awaiting(conn):
+    """A replacement amount rewrites just `amount`, and stops the row awaiting one.
+
+    Everything else the model or an earlier tap already settled (category,
+    note) must survive — the same "one field changes" shape
+    `set_pending_category`/`set_pending_account` use.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 33)
+    save_pending(conn, user_id, 558, _txn("250.00"))
+    request_amount_change(conn, user_id, 558)
+
+    txn = set_pending_amount(conn, user_id, 558, parse_amount("7500"))
+    assert txn is not None
+    assert txn.amount == Decimal("7500.00")
+    assert txn.category == EXPENSE_CATEGORIES[0]  # untouched
+
+    assert pending_awaiting_amount(conn, user_id) is None  # flag cleared
+    with conn.cursor() as cur:
+        cur.execute("SELECT parsed FROM pending_transactions WHERE telegram_message_id = 558")
+        (parsed,) = cur.fetchone()
+    assert parsed["amount"] == "7500.00"  # §9: still a string, not a float
+    conn.rollback()
+
+
+def test_set_pending_amount_refuses_a_row_that_is_not_awaiting_one(conn):
+    """A stray reply after the card was never marked `awaiting_amount` must not
+    silently rewrite it — only a "Change amount" tap opens that door."""
+    migrate(conn)
+    user_id = _seed_user(conn, 34)
+    save_pending(conn, user_id, 559, _txn("250.00"))  # no request_amount_change
+
+    assert set_pending_amount(conn, user_id, 559, parse_amount("100")) is None
+    conn.rollback()
+
+
+def test_set_pending_amount_unknown_message_returns_none(conn):
+    migrate(conn)
+    assert set_pending_amount(conn, 42, 999_999, parse_amount("100")) is None
     conn.rollback()
 
 

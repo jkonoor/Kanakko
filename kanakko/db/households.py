@@ -8,6 +8,8 @@ enters it. Owner-only removal, self-removal, ownership transfer, and the roster
 
 import psycopg
 
+from kanakko.db.accounts import create_default_accounts
+
 
 def create_household_of_one(conn: psycopg.Connection, user_id: int) -> int | None:
     """Home `user_id` in a new household of one, owned by themselves (§16).
@@ -18,8 +20,12 @@ def create_household_of_one(conn: psycopg.Connection, user_id: int) -> int | Non
     008), so their first confirm would fail without this. Idempotent — a user who
     already belongs to a household is left where they are (the UNIQUE on
     `household_members.user_id` is the backstop), so a redelivered `/start` mints
-    nothing new. Returns the new `household_id`, or `None` if already a member.
-    Does not commit — the caller owns the transaction.
+    nothing new. A genuinely new household also gets its two structural accounts
+    (§18) — the default `spending` pool and the `external` counterparty — so an
+    onboarding that never asks about accounts still leaves a working bot, and a
+    member re-homed by `remove_member` gets a fresh default too. Returns the new
+    `household_id`, or `None` if already a member. Does not commit — the caller
+    owns the transaction.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -37,6 +43,7 @@ def create_household_of_one(conn: psycopg.Connection, user_id: int) -> int | Non
             "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
             (household_id, user_id),
         )
+    create_default_accounts(conn, household_id, user_id)
     return household_id
 
 

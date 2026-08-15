@@ -75,6 +75,115 @@ def test_amount_is_a_string_not_a_number():
     assert parse_schema()["properties"]["amount"]["type"] == "string"
 
 
+def test_account_enum_is_absent_without_a_real_choice():
+    # §18: no accounts, no accounts passed, or exactly one account must all leave
+    # the schema exactly as it was before accounts existed — same prompt cost,
+    # same behaviour, for a caller with nothing (or nothing to choose between).
+    assert "account" not in parse_schema()["properties"]
+    assert "account" not in parse_schema(accounts=[])["properties"]
+    assert "account" not in parse_schema(accounts=["Bank"])["properties"]
+    assert "account" not in parse_schema()["required"]
+
+
+def test_account_enum_is_built_per_request_from_the_given_accounts():
+    # §18's departure from §11: the account list is per household, assembled at
+    # request time — never a module-level literal like categories.py.
+    schema = parse_schema(accounts=["Bank", "Card"])
+    account = schema["properties"]["account"]
+    assert {"type": "string", "enum": ["Bank", "Card"]} in account["anyOf"]
+    assert {"type": "null"} in account["anyOf"]  # §18: null → the default account
+    assert "account" in schema["required"]  # strict mode keeps every key required
+
+
+def test_build_request_threads_accounts_into_the_schema():
+    body = build_request("swiped 500 on card", accounts=["Bank", "Card"])
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["account"]["anyOf"][0]["enum"] == ["Bank", "Card"]
+
+
+def test_account_vocabulary_guidance_appears_only_with_a_real_account_choice():
+    # §18: "swiped"/"on card" -> credit, "UPI"/"paid cash" -> the bank account
+    # (never its own account — UPI is a rail, not a pool), "SIP"/"FD"/"chit" ->
+    # the locked account. Only worth teaching once there's a real account to
+    # route to — same gate as the enum itself, so a single-account household's
+    # prompt is unchanged (no added cost).
+    system = build_request("swiped 500 on card", accounts=["Bank", "Card"])[
+        "messages"
+    ][0]["content"]
+    assert "swiped" in system
+    assert "UPI" in system
+    assert "SIP" in system
+
+    one_account = build_request("swiped 500 on card", accounts=["Bank"])
+    assert "swiped" not in one_account["messages"][0]["content"]
+
+    no_accounts = build_request("swiped 500 on card")
+    assert "swiped" not in no_accounts["messages"][0]["content"]
+
+
+def test_new_locked_account_guidance_appears_only_with_a_real_account_choice():
+    # §18 (investment accounts): the model must be told about the escape valve
+    # for a pool it hasn't seen before, under the same gate as the rest of the
+    # account vocabulary.
+    system = build_request("put 5000 in SIP", accounts=["Bank", "Card"])[
+        "messages"
+    ][0]["content"]
+    assert "new_locked_account" in system
+
+    one_account = build_request("put 5000 in SIP", accounts=["Bank"])
+    assert "new_locked_account" not in one_account["messages"][0]["content"]
+
+
+def test_a_household_with_one_account_behaves_like_no_accounts_at_all():
+    # The check the task names explicitly: a single-account household has no
+    # real choice to make (null already means "the default account"), so its
+    # schema must be byte-for-byte today's (pre-accounts) schema — no `account`
+    # property, no added prompt cost.
+    assert parse_schema(accounts=["Bank"]) == parse_schema()
+
+
+def test_account_enum_appears_only_once_a_second_account_exists():
+    # The enum is real signal only once there is a real choice — §18:
+    # "accounts become visible only when a second one exists".
+    schema = parse_schema(accounts=["Bank", "Card"])
+    account = schema["properties"]["account"]
+    assert {"type": "string", "enum": ["Bank", "Card"]} in account["anyOf"]
+    assert {"type": "null"} in account["anyOf"]
+    assert "account" in schema["required"]
+
+
+def test_transfer_type_and_endpoints_appear_only_with_a_real_account_choice():
+    # §18: a transfer needs two accounts to move money between, so it rides the
+    # same len(accounts) > 1 gate as the account enum — a single-account
+    # household can't reach a transfer any more than it can name an account.
+    schema = parse_schema(accounts=["Bank", "Card"])
+    assert schema["properties"]["type"]["enum"] == ["expense", "income", "transfer"]
+    for field in ("from_account", "to_account"):
+        assert {"type": "string", "enum": ["Bank", "Card"]} in schema["properties"][field]["anyOf"]
+        assert {"type": "null"} in schema["properties"][field]["anyOf"]
+        assert field in schema["required"]
+
+    assert "transfer" not in parse_schema()["properties"]["type"]["enum"]
+    assert "transfer" not in parse_schema(accounts=["Bank"])["properties"]["type"]["enum"]
+    assert "from_account" not in parse_schema(accounts=["Bank"])["properties"]
+
+
+def test_new_locked_account_field_rides_the_same_gate_as_transfer():
+    # §18 (investment accounts): the escape valve for a locked pool named for the
+    # first time is only meaningful once a transfer is reachable at all — same
+    # len(accounts) > 1 gate, so a single-account household's schema stays
+    # byte-for-byte unchanged (test_a_household_with_one_account_behaves_like_
+    # no_accounts_at_all already pins that).
+    schema = parse_schema(accounts=["Bank", "Card"])
+    field = schema["properties"]["new_locked_account"]
+    assert {"type": "string"} in field["anyOf"]
+    assert {"type": "null"} in field["anyOf"]
+    assert "new_locked_account" in schema["required"]
+
+    assert "new_locked_account" not in parse_schema(accounts=["Bank"])["properties"]
+    assert "new_locked_account" not in parse_schema()["properties"]
+
+
 def test_model_default_survives_empty_env(monkeypatch):
     # Compose sets OPENROUTER_MODEL="" when the operator leaves it unset, so a
     # naive get("OPENROUTER_MODEL", default) would send "". §2 default must win.
@@ -130,7 +239,7 @@ def _feed(monkeypatch, *responses):
     recording each invocation so the retry count can be asserted."""
     calls = []
 
-    def fake_call(message):
+    def fake_call(message, accounts=None):
         calls.append(message)
         r = responses[len(calls) - 1]
         if isinstance(r, Exception):
@@ -195,6 +304,147 @@ def test_non_json_content_is_retried(monkeypatch):
     calls = _feed(monkeypatch, err, _GOOD)
     txn = parse_message("x")
     assert txn.category == "Food"
+    assert len(calls) == 2
+
+
+def test_account_outside_the_offered_set_is_refused_not_retried(monkeypatch):
+    # §18: the model must not invent an account any more than a category (§11).
+    # The closed set is per request, so this is checked via validation context —
+    # unlike category, there is no module-level constant to fall back on.
+    bad = {**_GOOD, "account": "Nonexistent"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2  # exactly one retry, same as any other schema failure
+
+
+def test_account_within_the_offered_set_validates(monkeypatch):
+    calls = _feed(monkeypatch, {**_GOOD, "account": "Card"})
+    txn = parse_message("swiped 500 on card", accounts=["Bank", "Card"])
+    assert txn.account == "Card"
+    assert len(calls) == 1
+
+
+def test_null_account_validates_without_retry(monkeypatch):
+    # §18: null means "the default account" — a valid answer, not a failure.
+    calls = _feed(monkeypatch, {**_GOOD, "account": None})
+    txn = parse_message("paid 500", accounts=["Bank", "Card"])
+    assert txn.account is None
+    assert len(calls) == 1
+
+
+def test_an_account_name_is_not_checked_when_no_accounts_were_offered(monkeypatch):
+    # Callers that never pass `accounts` (today's tests, or a user with no
+    # household yet) get no validation surface — nothing to check against.
+    calls = _feed(monkeypatch, {**_GOOD, "account": "Anything"})
+    txn = parse_message("x")
+    assert txn.account == "Anything"
+    assert len(calls) == 1
+
+
+_TRANSFER = {
+    "type": "transfer",
+    "amount": "2000.00",
+    "category": None,
+    "date": "2026-08-06",
+    "note": "paid the card bill",
+    "from_account": "Bank",
+    "to_account": "Card",
+}
+
+
+def test_a_valid_transfer_validates_without_retry(monkeypatch):
+    calls = _feed(monkeypatch, _TRANSFER)
+    txn = parse_message("paid the credit card bill 2000", accounts=["Bank", "Card"])
+    assert txn.type == "transfer"
+    assert txn.from_account == "Bank"
+    assert txn.to_account == "Card"
+    assert len(calls) == 1
+
+
+def test_a_transfer_missing_an_endpoint_is_refused_not_retried(monkeypatch):
+    # Mirrors migration 011's structural CHECK: a transfer must name both ends —
+    # a bad parse here must fail validation, not reach confirm_pending's insert
+    # as an IntegrityError.
+    bad = {**_TRANSFER, "to_account": None}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_a_transfer_to_itself_is_refused(monkeypatch):
+    # A self-transfer moves no money — never what "paid the credit card bill"
+    # means, and not a shape confirm_pending's insert could make sense of.
+    bad = {**_TRANSFER, "from_account": "Card"}  # to_account is already "Card"
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_a_new_locked_account_transfer_validates_with_a_null_to_account(monkeypatch):
+    # §18 (investment accounts): a pool named for the first time isn't in the
+    # closed set yet, so it rides in `new_locked_account` instead of
+    # `to_account`, which the model leaves null.
+    new_pool = {
+        **_TRANSFER,
+        "note": "put 5000 in SIP",
+        "to_account": None,
+        "new_locked_account": "SIP",
+    }
+    calls = _feed(monkeypatch, new_pool)
+    txn = parse_message("put 5000 in SIP", accounts=["Bank", "Card"])
+    assert txn.new_locked_account == "SIP"
+    assert txn.to_account is None
+    assert txn.from_account == "Bank"
+    assert len(calls) == 1
+
+
+def test_a_new_locked_account_transfer_naming_an_existing_to_account_is_refused(
+    monkeypatch,
+):
+    # `new_locked_account` stands in for `to_account`, never alongside it — a
+    # parse naming both is ambiguous about which one the money actually moved to.
+    bad = {**_TRANSFER, "new_locked_account": "SIP"}  # to_account is "Card"
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_a_new_locked_account_transfer_needs_a_from_account(monkeypatch):
+    bad = {**_TRANSFER, "to_account": None, "from_account": None,
+           "new_locked_account": "SIP"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_new_locked_account_on_a_non_transfer_is_refused(monkeypatch):
+    bad = {**_GOOD, "new_locked_account": "SIP"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_new_locked_account_name_must_not_be_blank(monkeypatch):
+    bad = {**_TRANSFER, "to_account": None, "new_locked_account": "   "}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
+    assert len(calls) == 2
+
+
+def test_an_expense_carrying_a_transfer_endpoint_is_refused(monkeypatch):
+    # from_account/to_account only apply to a transfer — the structural
+    # invariant 011's CHECK also enforces on the row.
+    bad = {**_GOOD, "from_account": "Bank"}
+    calls = _feed(monkeypatch, bad, bad)
+    with pytest.raises(ValidationError):
+        parse_message("x", accounts=["Bank", "Card"])
     assert len(calls) == 2
 
 

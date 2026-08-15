@@ -12,28 +12,43 @@ from glob import glob
 import psycopg
 import pytest
 
+from kanakko.db import create_household_of_one
+
 
 def household_of(conn, user_id: int) -> int:
     """The user's household id, creating a household-of-one on first call (test-only).
 
-    Production households are created by onboarding (§16); a test that seeds a user
-    straight into the DB skips that path, so this stands in. `transactions.household_id`
-    is NOT NULL (migration 008), so any test inserting a transaction for a seeded
-    user needs one of these. Idempotent — the UNIQUE on `household_members.user_id`
-    makes a repeat call a plain lookup, so insert helpers may call it per row.
+    Production households are created by onboarding (§16), via
+    `create_household_of_one` — reused here rather than hand-rolled, so a test
+    household is never missing the default `spending`/`external` accounts that
+    onboarding always mints. `transactions.account_id` is NOT NULL for every
+    non-transfer row (migration 012), so a test-seeded household without a
+    default account would fail every `confirm_pending` insert with no household
+    to blame. Idempotent — the UNIQUE on `household_members.user_id` makes a
+    repeat call a plain lookup, so insert helpers may call it per row.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT household_id FROM household_members WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if row is not None:
             return row[0]
-        cur.execute("INSERT INTO households (owner) VALUES (%s) RETURNING household_id", (user_id,))
-        (hid,) = cur.fetchone()
+    return create_household_of_one(conn, user_id)
+
+
+def default_account_of(conn, household_id: int) -> int:
+    """The household's default `spending` account (test-only, §18).
+
+    `household_of`/`create_household_of_one` always mint one, so this is a plain
+    lookup. `transactions.account_id` is NOT NULL for every non-transfer row
+    (migration 012), so a raw-SQL transaction insert in these tests needs one.
+    """
+    with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO household_members (household_id, user_id) VALUES (%s, %s)",
-            (hid, user_id),
+            "SELECT account_id FROM accounts"
+            " WHERE household_id = %s AND is_default AND deleted_at IS NULL",
+            (household_id,),
         )
-        return hid
+        return cur.fetchone()[0]
 
 
 def join_household(conn, household_id: int, user_id: int) -> None:

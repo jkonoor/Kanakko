@@ -40,7 +40,32 @@ case "${1:-}" in
 esac
 MAX="${1:-10}"
 
-DEV_MODEL="${RALPH_DEV_MODEL:-claude-opus-4-8}"
+# Asymmetric on purpose: Sonnet implements, Opus reviews.
+#
+# A dev mistake QA catches costs one iteration — it becomes the next pass's first
+# job, which is the whole design. A dev mistake QA *misses* lands, and the next
+# task builds on it. Every expensive failure in this repo's history was a
+# detection failure, not an authoring one: the schema test that asserted the
+# broken spelling verbatim and stayed green through four phases while nothing
+# parsed in production, guards that string-matched the wrong occurrence four
+# times in one day, a layout collision a headless suite could not see. So the
+# strong model goes on the gate.
+#
+# Dev's regime here suits the smaller one: one task, fresh context, a spec that
+# outranks its judgement, and existing patterns to copy. It also makes the bulk
+# of the tokens cheaper — dev writes code and runs pytest, QA reads a diff — which
+# is what decides how far an overnight run gets before the account session limit,
+# the thing that ended the last long run at iteration 8 of 16.
+#
+# Migrations were the exception and ran on Opus (009-011 + balances): a wrong
+# backfill produces plausible numbers, which is the failure class this repo keeps
+# getting bitten by. Override per-run if a task looks like that again:
+#   RALPH_DEV_MODEL=claude-opus-4-8 ./ralph.sh 3
+#
+# Revisit on evidence, not vibes (§2's standard): REVIEWS.md is the instrument and
+# the baseline is 3 fixes per 11 features, ~20% rejections. If rejections climb
+# past ~50% or one task bounces twice, a Sonnet pass costs more than it saved.
+DEV_MODEL="${RALPH_DEV_MODEL:-claude-sonnet-5}"
 QA_MODEL="${RALPH_QA_MODEL:-claude-opus-4-8}"
 
 # Least privilege. The loop runs unattended, so anything not listed here stalls

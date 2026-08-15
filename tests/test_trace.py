@@ -72,7 +72,7 @@ def test_failed_parse_names_the_failure(conn, monkeypatch, tmp_path):
 
     migrate(conn)
 
-    def raise_validation(text):
+    def raise_validation(text, accounts=None):
         Transaction.model_validate(
             {"type": "expense", "amount": "", "category": None,
              "date": "2026-08-06", "note": text}

@@ -62,6 +62,12 @@ def test_rejects_non_positive_and_garbage(bad):
         parse_amount(bad)
 
 
+def test_allow_zero_admits_only_zero_not_negatives():
+    assert parse_amount("0", allow_zero=True) == Decimal("0.00")
+    with pytest.raises(ValueError):
+        parse_amount("-5", allow_zero=True)
+
+
 def test_rejects_over_numeric_12_2():
     assert parse_amount(str(MAX_AMOUNT)) == MAX_AMOUNT  # boundary is allowed
     with pytest.raises(ValueError):

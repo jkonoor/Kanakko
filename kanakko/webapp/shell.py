@@ -99,6 +99,51 @@ h2 {
   background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
   min-height: 44px; max-width: 45vw;
 }
+/* Same lane as `.del` (44px square, same hint ink) but the note-row's column,
+   which is otherwise empty when a row carries no note — no layout cost. */
+.edit-toggle {
+  grid-row: 2; grid-column: 2; border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
+/* Third action, `expense` rows only (task 1082) — its own row so it doesn't
+   contend with `.del`/`.edit-toggle` for row 1/2, column 2; row 3 column 1 is
+   simply left empty on these rows, same as it already is on every other row. */
+.refund-toggle {
+  grid-row: 3; grid-column: 2; border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
+/* The hidden per-row editor (task 974): amount, date, note, account. `[hidden]`
+   needs restating after `display: flex` below — an attribute selector and a
+   class selector have equal specificity, so without this rule the later
+   `.txn-edit` declaration would win and the panel would never actually hide.
+   `.txn-refund` (task 1082) shares the same shape. */
+.txn-edit, .txn-refund { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
+.txn-edit[hidden], .txn-refund[hidden] { display: none; }
+.txn-edit input, .txn-edit select, .txn-refund input {
+  font: inherit; color: inherit; background: var(--tg-theme-secondary-bg-color, rgba(128,128,128,.1));
+  border: 0; border-radius: 8px; padding: 8px 10px; min-height: 44px;
+}
+/* The refund panel's explicit submit (task 1082) — unlike the edit fields, which
+   auto-save on `change`, a refund adds a new row rather than overwriting one, so
+   it gets a real button rather than firing on blur. Telegram's own button colour,
+   the same var `.fill` already follows. */
+.refund-submit {
+  border: 0; border-radius: 8px; padding: 10px; min-height: 44px; font: inherit; font-weight: 600;
+  background: var(--tg-theme-button-color, #3390ec); color: var(--tg-theme-button-text-color, #fff);
+  cursor: pointer;
+}
+/* The recurring-rules list (task 1161 split 2/2a) — same row grid as `.txn`,
+   its two actions in the same 44px lanes `.del`/`.edit-toggle` already use. */
+.rule { display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; align-items: center; padding: 4px 0; }
+.rule.paused { opacity: .5; }
+.rule-main { font-size: 15px; min-width: 0; }
+.rule-toggle, .rule-del {
+  border: 0; background: none; cursor: pointer;
+  color: var(--tg-theme-hint-color, #707579);
+  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
+}
 </style>
 </head>
 <body>
@@ -138,6 +183,57 @@ app.addEventListener('click', e => {
   // fragment, so no request and no reload.
   const seg = e.target.closest('.seg');
   if (seg) { period = seg.dataset.period; applyPeriod(); return; }
+  // The edit toggle is a local view change too — it just reveals the hidden
+  // panel `_edit_panel` already rendered for this row, no request either.
+  const editBtn = e.target.closest('.edit-toggle');
+  if (editBtn) {
+    const panel = editBtn.closest('.txn').querySelector('.txn-edit');
+    panel.hidden = !panel.hidden;
+    return;
+  }
+  // Same for the refund toggle (task 1082) — reveals `_refund_panel`.
+  const refundBtn = e.target.closest('.refund-toggle');
+  if (refundBtn) {
+    const panel = refundBtn.closest('.txn').querySelector('.txn-refund');
+    panel.hidden = !panel.hidden;
+    return;
+  }
+  // The refund panel's own submit (task 1082) — unlike every other control here,
+  // this one doesn't fire on `change`: a refund adds a row rather than
+  // overwriting one, so it waits for an explicit tap.
+  const refundSubmit = e.target.closest('.refund-submit');
+  if (refundSubmit) {
+    const amount = refundSubmit.closest('.txn-refund').querySelector('.refund-amount').value;
+    if (!amount) return;
+    fetch('/app/refund', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(refundSubmit.dataset.id), amount}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
+  // The recurring-rule pause/resume toggle (task 1161 split 2/2a) — sends the
+  // state to move *to*, the opposite of `data-active` (the rule's current
+  // state, per `render.recurring_list`'s docstring), not a flip computed
+  // server-side.
+  const ruleToggle = e.target.closest('.rule-toggle');
+  if (ruleToggle) {
+    fetch('/app/recurring/active', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(ruleToggle.dataset.id), active: ruleToggle.dataset.active !== 'true'}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
+  const ruleDel = e.target.closest('.rule-del');
+  if (ruleDel) {
+    fetch('/app/recurring/delete', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(ruleDel.dataset.id)}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
   const btn = e.target.closest('.del');
   if (!btn) return;
   fetch('/app/delete', {
@@ -148,11 +244,27 @@ app.addEventListener('click', e => {
 });
 app.addEventListener('change', e => {
   const sel = e.target.closest('.cat-select');
-  if (!sel || !sel.value) return;
-  fetch('/app/category', {
+  if (sel && sel.value) {
+    fetch('/app/category', {
+      method: 'POST',
+      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+      body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
+    }).then(r => { if (r.ok) load(); });
+    return;
+  }
+  // The four row-editor fields (`_edit_panel`) share one dispatch: each carries
+  // `data-edit-field` naming the column `/app/edit` changes, mirroring
+  // `edit_transaction_field` taking one column name rather than four near-
+  // duplicate routes. Empty is a no-op except for `note`, where it means "clear
+  // it" — every other field's native input (date/number/select) already refuses
+  // to go empty on its own.
+  const field = e.target.closest('[data-edit-field]');
+  if (!field) return;
+  if (field.value === '' && field.dataset.editField !== 'note') return;
+  fetch('/app/edit', {
     method: 'POST',
     headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-    body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
+    body: JSON.stringify({id: Number(field.dataset.id), field: field.dataset.editField, value: field.value}),
   }).then(r => { if (r.ok) load(); });
 });
 load();

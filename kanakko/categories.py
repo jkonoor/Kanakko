@@ -23,7 +23,6 @@ EXPENSE_CATEGORIES = (
 INCOME_CATEGORIES = (
     "Salary",
     "Freelance",
-    "Refund",
     "Other",
 )
 

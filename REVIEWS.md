@@ -12,6 +12,45 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `844db29` flag DECISIONS.md §5 reconciliation task as blocked
+
+**Scope:** Docs-only. Adds a "Blocked, 2026-08-16" note under the open TASKS.md
+task that asks to reconcile `docs/DECISIONS.md` §5 ("No field editor") with the
+shipped `POST /app/edit` editor. No code, tests, migrations, or guards touched.
+
+**Status: ✅ DONE** — no blocking issues.
+
+**What I checked (commands run):**
+
+- `git show HEAD` — diff is +10 lines to `TASKS.md:1896`, nothing else. Commit
+  message is accurate ("No code changes this iteration").
+- Verified the block is *not* fabricated to dodge work: `POST /app/edit`
+  (`kanakko/webapp/routes.py:290`, `_parsed_edit_value` at :272) genuinely
+  parses and writes `amount`, `occurred_on`, `note`, and `account_id`; category
+  has its own `/app/category` route. So §5.2 ("Wrong amount or date → Cancel and
+  retype", `docs/DECISIONS.md:121`) and its echo at `docs/TESTING.md:72` really
+  are stale. The underlying drift the task names is real.
+- Confirmed the task is left **unticked** — correct; no falsely-ticked box.
+- Confirmed the note's premise against `CLAUDE.md:100` ("Don't edit
+  `docs/DECISIONS.md` to match the code").
+- `uv run pytest -q` → **508 passed**, 1 unrelated Starlette deprecation warning.
+  Tree is green (as expected for a docs-only change).
+
+**Findings:** none blocking.
+
+- *Advisory, non-blocking.* The block reasoning slightly over-reads the rule.
+  `CLAUDE.md:100` forbids editing DECISIONS.md **"to match the code"** — i.e.
+  laundering a code bug into the spec. The task pre-argues this is the opposite
+  case: a real decision (the dashboard editor extends §5's own point 4) that was
+  made but never written down, which is *not* code-matching. So a human could
+  reasonably just approve the §5 edit rather than treat it as needing a new
+  carve-out. That said, deferring to a human is the *safe* call — it changes
+  nothing that can break, ticks nothing falsely, and touches no money/tz/security
+  path. Recording the conflict and leaving it unticked is a legitimate outcome
+  for this iteration.
+
+---
+
 ## 2026-08-16 — `262fc5d` don't crash rendering a refund whose original was deleted
 
 **Scope:** `kanakko/webapp/recent.py`'s `refund` branch no longer formats

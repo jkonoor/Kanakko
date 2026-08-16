@@ -12,6 +12,74 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `4a57dbc` add manual test rows for recurring rules
+
+**Scope:** docs-only — `TASKS.md` ticks the "manual test rows for recurring
+rules" box, `docs/TESTING.md` gains §10 (17 rows) plus a summary-table row and
+two additions to the release-blocking money-path list (10.13, 10.16).
+
+**Status: ✅ DONE** — no blocking issues.
+
+The commit's whole claim is "every reply string, button label, and dashboard
+route was read from source, not guessed." I checked that claim row by row
+against source rather than trusting it, and it holds.
+
+**What I checked (commands run):**
+
+- `git show HEAD` — confirmed docs-only (`TASKS.md`, `docs/TESTING.md`), no code.
+- `uv run pytest -q` → **508 passed, 1 warning** (pre-existing Starlette
+  deprecation, unrelated).
+- `uv run python -c "…format_amount(parse_amount('5000'))"` → `'₹5,000.00'`,
+  confirming 10.2's exact reply string.
+- Read every source file the commit cites and matched each row to behaviour:
+  - **10.1–10.6 creation/validation** — `kanakko/commands/recurring.py`:
+    no-arg → `RECURRING_USAGE`; bad day → `RECURRING_BAD_DAY` (returns `None`,
+    never clamps — 10.3 correct); bad category/account → refusal; 10.2's reply
+    string matches `handle_recurring` line 137–138 verbatim.
+  - **10.6 locked account is a valid target** — `db/accounts.py:108`
+    `household_accounts` filters only `kind <> 'external'` and `deleted_at IS
+    NULL`; a locked FD is included. Correct.
+  - **10.7 button set** — `confirm.py` `confirm_card` with
+    `cancel_label=SKIP_LABEL` (`"⏭️ Skip"`) and `change_amount_button=True`
+    yields ✅ Confirm / ✏️ Change amount / ⏭️ Skip, `callback_data=CANCEL`
+    unchanged. "No plain Cancel" is accurate.
+  - **10.9 provenance link** — `jobs/recurring.py` `save_pending(...,
+    recurring_rule_id=rule["rule_id"])`; `db/pending.py` `confirm_pending`
+    carries it onto the stored `transactions` row (INSERT line 176). Migration
+    016 adds the column `REFERENCES recurring_rules ON DELETE SET NULL`.
+  - **10.10–10.12 Change amount** — `confirm_flow.py`:
+    `handle_change_amount_request` sends a *new* message (`CHANGE_AMOUNT_PROMPT`),
+    card untouched (10.10); unparseable reply → `CHANGE_AMOUNT_RETRY_PROMPT`
+    ("I couldn't read that as an amount…") and row stays `awaiting_amount`
+    (10.12). Strings match.
+  - **10.13 Skip writes nothing** — Skip is `callback_data=CANCEL` → `handle_cancel`
+    → `cancel_pending`, no ledger write. Correct (money check).
+  - **10.14/10.15 pause/resume** — `db/recurring.py` `due_rules_today` is
+    `WHERE r.active`; a paused rule is not sent. `render.py:154-168` glyphs ⏸/▶
+    and the `paused` (dimmed) class match.
+  - **10.16 delete detaches, keeps the transaction** — migration 016's `ON
+    DELETE SET NULL` means the past transaction survives with `recurring_rule_id`
+    nulled (money check, correct); `shell.py:274` fires `/app/recurring/delete`
+    with no confirm and no undo callback, whereas `shell.py:280` transaction
+    delete calls `showUndoToast`. "Immediate, no undo, unlike a row delete" is
+    accurate.
+
+**Confirmed real (already flagged in-row as 10.17, non-blocking, correctly
+deferred):** `jobs/recurring.py` `run()` iterates `due_rules_today` and calls
+`save_pending` with no check for an unresolved pending card for the same
+rule. There is no dedup in code and **no unique constraint** on
+`pending_transactions.recurring_rule_id` (checked migrations 015–017 and the
+`grep UNIQUE` over `migrations/*.sql`), so re-running the job on the same due
+day sends a *second* confirm card for the same rule — real money on a schedule,
+so worth a fix later. The commit documents this as an untested risk rather than
+silently patching it, which is the right call for a docs task; recording it
+here so it isn't lost. Not a defect in *this* commit.
+
+Nothing to change. The rows are honest, the strings are exact, and the two
+money-path rows (10.13, 10.16) are correctly added to the release-blocking set.
+
+---
+
 ## 2026-08-16 — `844db29` flag DECISIONS.md §5 reconciliation task as blocked
 
 **Scope:** Docs-only. Adds a "Blocked, 2026-08-16" note under the open TASKS.md

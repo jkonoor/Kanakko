@@ -12,6 +12,53 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `63eaa67` show account balances in the dashboard
+
+**Scope:** Adds `account_balances_section` (`kanakko/webapp/render.py`) — one
+`.stat` row per live, non-`external` account — and wires it into
+`dashboard_html`, fed by `account_balances(conn, user_id)` in `mini_app_data`
+(`kanakko/webapp/routes.py`). Two tests added; the Phase 11 box ticked.
+
+**Status: ✅ DONE** — no blocking issues.
+
+**What I checked (commands and their output):**
+
+- `git show HEAD` — read the whole diff: the new section function, its
+  `__init__` export, the `balances` param threaded through `dashboard_html`
+  and `mini_app_data`, two tests, one `TASKS.md` box.
+- **Money stays `Decimal`, never float (§9).** The section only formats: each
+  balance goes through `_stat` → `format_amount(b["balance"])`, and
+  `account_balances` (`kanakko/db/accounts.py:139`) returns `NUMERIC` →
+  `Decimal`. No arithmetic in the render path, so nothing to demote to float.
+- **`external` is hidden.** `account_balances` returns *all* live accounts
+  (including `external`, unlike `household_accounts`), so the section's own
+  `b["kind"] != "external"` filter is what excludes it. Verified the guard is
+  real: edited the filter to `rows = list(balances)`, ran
+  `uv run pytest -k "account_balances_section_renders or dashboard_route_shows_account_balances"`
+  → **2 failed**, with `External</span><span class="value">₹0.00` leaking into
+  the output. Restored the filter (`git checkout`).
+- **The `credit` sign convention (§18) is correct end to end.**
+  `set_account_opening_balance` stores a credit opening balance negated
+  (`signed = -amount`, `accounts.py:78`), and the `account_balances` query
+  negates again for `credit` (`CASE WHEN a.kind = 'credit' THEN -1 ELSE 1 END`),
+  so a card reported as owing ₹2,000 renders `₹2,000.00` positively — the
+  route-level test confirms this against real Postgres.
+- **XSS.** Account names are user-typed for `spending` accounts
+  (`/account cash 2000`), so the `html.escape(b["name"])` in the section is
+  genuine defense, and it is present. The balance value is a `Decimal` through
+  `format_amount`, not user text.
+- **Reads through `active_transactions` (§6), household-scoped (§16).** Both
+  hold in `account_balances`'s query — unchanged by this commit, and this
+  commit adds no new SQL of its own.
+- `uv run pytest` → **484 passed** (matches the commit's claim).
+
+**Findings:** none. The change is a thin, well-scoped read surface; the one
+guard it adds (the `external` filter) fails for the reason it exists, verified
+red. The empty-list branch (`test_account_balances_section_empty_renders_nothing`)
+is covered.
+
+---
+
 ## 2026-08-16 — `fedd5da` gate the dashboard row editor's account dropdown on account count
 
 **Scope:** Dashboard row editor. `_edit_panel` (`kanakko/webapp/recent.py`) now

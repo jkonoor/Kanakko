@@ -1561,6 +1561,109 @@ def test_delete_route_rejects_a_stale_init_data(conn, monkeypatch):
     assert resp.status_code == 401
 
 
+# --- Undo a delete from the dashboard toast (§6, §13, task 1771) ---
+
+
+def test_recent_list_delete_button_carries_the_amount_for_the_undo_toast():
+    """`.del` carries `data-amount` so the client can build "Deleted ₹500.00 ·
+    Undo" without parsing the button's `aria-label` — a separate string with a
+    different shape ("Delete −₹500.00 on 16 Aug")."""
+    rows = [(7, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1)]
+    out = recent_list(rows)
+    assert 'data-amount="₹500.00"' in out
+
+
+def test_restore_route_undeletes_the_users_row(conn, monkeypatch):
+    """`POST /app/restore` clears `deleted_at` and the row is live again through
+    the view the dashboard reads (§6, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
+    delete = client.post("/app/delete", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": txn_id})
+    assert delete.status_code == 204
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 1  # back in the view
+    conn.rollback()
+
+
+def test_restore_route_cannot_undelete_another_users_row(conn, monkeypatch):
+    """A deleted row belonging to a different user is a 404, never restored —
+    scoped to the signed user id, the same rule `/app/delete` follows (§1, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    get_or_create_user(conn, 42)
+    other = get_or_create_user(conn, 99)
+    txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
+    with conn.cursor() as cur:
+        cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (txn_id,))
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=42)},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 404
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 0  # still deleted — the other user's row untouched
+    conn.rollback()
+
+
+def test_restore_route_on_a_live_row_is_404(conn, monkeypatch):
+    """Restoring an id that was never deleted (a stale/replayed Undo tap, or one
+    fired twice) is a 404, not a silent no-op that could be mistaken for success."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))  # never deleted
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 404
+    conn.rollback()
+
+
+def test_restore_route_rejects_a_stale_init_data(conn, monkeypatch):
+    """Like `/app/delete`, `/app/restore` passes `max_age` — a captured Undo tap
+    must not stay live forever (§13)."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _sign(FIELDS)},  # auth_date = 2023
+        json={"id": 1},
+    )
+    conn.rollback()
+    assert resp.status_code == 401
+
+
 # --- Refund from the dashboard row (§13, §16, §18, task 1082) ---
 
 
@@ -1815,7 +1918,7 @@ def test_a_failed_mutation_is_surfaced_not_swallowed():
         raise AssertionError(f"unbalanced braces in function {fn_name}")
 
     mutate = body_of("mutate")
-    assert ".then(r => { if (!r.ok) showToast(); })" in mutate
+    assert ".then(r => { if (!r.ok) { showToast(); return; } if (onSuccess) onSuccess(); })" in mutate
     assert ".catch(showToast)" in mutate, "a thrown/network error must toast too"
     assert ".finally(load)" in mutate, "load() must run unconditionally"
     # load() must not be inside the `.then(...)` success branch — it has to run
@@ -1826,17 +1929,49 @@ def test_a_failed_mutation_is_surfaced_not_swallowed():
     # None of the old inlined, success-only reloads survive at any call site.
     assert "if (r.ok) load()" not in SHELL_HTML
 
-    # Every one of the six mutating actions routes through the helper, not a
+    # Every one of the seven mutating actions routes through the helper, not a
     # bespoke fetch.
     for route in (
         "/app/refund",
         "/app/recurring/active",
         "/app/recurring/delete",
         "/app/delete",
+        "/app/restore",
         "/app/category",
         "/app/edit",
     ):
         assert f"mutate('{route}'," in SHELL_HTML, f"{route} bypasses mutate()"
+
+
+def test_delete_offers_undo_instead_of_confirming_first():
+    """The dashboard doesn't ask "are you sure?" before a delete — it deletes,
+    then offers Undo (task 1771). A `confirm(...)` dialog is the one shape this
+    task explicitly rejects: it taxes the (likelier) case where the user meant
+    it, where an undo toast doesn't."""
+    assert "confirm(" not in SHELL_HTML
+
+    def body_of(fn_name: str) -> str:
+        start = SHELL_HTML.index(f"function {fn_name}(")
+        brace_start = SHELL_HTML.index("{", start)
+        depth = 0
+        for i in range(brace_start, len(SHELL_HTML)):
+            if SHELL_HTML[i] == "{":
+                depth += 1
+            elif SHELL_HTML[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return SHELL_HTML[brace_start : i + 1]
+        raise AssertionError(f"unbalanced braces in function {fn_name}")
+
+    undo = body_of("showUndoToast")
+    assert "Undo" in undo
+    assert "toast-undo" in undo
+    # The delete call site passes the toast as an onSuccess callback, not a
+    # bespoke .then() — the shape that would let a delete skip the toast.
+    assert "mutate('/app/delete', {id}, () => showUndoToast(id, btn.dataset.amount));" in SHELL_HTML
+    # The toast's own Undo button restores through the same mutate() helper,
+    # so a failed restore still toasts and still reloads.
+    assert "mutate('/app/restore', {id: Number(undo.dataset.id)});" in SHELL_HTML
 
 
 def test_mini_app_refuses_a_user_who_was_never_admitted(conn, monkeypatch):

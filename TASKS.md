@@ -1768,7 +1768,7 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       test it replaces used, per its own note that a rendered pixel height needs
       eyes on a phone, not a headless assertion). `uv run pytest` → 487 passed,
       `ruff check` clean.
-- [ ] Undo a delete, rather than confirm it. `.del` fires `POST /app/delete`
+- [x] Undo a delete, rather than confirm it. `.del` fires `POST /app/delete`
       immediately — no confirmation, and the ✕ glyph at a card's top-right is the
       universal *dismiss* symbol on a card that also expands, so "close" is a
       reasonable misreading of a control that removes a transaction. §6 already
@@ -1777,6 +1777,25 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       confirmation dialog: it does not tax the case where the user meant it.
       The undo must write its own audit row (§17) — restoring a transaction is a
       money mutation, and migration 013's action set will need a value for it.
+      Done: migration 020 widens `transaction_events_action_check` with
+      `'restore'`. `kanakko/db/edits.py` gets `restore_transaction` — the one
+      place in the codebase that correctly reads `transactions` directly rather
+      than the `active_transactions` view, since a soft-deleted row is exactly
+      what the view hides; scoped to `user_id`/`household_id` like its siblings,
+      writes a `restore` audit row (`after` only, mirroring delete's `before`
+      only). `POST /app/restore` in `routes.py` exposes it with the same 24h
+      `max_age` and 404-on-no-match shape as `/app/delete`. `_txn_panel`'s
+      `.del` button now also carries `data-amount`. `shell.py`: `mutate()` takes
+      an optional `onSuccess` callback; the delete click handler passes one that
+      calls the new `showUndoToast(id, amount)`, which repaints `#toast` (now
+      empty by default, populated by JS either way) as "Deleted ₹500.00 ·
+      Undo" for 5s: `.toast-undo`, on its own `toast` click listener (the
+      button lives outside `#app`, so the `app` listener never sees it), calls
+      `mutate('/app/restore', ...)`. `uv run pytest` → 497 passed, `ruff check`
+      clean. Guards, all verified red-without-fix: the audit-row tests
+      (constraint value removed from the migration), `restore_of_a_live_row`
+      (dropped `deleted_at IS NOT NULL`), and the shell.py wiring test (delete
+      call site reverted to skip the toast).
 - [ ] Stop the refund field defaulting to the full amount, and show what is
       actually left. `_refund_panel` sets `value="{amount}"` under a full-width
       primary button — the only prominent button on the card — so opening it by

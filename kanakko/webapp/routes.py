@@ -22,6 +22,7 @@ from kanakko.db import (
     list_recurring_rules,
     month_summary,
     recent_transactions,
+    restore_transaction,
     set_transaction_category,
     soft_delete_transaction,
 )
@@ -185,6 +186,44 @@ async def mini_app_delete(request: Request) -> Response:
     log_event("transaction.deleted", status="ok", source="miniapp",
               user_id=user_id, duration_ms=ms_since(start),
               txn_id=deleted["txn_id"], amount=deleted["amount"])
+    return Response(status_code=204)
+
+
+@router.post("/app/restore")
+async def mini_app_restore(request: Request) -> Response:
+    """Undo the authenticated user's most recent dashboard delete (§6, §13, task 1771).
+
+    The delete toast's Undo button POSTs `{"id": <txn_id>}` — the id `/app/delete`
+    just returned client-side. Like `/app/delete` this *mutates state*, so it
+    passes a 24h `max_age` (§13); the row is scoped to the user `authenticated_user`
+    returns, so one user cannot revive another's deleted row by guessing an id.
+
+    A body without a usable integer `id` is 400; a restore that matched no
+    deleted row of this user's (already restored, never existed, or still live)
+    is 404. Success is 204 — the client re-fetches `/app/data`.
+    """
+    telegram_user_id = authenticated_user(request, max_age=timedelta(hours=24))
+
+    try:
+        body = await request.json()
+        txn_id = int(body["id"])
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+
+    start = time.perf_counter()
+    with connect() as conn:
+        user_id = permitted_user(conn, telegram_user_id)
+        restored = restore_transaction(conn, user_id, txn_id,
+                                       source="miniapp", update_id=None)
+    # ponytail: synchronous log write in an async route — see /app/delete above
+    # for the ceiling and upgrade path. No `update_id` (§17 gap 2); 404 is `noop`.
+    if restored is None:
+        log_event("transaction.restored", status="noop", source="miniapp",
+                  user_id=user_id, duration_ms=ms_since(start))
+        raise HTTPException(status_code=404)
+    log_event("transaction.restored", status="ok", source="miniapp",
+              user_id=user_id, duration_ms=ms_since(start),
+              txn_id=restored["txn_id"], amount=restored["amount"])
     return Response(status_code=204)
 
 

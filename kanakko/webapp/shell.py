@@ -138,19 +138,27 @@ h2 {
   color: var(--tg-theme-hint-color, #707579);
   width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
 }
-/* A failed mutation (task 1558) surfaces here instead of nowhere. Fixed to the
-   viewport, not the flow, so it doesn't shift anything else when it appears. */
+/* A failed mutation (task 1558) surfaces here instead of nowhere; a delete
+   (task 1771) reuses the same fixed slot to offer Undo instead of asking to
+   confirm before the fact. Fixed to the viewport, not the flow, so it doesn't
+   shift anything else when it appears. Red only for the failure case — an
+   undo offer is not an error, so it gets `.undo`'s neutral dark instead. */
 #toast {
   position: fixed; left: 16px; right: 16px; bottom: 16px; padding: 12px 16px;
   border-radius: 8px; background: #d64545; color: #fff; text-align: center;
   font-size: 14px;
+}
+#toast.undo { background: #323232; }
+#toast button {
+  background: none; border: 0; color: inherit; font: inherit; font-weight: 600;
+  text-decoration: underline; padding: 0; cursor: pointer;
 }
 #toast[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div id="app">Loading…</div>
-<div id="toast" hidden>Couldn't save — try again.</div>
+<div id="toast" hidden></div>
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready();
@@ -185,22 +193,38 @@ function load() {
 let toastTimer;
 function showToast() {
   clearTimeout(toastTimer);
+  toast.className = '';
+  toast.textContent = "Couldn't save — try again.";
   toast.hidden = false;
   toastTimer = setTimeout(() => { toast.hidden = true; }, 3000);
 }
-// The one fetch every mutating action (edit, delete, refund, category,
-// recurring pause/delete — six call sites) goes through. Always reloads,
-// success or not: that discards whatever the user just typed and re-renders
-// the server's actual state, so a rejected write visibly snaps back instead of
-// silently staying wrong. The toast fires only when the write itself failed,
-// so "reverted because it failed" is distinguishable from an ordinary refresh.
-function mutate(url, body) {
+// The undo offer (task 1771) replaces a confirm-before-delete dialog: it
+// doesn't tax the case where the user meant it, and still leaves the mistake
+// recoverable. `id`/`amount` come off the `.del` button that was just tapped,
+// not the (now-gone) row, since the reload the delete triggers replaces the
+// list before this ever renders.
+function showUndoToast(id, amount) {
+  clearTimeout(toastTimer);
+  toast.className = 'undo';
+  toast.innerHTML = 'Deleted ' + amount + ' · <button type="button" class="toast-undo" data-id="' + id + '">Undo</button>';
+  toast.hidden = false;
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 5000);
+}
+// The one fetch every mutating action (edit, delete, restore, refund,
+// category, recurring pause/delete — seven call sites) goes through. Always
+// reloads, success or not: that discards whatever the user just typed and
+// re-renders the server's actual state, so a rejected write visibly snaps back
+// instead of silently staying wrong. The toast fires only when the write
+// itself failed, so "reverted because it failed" is distinguishable from an
+// ordinary refresh. `onSuccess`, when given, runs only on a 2xx response —
+// today only the delete call site uses it, to raise the undo offer.
+function mutate(url, body, onSuccess) {
   fetch(url, {
     method: 'POST',
     headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   })
-    .then(r => { if (!r.ok) showToast(); })
+    .then(r => { if (!r.ok) { showToast(); return; } if (onSuccess) onSuccess(); })
     .catch(showToast)
     .finally(load);
 }
@@ -252,7 +276,18 @@ app.addEventListener('click', e => {
   }
   const btn = e.target.closest('.del');
   if (!btn) return;
-  mutate('/app/delete', {id: Number(btn.dataset.id)});
+  const id = Number(btn.dataset.id);
+  mutate('/app/delete', {id}, () => showUndoToast(id, btn.dataset.amount));
+});
+// The toast's own Undo button (task 1771) — separate listener because the
+// toast sits outside `#app` and is never replaced by `load()`'s innerHTML
+// swap, unlike everything the listener above handles.
+toast.addEventListener('click', e => {
+  const undo = e.target.closest('.toast-undo');
+  if (!undo) return;
+  toast.hidden = true;
+  clearTimeout(toastTimer);
+  mutate('/app/restore', {id: Number(undo.dataset.id)});
 });
 app.addEventListener('change', e => {
   const sel = e.target.closest('.cat-select');

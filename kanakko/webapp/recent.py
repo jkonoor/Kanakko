@@ -160,7 +160,8 @@ def _txn_panel(
     refund_label = f"{format_amount(amount)} on {occurred_on:%d %b}"
     actions = (
         '<div class="txn-actions">'
-        f'<button type="button" class="del" data-id="{txn_id}" aria-label="Delete {delete_label}">Delete</button>'
+        f'<button type="button" class="del" data-id="{txn_id}" '
+        f'data-amount="{format_amount(amount)}" aria-label="Delete {delete_label}">Delete</button>'
         + (
             f'<button type="button" class="refund-toggle" data-id="{txn_id}" '
             f'aria-label="Refund {refund_label}">Refund</button>'

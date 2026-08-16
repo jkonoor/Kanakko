@@ -3,8 +3,9 @@
 Every read here goes through `active_transactions` (§6) and carries a
 `household_id` predicate so it can never span households (§16). Sums come back as
 `NUMERIC` → `Decimal`, never float (§9). The dashboard's per-row mutations
-(`soft_delete_transaction`, `set_transaction_category`, `edit_transaction_field`)
-are `kanakko.db.edits` — reads and writes are the seam this module split on.
+(`soft_delete_transaction`, `restore_transaction`, `set_transaction_category`,
+`edit_transaction_field`) are `kanakko.db.edits` — reads and writes are the
+seam this module split on.
 """
 
 from datetime import date

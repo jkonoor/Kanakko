@@ -23,6 +23,7 @@ from kanakko.db import (
     pending_awaiting_amount,
     recent_transactions,
     request_amount_change,
+    restore_transaction,
     save_pending,
     set_account_opening_balance,
     set_pending_account,
@@ -878,6 +879,77 @@ def test_dashboard_delete_and_recategorise_refuse_a_housemates_row(conn):
         deleted_at, category = cur.fetchone()
     assert deleted_at is None  # B's row still live
     assert category == EXPENSE_CATEGORIES[0]  # and its category unchanged
+    conn.rollback()
+
+
+# --- Undo a delete from the dashboard toast (§6, §13, task 1771) ---
+
+
+def test_restore_reverses_a_soft_delete(conn):
+    """`restore_transaction` clears `deleted_at` and the row is live again (§6).
+
+    §6 says soft delete "makes `/undo` itself reversible" — this is what makes
+    that literally true rather than aspirational.
+    """
+    migrate(conn)
+    user_id = _seed_user(conn, 86001)
+    txn_id = _confirm(conn, user_id, 8601, "42.00")
+    assert soft_delete_transaction(conn, user_id, txn_id, source="miniapp", update_id=None) is not None
+
+    restored = restore_transaction(conn, user_id, txn_id, source="miniapp", update_id=None)
+    assert restored == {"txn_id": txn_id, "amount": Decimal("42.00")}
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT deleted_at FROM transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone() == (None,)
+        cur.execute("SELECT amount FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchall() == [(Decimal("42.00"),)]  # back in the view
+    conn.rollback()
+
+
+def test_restore_of_a_live_row_is_a_noop(conn):
+    """Restoring a row that was never deleted matches nothing — it must not be
+    reachable by replaying an old id against a live row (§6)."""
+    migrate(conn)
+    user_id = _seed_user(conn, 86002)
+    txn_id = _confirm(conn, user_id, 8602, "10.00")
+
+    assert restore_transaction(conn, user_id, txn_id, source="miniapp", update_id=None) is None
+    conn.rollback()
+
+
+def test_restore_is_scoped_to_the_user(conn):
+    """One user cannot restore a housemate's deleted row by guessing an id (§1, §16)."""
+    migrate(conn)
+    a = _seed_user(conn, 86003)
+    hh = household_of(conn, a)
+    b = _member(conn, 86004, hh)
+    b_txn = _confirm(conn, b, 8603, "15.00")
+    soft_delete_transaction(conn, b, b_txn, source="miniapp", update_id=None)
+
+    assert restore_transaction(conn, a, b_txn, source="miniapp", update_id=None) is None
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT deleted_at FROM transactions WHERE txn_id = %s", (b_txn,))
+        assert cur.fetchone()[0] is not None  # still deleted — A's attempt did nothing
+    conn.rollback()
+
+
+def test_restore_writes_an_audit_row_with_after_not_before(conn):
+    """A restore's audit row is the mirror image of a delete's (§17): `after`
+    carries the revived fields, `before` is null."""
+    migrate(conn)
+    user_id = _seed_user(conn, 86005)
+    txn_id = _confirm(conn, user_id, 8604, "20.00")
+    soft_delete_transaction(conn, user_id, txn_id, source="miniapp", update_id=None)
+    restore_transaction(conn, user_id, txn_id, source="miniapp", update_id=None)
+
+    events = _events(conn, txn_id)
+    assert [e[0] for e in events] == ["confirm", "delete", "restore"]
+    action, before, after, source, update_id = events[-1]
+    assert before is None
+    assert after["amount"] == "20.00"
+    assert source == "miniapp" and update_id is None
     conn.rollback()
 
 

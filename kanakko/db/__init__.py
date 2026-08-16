@@ -19,6 +19,7 @@ from kanakko.db.connection import connect
 from kanakko.db.edits import (
     EDITABLE_TRANSACTION_FIELDS,
     edit_transaction_field,
+    restore_transaction,
     set_transaction_category,
     soft_delete_transaction,
 )
@@ -121,6 +122,7 @@ __all__ = [
     "month_summary",
     "recent_transactions",
     "soft_delete_transaction",
+    "restore_transaction",
     "set_transaction_category",
     "edit_transaction_field",
     "EDITABLE_TRANSACTION_FIELDS",

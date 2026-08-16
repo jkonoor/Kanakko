@@ -1547,4 +1547,111 @@ per task:
 
 ---
 
+## Phase 11 — Opening balances, and what the Phase 10 review found
+
+Raised 2026-08-16 from using the shipped bot and re-reading Phase 10 against
+§18. Nothing here is a new idea: every item is either §18 asking for something
+the implementation narrowed, or a defect found after the merge.
+
+### The one that can corrupt a number — read before starting
+
+`db/accounts.py::set_account_opening_balance` finds the account to update **by
+kind**:
+
+```sql
+WHERE household_id = (…) AND kind = %s AND deleted_at IS NULL
+```
+
+That was safe while only `credit` and `locked` came through it — one account per
+kind. **`Bank` and `Cash` are both `kind = 'spending'`**, so the moment this
+command accepts them, `/account cash 2000` finds *Bank* and overwrites the bank's
+opening balance with ₹2,000. No error, no warning, and the reported figure looks
+perfectly plausible. Once both exist, `fetchone()` picks between two matching rows
+arbitrarily.
+
+The first task below fixes it. **Do not extend the command to spending accounts
+without keying the lookup on name** — and prove it the way CLAUDE.md requires:
+set Bank to 52,000, then set Cash to 2,000, then assert Bank is *still* 52,000.
+Cause the corruption first and watch the check go red, or it is a claim rather
+than a guarantee.
+
+### Opening balances
+
+- [ ] Let `/account` set a **spending** account's opening balance —
+      `/account bank 52000`, `/account cash 2000` — creating Cash on first use.
+      §18 says the onboarding ask covers "an opening balance for each"; what
+      shipped covers only `credit` and `locked`, so a household's bank sits at ₹0
+      with no way to correct it but a reconcile.
+      **Key the lookup on name, not kind** — see the warning above; this is the
+      task that makes the collision reachable, so it is the task that must close
+      it. `credit` and `locked` keep their current wording ("what you owe" /
+      "what's already in it") and their sign handling; a spending account is asked
+      plainly what is in it. Guard: Bank 52,000 then Cash 2,000 leaves Bank at
+      52,000, and it reddens if the lookup still keys on kind.
+- [ ] Point at it once from the welcome message — one line, e.g. *"Want your
+      balance to be right? Tell me what you have: `/account bank 52000`."*
+      Deliberately **not** an onboarding questionnaire: a multi-step "which
+      accounts, how much in each" conversation is the state machine §5 rejected as
+      the largest source of bugs in a Telegram bot, and it blocks the first thing
+      a new user came to do. Skipping it costs nothing — a later reconcile lands
+      the same numbers (verified: an adjustment is written as a `transfer`
+      (`db/reconcile.py:229`), which is excluded from both totals, and an opening
+      balance never enters those reports either). Add the same line to `/help`.
+
+### Defects found after the Phase 10 merge
+
+- [ ] Gate the dashboard's per-row account dropdown the way the confirm card is
+      gated. `webapp/recent.py::_row_editor` renders `_account_select` for every
+      non-transfer row with no count check, so a household with one account gets a
+      `<select>` holding a single option — a dead control that reads as a failed
+      load, which is exactly how it was reported. `confirm.py:126` already has the
+      rule (`show_accounts = bool(accounts) and len(accounts) > 1`); §18's
+      "accounts become visible only when a second one exists" applies to both
+      surfaces, and right now only one obeys it.
+- [ ] Show account balances in the dashboard. `account_balances` has exactly one
+      consumer — the weekly reconcile job — so "how much do I have", the headline
+      number of the whole accounts feature, is answered once a week in a Telegram
+      message and nowhere a user can look. **This is the one item in this phase
+      that is a new surface rather than a fix**; drop it if the phase needs to be
+      shorter. `credit` reads as what is owed (§18's sign convention, already in
+      the query); `external` stays hidden as everywhere else.
+
+### The spec no longer describes the code
+
+- [ ] Reconcile `docs/DECISIONS.md` §5 with the editor that shipped. §5 is titled
+      "No field editor" and says "Wrong amount or date → Cancel and retype", while
+      `POST /app/edit` now changes amount, date, note, category and account on any
+      row. §5's actual rejection was a **chat-side** multi-step editor, and §13
+      always said the transaction list existed for "correcting older entries" — so
+      the dashboard editor extends §5's own point 4 rather than contradicting it.
+      Say that in §5, in place of the line that is now false. `docs/TESTING.md:72`
+      repeats the stale claim verbatim and changes with it. Per CLAUDE.md the spec
+      is never edited to match the code — this is the other case, a decision that
+      was made and never written down, and leaving it is the drift CLAUDE.md calls
+      the most expensive damage in this codebase.
+
+### The manual test plan is missing three shipped features
+
+- [ ] Add manual test rows for **recurring rules** — `/recurring` creation, the
+      cron card's Confirm / Change amount / Skip, and dashboard pause and delete.
+      Migrations 015-017 shipped an entire feature with not one row in
+      `docs/TESTING.md`, and it is the feature most worth testing by hand: it
+      writes money on a schedule, unattended, and §18 chose the ask-first card
+      precisely because a silently wrong recurring row is worse than a missing one.
+- [ ] Add manual test rows for **dashboard editing and opening balances** —
+      editing an amount, a date and an account on an existing row (and that each
+      leaves an audit row, migration 013's `edit` action); setting a `credit`
+      account's balance and confirming it is asked as *what you owe*; and setting a
+      spending account's balance once the first task above lands. Include the
+      one-account case on **both** surfaces — no Account line on the confirm card,
+      and no dead dropdown in the dashboard.
+      Also add a row for the risk found on 2026-08-16 and **not** reproduced: with
+      only "Bank" in the account list, "paid the credit card bill 2000" gives the
+      model no card to name, and it may mint a **`locked`** account called "Credit
+      card" for something that is a card. Check what actually happens and record
+      it; if it does misfile, that is a finding for `REVIEWS.md`, not a silent fix
+      here.
+
+---
+
 QA findings are in [`REVIEWS.md`](REVIEWS.md), not here.

@@ -1796,7 +1796,7 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       (constraint value removed from the migration), `restore_of_a_live_row`
       (dropped `deleted_at IS NOT NULL`), and the shell.py wiring test (delete
       call site reverted to skip the toast).
-- [ ] Stop the refund field defaulting to the full amount, and show what is
+- [x] Stop the refund field defaulting to the full amount, and show what is
       actually left. `_refund_panel` sets `value="{amount}"` under a full-width
       primary button — the only prominent button on the card — so opening it by
       accident puts a complete refund one tap away. Migration 014's trigger stops
@@ -1806,6 +1806,20 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       original — otherwise the field invites an amount the trigger will reject.
       That means the row data has to carry refunded-so-far, so this is a real
       change to `recent_transactions`, not a markup tweak.
+      Done: `db.recent_transactions` (`kanakko/db/reports.py`) gains a 10th
+      column, `refunded_so_far` — a correlated subquery summing live refunds
+      against each row, the same "amount minus its live refunds" aggregate
+      migration 014's trigger enforces and `refund_candidates` already computes
+      (0 for anything that isn't a refunded `expense`). `recent_list`/`_txn_panel`
+      thread it through as `remaining = amount - refunded_so_far`; `_refund_panel`
+      drops the `value="{amount}"` pre-fill for an empty input with `placeholder`
+      *and* `max` set to `remaining` — the native HTML5 ceiling, not just a hint.
+      Two guards verified red-without-fix, green-with-fix: the placeholder/`max`
+      pointing at `remaining` instead of the original amount
+      (`tests/test_webapp.py`), and `recent_transactions` itself reporting the
+      partial-refund sum rather than a stale `account_id` in that column
+      (`tests/test_db.py::test_recent_transactions_reports_what_remains_refundable`).
+      `uv run pytest` → 500 passed, `ruff check` clean.
 - [ ] Render a refund row as a refund. Found 2026-08-16 in a live screenshot: a
       ₹501 refund of a `Health` expense renders as **"Uncategorised · +₹501.00" in
       the income green**, with nothing saying what it refunds. **The data is

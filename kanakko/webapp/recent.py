@@ -73,22 +73,26 @@ def _account_select(txn_id: int, accounts: list[tuple[int, str]], current: int |
     )
 
 
-def _refund_panel(txn_id: int, amount: Decimal) -> str:
-    """The hidden per-row refund input for an `expense` row (§13, §16, §18, task 1082).
+def _refund_panel(txn_id: int, remaining: Decimal) -> str:
+    """The hidden per-row refund input for an `expense` row (§13, §16, §18, tasks 1082, 1799).
 
     Unlike the editor's fields, which auto-save on `change`, this carries its
     own explicit submit button: a refund *adds* a new row rather than overwriting
     one, so silently firing on blur would create a transaction the user never
     meant to confirm — the same explicitness the bot's button tap has
-    (`handlers.handle_refund_choice`). The amount input defaults to the row's
-    full original amount; `POST /app/refund` (not this panel) is what enforces
-    that a refund can't exceed what's left, via migration 014's trigger, the same
-    guard the bot side relies on.
+    (`handlers.handle_refund_choice`). The input starts **empty**, not
+    pre-filled with the full amount — under a full-width primary button, a
+    pre-filled full amount put a complete refund one tap away from opening the
+    panel by accident (task 1799). `remaining` — the original amount minus any
+    refunds already recorded against it, computed by `db.recent_transactions` —
+    is shown as the placeholder instead: the ceiling `POST /app/refund` will
+    actually accept (migration 014's trigger), not the original amount, which
+    the trigger would reject once anything has already been refunded.
     """
     return (
         f'<div class="txn-refund" hidden data-id="{txn_id}">'
-        f'<input type="number" step="0.01" min="0.01" class="refund-amount" '
-        f'data-id="{txn_id}" aria-label="Refund amount" value="{amount}">'
+        f'<input type="number" step="0.01" min="0.01" max="{remaining}" class="refund-amount" '
+        f'data-id="{txn_id}" aria-label="Refund amount" placeholder="{remaining}">'
         f'<button type="button" class="refund-submit" data-id="{txn_id}">Refund</button>'
         "</div>"
     )
@@ -104,6 +108,7 @@ def _txn_panel(
     account_id: int | None,
     accounts: list[tuple[int, str]],
     sign: str,
+    remaining: Decimal,
 ) -> str:
     """The hidden per-row panel: correction fields, then Delete/Refund (task 1704).
 
@@ -131,6 +136,11 @@ def _txn_panel(
     beside it spells the date out ("06 Aug 2026") the way the summary line
     above already does — an Indian user's device would otherwise show
     `08/06/2026` under a header reading `06 Aug`.
+
+    `remaining` (the original amount minus any refunds already recorded
+    against it) is threaded through to `_refund_panel` (task 1799); it is
+    `amount` itself for a never-refunded row, since `remaining` is what an
+    `expense` row's panel should invite, not the original amount.
     """
     amount_field = _field(
         "Amount (₹)",
@@ -170,7 +180,7 @@ def _txn_panel(
         )
         + "</div>"
     )
-    refund = _refund_panel(txn_id, amount) if type_ == "expense" else ""
+    refund = _refund_panel(txn_id, remaining) if type_ == "expense" else ""
     return (
         f'<div class="txn-panel" hidden data-id="{txn_id}">'
         + amount_field
@@ -190,9 +200,12 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     (§13, §18, tasks 100, 101, 974, 1704).
 
     Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on,
-    from_account, to_account, account_id)` from `db.recent_transactions` —
-    `from_account`/`to_account` are `NULL` for every type but `transfer`, and
-    `account_id` is `NULL` for exactly that one type and nothing else (§18).
+    from_account, to_account, account_id, refunded_so_far)` from
+    `db.recent_transactions` — `from_account`/`to_account` are `NULL` for every
+    type but `transfer`, `account_id` is `NULL` for exactly that one type and
+    nothing else (§18), and `refunded_so_far` is 0 except on a partially- or
+    fully-refunded `expense` — it is what makes `_refund_panel`'s placeholder
+    (task 1799) the amount still refundable, not the original.
     `note` is the first *user-typed* string the dashboard renders — §11 keeps the
     note's original wording, so it is arbitrary text that arrived through the bot
     — and it is HTML-escaped: an unescaped `<img src=x onerror=...>` in a logged
@@ -218,7 +231,10 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     if not rows:
         return ""
     items = []
-    for txn_id, amount, type_, category, note, occurred_on, from_account, to_account, account_id in rows:
+    for (
+        txn_id, amount, type_, category, note, occurred_on,
+        from_account, to_account, account_id, refunded_so_far,
+    ) in rows:
         if type_ == "transfer":
             sign = ""
             amt_cls = "amt"
@@ -243,7 +259,10 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
             "</span>"
             + note_html
             + "</button>"
-            + _txn_panel(txn_id, type_, amount, category, note, occurred_on, account_id, accounts, sign)
+            + _txn_panel(
+                txn_id, type_, amount, category, note, occurred_on, account_id, accounts, sign,
+                amount - refunded_so_far,
+            )
             + "</div>"
         )
     return '<section class="recent"><h2>Recent</h2>' + "".join(items) + "</section>"

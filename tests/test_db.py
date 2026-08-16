@@ -17,6 +17,7 @@ from kanakko.db import (
     confirm_pending,
     create_household_of_one,
     create_recurring_rule,
+    create_refund,
     day_summary,
     get_or_create_user,
     month_summary,
@@ -805,6 +806,27 @@ def test_household_reads_span_members_and_never_leak(conn):
     assert amounts == [Decimal("40.00"), Decimal("100.00")]  # H's two rows, X's absent
 
     assert day_summary(conn, outsider, day)[1] == Decimal("999.00")  # X never sees H
+    conn.rollback()
+
+
+def test_recent_transactions_reports_what_remains_refundable(conn):
+    """`recent_transactions`'s last column is refunded-so-far (task 1799) — the
+    dashboard's refund panel needs it to offer what actually remains, not the
+    original amount migration 014's trigger would reject a second time.
+
+    An untouched expense reports 0 refunded; a partially-refunded one reports the
+    partial sum, not the original amount.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 90101)
+    untouched = _confirm(conn, a, 91001, "50.00")
+    refunded = _confirm(conn, a, 91002, "100.00")
+    create_refund(conn, a, refunded, Decimal("30.00"), date(2026, 8, 5),
+                   source="webhook", update_id=None)
+
+    by_id = {row[0]: row for row in recent_transactions(conn, a)}
+    assert by_id[untouched][-1] == Decimal("0")
+    assert by_id[refunded][-1] == Decimal("30.00")
     conn.rollback()
 
 

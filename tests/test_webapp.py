@@ -534,7 +534,7 @@ def test_recent_list_escapes_the_note():
     Mini App. Assert the *escaped bytes* are present and the raw `<script>` tag is
     not — not merely that the page "looks fine".
     """
-    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert "<script>alert(1)</script>" not in out  # not rendered live
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out  # rendered inert
@@ -543,7 +543,7 @@ def test_recent_list_escapes_the_note():
 def test_recent_list_renders_row_with_delete_button_and_amount():
     """Each row shows its amount (through `format_amount`, §9) and a delete button
     carrying the `txn_id` the `POST /app/delete` route needs."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert "₹50.00" in out
     assert 'data-id="7"' in out
@@ -551,7 +551,7 @@ def test_recent_list_renders_row_with_delete_button_and_amount():
 
 
 def test_recent_list_null_category_is_uncategorised():
-    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1)]
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert "Uncategorised" in out
 
@@ -564,7 +564,7 @@ def test_recent_list_transfer_shows_accounts_not_a_category_dropdown():
     """A transfer reads as "Bank → SIP" (§18), not as a category-less expense —
     the bug this task fixes. Before the fix, `_category_select` fell through
     `CATEGORIES_BY_TYPE.get("transfer", ())` to an empty, useless dropdown."""
-    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"))]
     out = recent_list(rows)
     assert "Bank → SIP" in out
     assert "cat-select" not in out  # no category dropdown for a transfer
@@ -574,7 +574,7 @@ def test_recent_list_transfer_shows_accounts_not_a_category_dropdown():
 def test_recent_list_transfer_has_no_income_or_expense_sign():
     """A transfer is neither spending nor income (§18) — no −/+ sign, no income
     tint. Both directions are asserted so an unconditional sign can't sneak by."""
-    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"))]
     out = recent_list(rows)
     assert "₹5,000.00" in out
     assert "−₹5,000.00" not in out
@@ -683,7 +683,7 @@ def test_delete_route_logs_the_money_mutation(conn, monkeypatch):
 def test_recent_list_renders_a_category_select():
     """Each row carries a `<select>` of the type's categories, current one selected,
     naming the `txn_id` the `POST /app/category` route needs (§5, §13)."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert 'class="cat-select" data-id="7"' in out
     assert "<option selected>Food</option>" in out
@@ -692,7 +692,7 @@ def test_recent_list_renders_a_category_select():
 
 
 def test_recent_list_null_category_select_defaults_to_uncategorised():
-    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1)]
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert '<option value="" disabled selected>Uncategorised</option>' in out
 
@@ -840,7 +840,7 @@ def test_recent_list_renders_a_labelled_editor_panel_reached_by_tapping_the_row(
     text label, not just an `aria-label`, and appears in consequence order
     (§5: category is the most-often-wrong field) — Amount, Category, Date,
     Account, Note — current values pre-filled."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3, Decimal("0"))]
     accounts = [(3, "Bank"), (4, "Wallet")]
     out = recent_list(rows, accounts)
     assert 'class="txn-head" data-id="7"' in out
@@ -867,7 +867,7 @@ def test_recent_list_header_shows_category_as_text_not_a_dropdown():
     the hidden panel (task 1704). Before this, the picker's own chevron sat
     beside a row that also expands, two chevron-ish affordances for one
     meaning."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     head, _, panel = out.partition('class="txn-panel"')
     assert "Food" in head
@@ -882,7 +882,7 @@ def test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel():
     that also expands. Reddens if either button reappears in the always-visible
     collapsed part of the row, which is the bug that made every expense row at
     least 132px tall."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     head, _, panel = out.partition('class="txn-panel"')
     assert 'class="del"' not in head and 'class="refund-toggle"' not in head
@@ -894,7 +894,7 @@ def test_recent_list_head_button_carries_aria_expanded():
     """`aria-expanded` names the row's own state so a screen reader announces
     whether tapping it opens or closes the panel; `shell.py`'s click handler
     flips it alongside `.txn-panel[hidden]`."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert 'aria-expanded="false"' in out
 
@@ -904,7 +904,7 @@ def test_recent_list_edit_panel_hides_account_select_for_a_single_account():
     — a single-option dropdown is a dead control, not a real choice. Mirrors
     `confirm.py`'s `show_accounts = bool(accounts) and len(accounts) > 1`
     (§18): the same rule applies wherever an account picker can appear."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3, Decimal("0"))]
     accounts = [(3, "Bank")]
     out = recent_list(rows, accounts)
     assert "edit-account" not in out
@@ -913,7 +913,7 @@ def test_recent_list_edit_panel_hides_account_select_for_a_single_account():
 def test_recent_list_transfer_edit_panel_has_no_account_select():
     """A transfer's amount/date/note are still editable, but it has no single
     account to reassign — it names two ends, not one (§18)."""
-    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"))]
     accounts = [(3, "Bank"), (4, "SIP")]
     out = recent_list(rows, accounts)
     assert "edit-account" not in out
@@ -923,9 +923,8 @@ def test_recent_list_transfer_edit_panel_has_no_account_select():
 
 def test_recent_list_renders_a_refund_toggle_and_panel_for_an_expense():
     """An `expense` row carries a refund toggle and a hidden refund panel naming
-    the `txn_id` `POST /app/refund` needs, the amount pre-filled (§13, §18, task
-    1082)."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    the `txn_id` `POST /app/refund` needs (§13, §18, task 1082)."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert 'class="refund-toggle" data-id="7"' in out
     assert 'class="txn-refund" hidden data-id="7"' in out
@@ -933,12 +932,33 @@ def test_recent_list_renders_a_refund_toggle_and_panel_for_an_expense():
     assert 'class="refund-submit" data-id="7"' in out
 
 
+def test_refund_panel_amount_is_empty_not_prefilled():
+    """The refund input starts empty, not the row's full amount (task 1799) — a
+    full-width primary button under a pre-filled full amount put a complete
+    refund one tap away from opening the panel by accident."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))]
+    out = recent_list(rows)
+    assert 'class="refund-amount" data-id="7" aria-label="Refund amount" placeholder="50.00">' in out
+    assert 'value="50.00"' not in out.split('class="refund-amount"')[1].split(">")[0]
+
+
+def test_refund_panel_placeholder_is_what_remains_not_the_original():
+    """Once part of a ₹50 expense is already refunded, the panel's placeholder
+    (and its `max`) is the ₹30 still refundable, not the ₹50 original — offering
+    the original would invite an amount migration 014's trigger rejects."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("20.00"))]
+    out = recent_list(rows)
+    assert 'placeholder="30.00"' in out
+    assert 'max="30.00"' in out
+    assert 'placeholder="50.00"' not in out
+
+
 def test_recent_list_no_refund_control_for_income_or_transfer():
     """Only an `expense` is refundable (§18, task 1082): `create_refund` accepts
     nothing else, so offering the control on income or a transfer would just be a
     tap that always 404s."""
-    income = [(8, Decimal("20000.00"), "income", "Salary", "", date(2026, 8, 6), None, None, 1)]
-    transfer = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    income = [(8, Decimal("20000.00"), "income", "Salary", "", date(2026, 8, 6), None, None, 1, Decimal("0"))]
+    transfer = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"))]
     assert "refund-toggle" not in recent_list(income)
     assert "refund-toggle" not in recent_list(transfer)
 
@@ -1568,7 +1588,7 @@ def test_recent_list_delete_button_carries_the_amount_for_the_undo_toast():
     """`.del` carries `data-amount` so the client can build "Deleted ₹500.00 ·
     Undo" without parsing the button's `aria-label` — a separate string with a
     different shape ("Delete −₹500.00 on 16 Aug")."""
-    rows = [(7, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1, Decimal("0"))]
     out = recent_list(rows)
     assert 'data-amount="₹500.00"' in out
 
@@ -1852,8 +1872,8 @@ def test_collapsed_row_height_no_longer_depends_on_which_actions_it_has():
     assert "min-height: 44px" in head_rule
     assert "height:" not in head_rule.replace("min-height:", "")  # bounded, not fixed
 
-    note = recent_list([(1, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)])
-    no_note = recent_list([(2, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1)])
+    note = recent_list([(1, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"))])
+    no_note = recent_list([(2, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1, Decimal("0"))])
     # Neither collapsed row carries an action button — both are data-only, so
     # neither pays the old fixed-lane height regardless of the note.
     for out in (note.split('class="txn-panel"')[0], no_note.split('class="txn-panel"')[0]):

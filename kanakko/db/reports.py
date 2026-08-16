@@ -113,11 +113,18 @@ def recent_transactions(
     (§18) can render "Bank → SIP" without a second round trip. Column 9 is the
     row's own `account_id` — `NULL` for a `transfer` (it names two ends, not one,
     §18), otherwise the account the dashboard's edit control (task 974) pre-selects.
+    Column 10 is `refunded_so_far` — the sum of this row's live refunds (0 unless
+    it is a partially- or fully-refunded `expense`), the same "amount minus its
+    live refunds" aggregate migration 014's trigger enforces and
+    `refund_candidates` already computes. The dashboard's refund panel needs it to
+    offer what actually remains rather than an amount the trigger will reject.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT t.txn_id, t.amount, t.type, t.category, t.note, t.occurred_on,"
-            " fa.name, ta.name, t.account_id"
+            " fa.name, ta.name, t.account_id,"
+            " coalesce((SELECT sum(r.amount) FROM active_transactions r"
+            "  WHERE r.refund_of_txn_id = t.txn_id), 0)"
             " FROM active_transactions t"
             " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
             " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"

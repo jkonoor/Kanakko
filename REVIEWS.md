@@ -12,6 +12,85 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `4c3a67e` undo a dashboard delete instead of confirming it
+
+**Scope:** Task 1771. Migration `020`, `kanakko/db/edits.py`
+(`restore_transaction`), `kanakko/db/__init__.py`, `kanakko/db/reports.py`
+(docstring), `kanakko/webapp/routes.py` (`POST /app/restore`),
+`kanakko/webapp/recent.py` (`data-amount` on `.del`), `kanakko/webapp/shell.py`
+(`showUndoToast`, `mutate(onSuccess)`, toast listener), and the matching tests.
+A dashboard delete already fired immediately with no confirmation; this replaces
+a would-be `confirm()` with a 5s "Deleted ₹X · Undo" toast that restores the
+row via a new soft-delete-reversing write.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run, actual output)
+
+- `git show HEAD` — read the full diff (10 files, +392/−23).
+- `uv run pytest -q` → **497 passed, 1 warning in 20.56s**.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Guard is real, not a claim.** Temp-removed `AND deleted_at IS NOT NULL` from
+  `restore_transaction`'s WHERE and re-ran the noop guard:
+  `pytest -k restore_of_a_live_row` → **1 failed**
+  (`test_restore_of_a_live_row_is_a_noop`), then restored the file
+  (`git diff kanakko/db/edits.py` empty). Without the clause, replaying a stale
+  id against a live row would return a dict → a spurious `restore` audit row and
+  a false 204 instead of 404. The guard fails for the reason it exists.
+- **Migration 020 constraint** (`grep "action IN" migrations/`): the widened set
+  is `013→014→018`'s set plus `'restore'` — no prior value dropped
+  (`confirm, undo, delete, recategorise, edit, refund, adjustment, restore`).
+  `020` is the correct next number. The audit test asserting a `restore` row
+  passes, so the constraint accepts the value it needs to.
+- **Scoping matches its siblings and §16.** `restore_transaction` scopes to
+  `user_id = %s AND txn_id = %s AND household_id = (SELECT … WHERE user_id = %s)`
+  — same shape as `soft_delete_transaction`/`set_transaction_category`, so only
+  the entering member can revive their own row. Verified live by
+  `test_restore_is_scoped_to_the_user` / `test_restore_route_cannot_undelete_another_users_row`
+  (a housemate's deleted row stays deleted, route returns 404).
+- **The one direct `transactions` read is the legitimate exception.**
+  `docs/DECISIONS.md` §6: the view is `WHERE deleted_at IS NULL`, so the row a
+  restore must find is exactly the one the view hides. Reading `transactions`
+  here with `deleted_at IS NOT NULL` is correct, not a "reads go through the
+  view" violation. Every other function in `edits.py` still goes through
+  `active_transactions`.
+- **Money stays `Decimal`.** `restore` returns `amount` straight from
+  `NUMERIC` → `Decimal`; the audit `after` serializes it as `"20.00"` (asserted).
+  No `float` anywhere on the path. `showUndoToast` displays a server-rendered
+  `format_amount(amount)` string carried on `data-amount` — presentation only,
+  never fed back into a sum.
+- **Route mirrors `/app/delete`.** `authenticated_user(max_age=24h)`, 400 on a
+  non-integer `id`, 404 on no match (already restored / never existed / still
+  live — no enumeration difference vs delete), 204 on success.
+  `test_restore_route_rejects_a_stale_init_data` confirms a 2023 `auth_date` is
+  401. No new secret, no unbounded query.
+- **No XSS via the toast.** `showUndoToast` uses `innerHTML`, but both
+  interpolations are safe: `id` is `Number(btn.dataset.id)` and `amount` is a
+  server-generated `₹…` string, never free user text.
+- **Failure-toast path intact.** `#toast` is now empty in HTML and populated by
+  JS in both branches; `showToast` resets `className=''` and re-sets the red
+  "Couldn't save" text, so a failed restore after an undo offer still surfaces
+  red. `test_a_failed_mutation_is_surfaced_not_swallowed` (updated to the new
+  `mutate` body and the seven call sites) passes.
+
+### Findings
+
+None blocking. Two notes for the record, neither a finding for this task:
+
+- Restoring a transaction whose account was hard-deleted between the delete and
+  the undo would bring the row back onto a gone account. Out of scope here and
+  its siblings (`edit`/`category`) don't guard the symmetric case either; noting
+  only so it isn't mistaken for covered.
+- The synchronous `log_event` write inside the async route is carried over from
+  `/app/delete` and is marked with a `ponytail:` comment pointing at the same
+  ceiling. Consistent with the existing route; not new debt.
+
+The ticked box in `TASKS.md` matches real, tested behaviour — the restore
+actually clears `deleted_at`, writes its audit row, and is scoped; the guards
+fail for their stated reasons.
+
+---
+
 ## 2026-08-16 — `5e90ba8` rebuild the dashboard row (actions out, category in, labelled)
 
 **Scope:** Task 1704. `kanakko/webapp/recent.py`, `kanakko/webapp/shell.py`,

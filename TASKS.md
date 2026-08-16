@@ -1906,12 +1906,21 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
 
 ### The manual test plan is missing three shipped features
 
-- [ ] Add manual test rows for **recurring rules** — `/recurring` creation, the
+- [x] Add manual test rows for **recurring rules** — `/recurring` creation, the
       cron card's Confirm / Change amount / Skip, and dashboard pause and delete.
       Migrations 015-017 shipped an entire feature with not one row in
       `docs/TESTING.md`, and it is the feature most worth testing by hand: it
       writes money on a schedule, unattended, and §18 chose the ask-first card
       precisely because a silently wrong recurring row is worse than a missing one.
+      Added `docs/TESTING.md` §10 (17 rows: creation validation incl. a `locked`
+      account as a valid target, the cron card's exact button set, Confirm/Change
+      amount/Skip, dashboard pause/resume/delete, and 10.17 flagging a real gap
+      found while researching — no guard in `kanakko/jobs/recurring.py` stops a
+      second card going out for a rule whose card from the same month was never
+      resolved). Every command reply, button label, and route in the new rows was
+      read from source (`kanakko/commands/recurring.py`, `kanakko/confirm.py`,
+      `kanakko/jobs/recurring.py`, `kanakko/webapp/recurring.py`,
+      `kanakko/webapp/render.py`, `kanakko/webapp/shell.py`), not guessed.
 - [ ] Add manual test rows for **dashboard editing and opening balances** —
       editing an amount, a date and an account on an existing row (and that each
       leaves an audit row, migration 013's `edit` action); setting a `credit`

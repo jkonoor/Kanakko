@@ -370,6 +370,42 @@ must leave the single-account daily path exactly as it was.
 
 ---
 
+## 10. Recurring rules
+
+§18 (Phase 10), migrations 015-017. A recurring rule never writes silently —
+the cron always sends the ordinary confirm card and asks, because a chit or
+SIP amount can vary month to month and a silently-wrong row is worse than a
+missing one. `/recurring` only *creates* a rule; pausing and deleting are the
+dashboard's job.
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 10.1 | Send `/recurring` with no arguments | A usage hint (`/recurring 5000 5 Bills & Utilities Bank`) — no card, no rule created | ⬜ | |
+| 10.2 | Send `/recurring 5000 5 Bills & Utilities Bank` | Reply: "Got it — ₹5,000.00 for Bills & Utilities from Bank on day 5 of the month. Manage it from Dashboard." | ⬜ | |
+| 10.3 | Send `/recurring 5000 35 Food Bank` (day out of range) | Refused — day of month must be 1-31, never silently clamped to the 1st or last day | ⬜ | |
+| 10.4 | Send `/recurring 5000 5 NotACategory Bank` | Refused — category has to be one of the expense categories | ⬜ | |
+| 10.5 | Send `/recurring 5000 5 Food NotAnAccount` | Refused — account has to be one of yours | ⬜ | |
+| 10.6 | With a `locked` account already open (e.g. the FD from §9), send `/recurring 500 5 <category> FD` | Rule is created — a locked account is a valid recurring target (e.g. a SIP), not rejected as spendable-only | ⬜ | |
+| 10.7 | *(operator)* Pick a rule due today (or create one for today's day-of-month), run `python -m kanakko.jobs.recurring` in `kanakko-cron` | The user gets the ordinary confirm card, but with **✅ Confirm / ✏️ Change amount / ⏭️ Skip** — no plain Cancel button | ⬜ | |
+| 10.8 | Tap **✅ Confirm** on that card | Saved like any other entry — appears in the dashboard and `/undo` names it the same as a manually-typed transaction | ⬜ | |
+| 10.9 | *(operator)* After 10.8, check that transaction's `recurring_rule_id` | Set to the rule's id — the link that ties an auto-debit back to its rule | ⬜ | |
+| 10.10 | On a due card, tap **✏️ Change amount** | Bot sends a **new message** asking to reply with just the number — it does not turn into an inline field on the card itself | ⬜ | |
+| 10.11 | Reply with a number | Card settles at the new amount, not the rule's original amount | ⬜ | |
+| 10.12 | Reply with something that isn't a number | "I couldn't read that as an amount…" and it asks again — the pending card is not silently dropped | ⬜ | |
+| 10.13 | On a due card, tap **⏭️ Skip** | Discarded like a Cancel; **no transaction is written** for that month | ⬜ | |
+| 10.14 | In the dashboard, find the rule and tap **Pause** (⏸) | Row dims; *(operator)* re-run the job on the rule's due day | **No card is sent** while paused | ⬜ | |
+| 10.15 | Tap **Resume** (▶) on the same rule, then *(operator)* re-run the job on its next due day | Card is sent again, normally | ⬜ | |
+| 10.16 | Delete (✕) a rule that has already produced at least one confirmed transaction | Rule disappears immediately — **no confirm dialog, no undo toast** (unlike a transaction row delete); *(operator)* check that past transaction | Transaction still exists in the ledger, unaffected — only its link to the rule is cleared | ⬜ | |
+| 10.17 | *(operator)* Leave a due card unresolved, then re-run the job for the same rule (same day, or its next monthly due date without ever having acted on the first card) | **Untested, no guard found in code** — the job does not check whether a card for this rule/month is already pending, so a second card may be sent. Record what actually happens; a duplicate send is a real finding for `REVIEWS.md` | ⬜ | |
+
+**10.9 is the audit check** — a settled recurring transaction with no
+`recurring_rule_id` breaks the provenance link, the same class of gap §17's
+audit trail exists to catch elsewhere. **10.13 and 10.16 are the money
+checks**: a skip must leave the ledger untouched, and a rule delete must never
+touch a past transaction, only detach it.
+
+---
+
 ## Summary
 
 | Section | Pass | Fail | Blocked |
@@ -384,6 +420,7 @@ must leave the single-account daily path exactly as it was.
 | 7. Security | | | |
 | 8. Recovery | | | |
 | 9. Accounts, transfers, reconciliation | | | |
+| 10. Recurring rules | | | |
 
-**Anything ❌ on the money path (1.6, 2.4, 3.6, 8.3, 8.4, 9.6, 9.13) stops a
-release.** The rest is judgement.
+**Anything ❌ on the money path (1.6, 2.4, 3.6, 8.3, 8.4, 9.6, 9.13, 10.13,
+10.16) stops a release.** The rest is judgement.

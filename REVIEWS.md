@@ -12,6 +12,111 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `51d1712` render a refund row as a refund, not uncategorised income
+
+**Scope:** `recent_transactions` gains columns 11/12 (`refund_of_note`,
+`refund_of_occurred_on`) via a `LEFT JOIN active_transactions orig ON
+orig.txn_id = t.refund_of_txn_id`; `recent_list`/`_txn_panel` render a `refund`
+row with a neutral (transfer-style) sign+tint, its inherited category checked
+against `expense`'s set, a "Refund of …" note lane, and the refunded expense
+gets a `· refunded` / `· ₹N refunded` suffix.
+
+**Status: ⚠️ CHANGES REQUESTED** — one confirmed crash.
+
+### What I checked
+
+- `git show HEAD` — read the whole diff across `reports.py`, `recent.py`, the
+  two test files, and `TASKS.md`.
+- `uv run pytest` → **507 passed**, 1 warning. Matches the commit claim.
+- **The join reads the view, not the base table (§6).** The added join is
+  `LEFT JOIN active_transactions orig` (`kanakko/db/reports.py:139`), so a
+  soft-deleted original yields `NULL`/`NULL` rather than resurrecting deleted
+  text — the §6 bypass stays closed. Verified live (see below): after the
+  original is soft-deleted, the refund row's columns 11/12 come back
+  `(None, None)`.
+- **Neutral sign/tint and inherited category.** Read `recent.py:272-298`. A
+  `refund` takes `sign, amt_cls = "", "amt"` (no `+`, no `amt in`), and
+  `_category_known("refund", cat)` (`recent.py:50-59`) looks the category up in
+  `expense`'s set — the covering tests
+  (`test_recent_list_refund_row_is_neutral_not_income_tinted`,
+  `…_shows_its_inherited_category…`) assert the *effect*, not a string, and pass.
+- **Money stays `Decimal`.** The `amt_suffix` branch (`recent.py:288-293`) uses
+  `format_amount(refunded_so_far)` on the `Decimal` the DB returns; no `float`
+  enters. Fine.
+- **Reproduced the crash end-to-end** with a scratch integration test
+  (`migrate` → confirm expense → `create_refund` → `soft_delete_transaction`
+  the original → `recent_transactions` → `recent_list`). The DB step returned
+  `(None, None)` for columns 11/12 as expected, and `recent_list` then raised
+  `TypeError: unsupported format string passed to NoneType.__format__` at
+  `kanakko/webapp/recent.py:296`. Also reproduced at unit level by passing a
+  refund row with `refund_of_note=None, refund_of_occurred_on=None`. Scratch
+  test removed after confirming; not committed.
+
+### Findings
+
+**1 — `file: kanakko/webapp/recent.py:296` — a refund of a later-deleted expense
+crashes the entire recent list.** *(blocking)*
+
+The refund branch is:
+
+```python
+if type_ == "refund":
+    detail = f'Refund of "{html.escape(refund_of_note)}"' if refund_of_note else "Refund of an expense"
+    note_html = f'<div class="txn-note">{detail} · {refund_of_occurred_on:%d %b}</div>'
+```
+
+The `detail` text falls back when `refund_of_note` is `NULL`, but the date
+format `{refund_of_occurred_on:%d %b}` is applied unconditionally. When the
+refunded expense has since been soft-deleted, the `LEFT JOIN active_transactions
+orig` yields `NULL` for **both** columns (they always travel together — a live
+original has a non-null `occurred_on`), so `refund_of_occurred_on` is `None` and
+`format(None, "%d %b")` raises `TypeError`, aborting the whole `recent_list`
+render — the entire dashboard recent panel goes blank/500 for that household.
+
+- **Reachability:** `soft_delete_transaction` (`kanakko/db/edits.py:15`) deletes
+  any one live row by id with no cascade and no block on refunds, so an expense
+  that already has a refund can be deleted (or `/undo`'d) while the refund stays
+  live. Steps: log expense → refund part of it → delete the expense → open the
+  dashboard.
+- **Inputs → wrong result:** refund row `(…, "refund", …, refund_of_note=None,
+  refund_of_occurred_on=None)` → `TypeError`, not the intended "Refund of an
+  expense" fallback.
+- **The commit claims this case is handled** (message and `TASKS.md:1863`+: "a
+  soft-deleted original just falls back to 'Refund of an expense' instead of
+  surfacing deleted-row text") — but only the *text* falls back, not the date.
+  The guarding test `test_recent_list_refund_row_falls_back_when_the_original_has_no_note`
+  (`tests/test_webapp.py:485`) passes `refund_of_note=None` together with a
+  **real** `date(2026, 8, 10)`, so it exercises a note-less-but-live original and
+  never the both-`NULL` soft-deleted case. The guard does not fail for the reason
+  it exists.
+- **Suggested fix:** treat the missing original as a whole and don't format a
+  `None` date, e.g.
+
+  ```python
+  if type_ == "refund":
+      if refund_of_occurred_on is None:          # original soft-deleted
+          detail = "Refund of a deleted expense"
+      else:
+          name = f'"{html.escape(refund_of_note)}"' if refund_of_note else "an expense"
+          detail = f"Refund of {name} · {refund_of_occurred_on:%d %b}"
+      note_html = f'<div class="txn-note">{detail}</div>'
+  ```
+
+  Add a test with a refund row whose `refund_of_occurred_on` is `None` (the
+  soft-deleted-original case) asserting the row renders without raising.
+
+### Not blocking (noted, not required)
+
+- A `refund` row's **amount** is still an editable `<input>` in `_txn_panel`
+  (`recent.py:157-161`) even though the commit's own rationale for rendering the
+  *category* as text is that editing a refund independently "would desync the
+  category totals both rows feed into." The same desync argument applies to the
+  amount. This is **pre-existing** (not introduced by this commit) and outside
+  the task's scope, so it is not a finding here — flagging only so a later task
+  can decide whether a refund's amount should be read-only too.
+
+---
+
 ## 2026-08-16 — `3927149` refund panel offers what remains, not the full amount
 
 **Scope:** `_refund_panel` no longer pre-fills the amount input with the row's

@@ -1893,6 +1893,16 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       is never edited to match the code — this is the other case, a decision that
       was made and never written down, and leaving it is the drift CLAUDE.md calls
       the most expensive damage in this codebase.
+      **Blocked, 2026-08-16:** this task's own wording argues for an exception to
+      "never edit `docs/DECISIONS.md`", but neither `CLAUDE.md` nor this loop's
+      own final rules ("Never edit `docs/DECISIONS.md`. If the spec is wrong or
+      self-contradictory, add a task saying so.") carve out that exception — an
+      implementer iteration isn't the one positioned to decide the exception
+      applies here, since that decision is exactly what's supposed to make it
+      into the spec's own changelog/decision record, not a code commit's
+      say-so. Leaving unticked: a human should either edit §5 directly, or
+      explicitly amend the no-edit rule to name this exception before an
+      iteration acts on it.
 
 ### The manual test plan is missing three shipped features
 

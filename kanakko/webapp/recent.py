@@ -292,8 +292,15 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
                 else f" · {format_amount(refunded_so_far)} refunded"
             )
         if type_ == "refund":
-            detail = f'Refund of "{html.escape(refund_of_note)}"' if refund_of_note else "Refund of an expense"
-            note_html = f'<div class="txn-note">{detail} · {refund_of_occurred_on:%d %b}</div>'
+            if refund_of_occurred_on is None:
+                # The expense this refunds was soft-deleted after the fact —
+                # both joined columns come back NULL together (§6 bypass
+                # stays closed), so there is no date to show either.
+                detail = "Refund of a deleted expense"
+            else:
+                name = f'"{html.escape(refund_of_note)}"' if refund_of_note else "an expense"
+                detail = f"Refund of {name} · {refund_of_occurred_on:%d %b}"
+            note_html = f'<div class="txn-note">{detail}</div>'
         else:
             note_html = f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
         label = f"{sign}{format_amount(amount)} on {occurred_on:%d %b}"

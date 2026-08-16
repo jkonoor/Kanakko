@@ -21,7 +21,18 @@ row with a neutral (transfer-style) sign+tint, its inherited category checked
 against `expense`'s set, a "Refund of …" note lane, and the refunded expense
 gets a `· refunded` / `· ₹N refunded` suffix.
 
-**Status: ⚠️ CHANGES REQUESTED** — one confirmed crash.
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — finding 1
+(the crash) fixed in the follow-up commit.
+
+> **RESOLVED.** `kanakko/webapp/recent.py`'s refund branch now checks
+> `refund_of_occurred_on is None` before formatting it — a soft-deleted
+> original (both joined columns NULL together) renders "Refund of a deleted
+> expense" instead of raising. New guard
+> `test_recent_list_refund_row_falls_back_when_the_original_is_deleted`
+> (`tests/test_webapp.py`) passes a refund row with both `refund_of_note` and
+> `refund_of_occurred_on` as `None` and asserts the row renders without
+> raising — reverting the fix reproduces the exact `TypeError` this review
+> found, confirmed live before restoring it.
 
 ### What I checked
 

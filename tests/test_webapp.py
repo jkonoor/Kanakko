@@ -1023,6 +1023,16 @@ def test_recent_list_refund_row_falls_back_when_the_original_has_no_note():
     assert "Refund of an expense · 10 Aug" in out
 
 
+def test_recent_list_refund_row_falls_back_when_the_original_is_deleted():
+    """The expense a refund refers to can be soft-deleted afterwards — the
+    `LEFT JOIN active_transactions` then returns NULL for *both* the note and
+    the date, not just the note, so the date must not be blindly formatted."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              None, None)]
+    out = recent_list(rows)
+    assert "Refund of a deleted expense" in out
+
+
 def test_recent_list_refunded_expense_shows_what_remains():
     """The refunded expense closes the loop too (task 1823): a bare `−₹501.00`
     forces a reader to find the refund row and subtract by hand. Whole and

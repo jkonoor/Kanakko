@@ -23,6 +23,7 @@ from kanakko.webapp import (
     SHELL_HTML,
     InitDataError,
     Period,
+    account_balances_section,
     category_bars,
     current_month_ist,
     current_week_ist,
@@ -451,6 +452,35 @@ def test_dashboard_route_month_delta_needs_a_baseline(conn, monkeypatch):
     month_panel = body.split('<section class="panel" data-period="month"', 1)[1].split(
         "</section>", 1)[0]
     assert "▲ 67% vs last month" in month_panel  # (500-300)/300 = 66.7% → 67
+
+
+def test_dashboard_route_shows_account_balances(conn, monkeypatch):
+    """`GET /app/data` answers "how much do I have" (§18) — before this task
+    `account_balances` had exactly one consumer, the weekly reconcile job, and
+    nowhere a user could look."""
+    from kanakko.db import get_or_create_user, set_account_opening_balance
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    first, _ = current_month_ist()
+    _insert_txn(conn, uid, "500.00", "income", "Salary", first)  # mints the household
+    set_account_opening_balance(conn, uid, "credit", Decimal("2000"))
+
+    init_data = _sign(FIELDS)
+    resp = client.get("/app/data", headers={"Authorization": "tma " + init_data})
+    conn.rollback()
+
+    body = resp.text
+    accounts_section = body.split('<section class="accounts">', 1)[1].split(
+        "</section>", 1)[0]
+    assert "Bank" in accounts_section and "₹500.00" in accounts_section
+    # A fresh `credit` account owes what was reported, positively (§18's sign
+    # convention) — never the negative asset figure the ledger stores it as.
+    assert "Card" in accounts_section and "₹2,000.00" in accounts_section
+    assert "External" not in accounts_section
 
 
 def test_dashboard_route_rejects_a_forged_payload(conn, monkeypatch):
@@ -895,6 +925,28 @@ def test_recurring_list_paused_rule_shows_resume_and_paused_class():
 
 def test_recurring_list_empty_renders_nothing():
     assert recurring_list([]) == ""
+
+
+def test_account_balances_section_renders_a_row_per_account_and_hides_external():
+    """"How much do I have?" (§18) — one row per live account, credit already
+    signed as what is owed by `account_balances`'s own query, `external` never
+    shown (structural, same rule every other account list follows)."""
+    balances = [
+        {"account_id": 1, "name": "Bank", "kind": "spending",
+         "is_default": True, "balance": Decimal("15000.00")},
+        {"account_id": 2, "name": "Card", "kind": "credit",
+         "is_default": False, "balance": Decimal("2000.00")},
+        {"account_id": 3, "name": "External", "kind": "external",
+         "is_default": False, "balance": Decimal("0.00")},
+    ]
+    out = account_balances_section(balances)
+    assert "Bank" in out and "₹15,000.00" in out
+    assert "Card" in out and "₹2,000.00" in out
+    assert "External" not in out
+
+
+def test_account_balances_section_empty_renders_nothing():
+    assert account_balances_section([]) == ""
 
 
 def _insert_rule(conn, user_id, account_id, category="Food", amount="5000.00", day=5):

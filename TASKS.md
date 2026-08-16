@@ -1670,13 +1670,29 @@ than a guarantee.
       check (reverted it, watched the assertion fail on a live
       `class="edit-account"` in the output, restored it). `uv run pytest` →
       481 passed.
-- [ ] Show account balances in the dashboard. `account_balances` has exactly one
+- [x] Show account balances in the dashboard. `account_balances` has exactly one
       consumer — the weekly reconcile job — so "how much do I have", the headline
       number of the whole accounts feature, is answered once a week in a Telegram
       message and nowhere a user can look. **This is the one item in this phase
       that is a new surface rather than a fix**; drop it if the phase needs to be
       shorter. `credit` reads as what is owed (§18's sign convention, already in
       the query); `external` stays hidden as everywhere else.
+      Done: `webapp/render.py::account_balances_section` — one `.stat` row per
+      live, non-`external` account (`db.account_balances`'s own list, its
+      `credit` sign convention already baked into `balance`), reusing the
+      `.stat`/`.substats` markup and CSS the period panels already define, so no
+      new styling was needed. Rendered in `dashboard_html` right after the period
+      panels and before `recurring_list` — the flow figure, then the stock
+      figure, then automation, then detail. `mini_app_data` (`webapp/routes.py`)
+      queries `account_balances(conn, user_id)` alongside the other reads and
+      threads it through as the new `balances` param. Guard
+      (`test_account_balances_section_renders_a_row_per_account_and_hides_external`)
+      verified red without the `external` filter — briefly changed it to
+      `list(balances)`, watched "External" leak into the output, restored it. A
+      route-level test (`test_dashboard_route_shows_account_balances`) drives the
+      real route against Postgres: the default account's income and a fresh
+      `credit` account's opening balance both show, positively signed for the
+      card. `uv run pytest` → 484 passed.
 
 ### The row editor, reviewed against the live UI (2026-08-16)
 

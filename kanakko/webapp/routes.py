@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from kanakko.categories import ALL_CATEGORIES
 from kanakko.db import (
     EDITABLE_TRANSACTION_FIELDS,
+    account_balances,
     connect,
     edit_transaction_field,
     find_user,
@@ -131,6 +132,7 @@ def mini_app_data(request: Request) -> str:
         recent = recent_transactions(conn, user_id)
         accounts = household_accounts(conn, user_id)
         rules = list_recurring_rules(conn, user_id)
+        balances = account_balances(conn, user_id)
     return dashboard_html(
         [
             Period("week", "Week", "this week", w_income, w_expenses, w_top,
@@ -140,7 +142,7 @@ def mini_app_data(request: Request) -> str:
             Period("all", "All", "all time", a_income, a_expenses, a_top),
         ],
         recent,
-        accounts=accounts, rules=rules,
+        accounts=accounts, rules=rules, balances=balances,
     )
 
 

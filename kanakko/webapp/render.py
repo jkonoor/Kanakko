@@ -108,6 +108,29 @@ def category_bars(categories: list[tuple[str, Decimal]], total: Decimal) -> str:
     return '<h2>Spending by category</h2>' + "".join(rows)
 
 
+def account_balances_section(balances: list[dict]) -> str:
+    """"How much do I have?" — one row per live account (§18).
+
+    `balances` is `db.account_balances`'s per-account list
+    (`account_id`, `name`, `kind`, `is_default`, `balance`). `external` is
+    structural and hidden here as it is everywhere else a household's accounts
+    are listed (`db.household_accounts` already excludes it). The `credit`
+    sign convention — a card reads as what is *owed* — is already baked into
+    `balance` by the query, so this only formats and escapes the name; nothing
+    is tinted, since a balance is neither income nor an expense. An
+    external-only household (impossible today — every household gets a
+    default `spending` account) would render nothing.
+    """
+    rows = [b for b in balances if b["kind"] != "external"]
+    if not rows:
+        return ""
+    stats = "".join(_stat(html.escape(b["name"]), b["balance"]) for b in rows)
+    return (
+        '<section class="accounts"><h2>Accounts</h2>'
+        f'<div class="substats">{stats}</div></section>'
+    )
+
+
 def recurring_list(rules: list[dict]) -> str:
     """The recurring-rules list: pause/resume and delete per rule (§13, §16, §18).
 
@@ -154,6 +177,7 @@ def dashboard_html(
     selected: str = "month",
     accounts: list[tuple[int, str]] = (),
     rules: list[dict] = (),
+    balances: list[dict] = (),
 ) -> str:
     """The dashboard fragment: a period switcher, one panel per period, the list (§13).
 
@@ -164,12 +188,16 @@ def dashboard_html(
     stays Python + CSS with no charting library (§13), and `recent` is the
     recent-transactions list with per-row delete and edit; `accounts` is the
     household's live accounts (§18) the row editor's account `<select>` offers.
-    `rules` is the household's recurring rules (§18) — `recurring_list`'s pause/
-    resume/delete section, rendered above the recent list since a standing
-    instruction changes less often than a logged transaction but still belongs
-    on the one screen. Formatted amounts and escaped labels / category names /
-    notes are the only things interpolated — the note is the only user-typed
-    string and `recent_list` escapes it, so nothing reaches the markup unescaped.
+    `balances` is `db.account_balances`'s per-account list — `account_balances_section`
+    is the "how much do I have" figure §18 names as the accounts feature's own
+    headline, rendered right after the flow panels since it answers the next
+    question a spend figure raises. `rules` is the household's recurring rules
+    (§18) — `recurring_list`'s pause/resume/delete section, rendered above the
+    recent list since a standing instruction changes less often than a logged
+    transaction but still belongs on the one screen. Formatted amounts and
+    escaped labels / category names / notes are the only things interpolated —
+    the note is the only user-typed string and `recent_list` escapes it, so
+    nothing reaches the markup unescaped.
 
     Why a switcher rather than three stacked sections: the old layout rendered
     Net/Income/Expenses three times over, nine near-identical rows for three
@@ -191,6 +219,7 @@ def dashboard_html(
     return (
         f'<div class="switch" role="tablist" aria-label="Time period">{tabs}</div>'
         + panels
+        + account_balances_section(balances)
         + recurring_list(rules)
         + recent_list(recent, accounts)
     )

@@ -12,6 +12,70 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `594745e` add manual test rows for dashboard editing and opening balances
+
+**Scope:** docs-only. `TASKS.md` ticks the "dashboard editing and opening
+balances" row; `docs/TESTING.md` gains §3c (row editor), 5a.19–20 (edit audit
+rows), and 9.19–22 (single-account behaviour + `/account` wording).
+
+**Status: ✅ DONE** — no blocking issues.
+
+For a docs-only commit the real risk is a test row that *asserts the wrong
+behaviour*: a tester trusts it, and either files a false finding or (worse)
+marks a real bug "passed". So I verified every code claim the new rows make
+against source rather than the prose. All held.
+
+### What I checked (and what it returned)
+
+- `uv run pytest -q` → **508 passed, 1 warning in 21.12s**. Matches the commit
+  message; docs change touches no test.
+- **9.20 / parse.py gating** (the load-bearing claim). `parse.py:141`
+  (`parse_schema`) gates `account`, `type=transfer`, `from_account`,
+  `to_account` **and** `new_locked_account` on `if accounts and len(accounts) > 1`;
+  `parse.py:210` (`build_request`) gates `_ACCOUNT_GUIDANCE` on the same. So a
+  single-account household's schema and prompt carry none of the account
+  vocabulary — the "mint a locked Credit card account" misfile named in the task
+  genuinely cannot arise through that path. Row correctly reframes 9.20 as
+  "record what the model actually does" rather than asserting a pass — accurate.
+- **9.19 / recent.py panel**. `recent.py:177–181`: the Account field renders
+  only when `type_ != "transfer" and len(accounts) > 1`. Single account → no
+  field (not a one-option dropdown). Correct. Same line backs 3c.4/3c.5's
+  transfer field-set claim (transfer also drops Category at `recent.py:162`).
+- **9.21 / 9.22 wording**. `account.py:180` `verb = "owe" if kind == "credit" else "have"`,
+  emitted as `"Got it — {name} ({kind}), you {verb} {amount}."` — "you owe" for
+  credit, "you have" for spending, exactly as the rows quote.
+- **5a.19–20 / edit audit shape**. `edits.py:203` writes `action="edit"`,
+  `before={field: old}`, `after={field: new}`; `routes.py:329–330` passes
+  `source="miniapp", update_id=None`. `EDITABLE_TRANSACTION_FIELDS`
+  (`edits.py:123`) = `{amount, occurred_on, note, account_id}`, so the row's
+  `{"amount": …}` / `{"occurred_on": …}` / `{"account_id": …}` before/after keys
+  are the literal field names. Migration `013_transaction_events_edit_action.sql`
+  adds `'edit'` to the CHECK constraint. All correct; the 5a.6/5a.7 rows it
+  cross-references exist and match.
+- **3c.2 / 3c.8 reload + toast strings**. `shell.py:227–229` `mutate()` ends in
+  `.finally(load)`, so every edit reloads and the panel collapses — 3c.2's
+  "closes after every edit, not a lost edit" is right. Offline: `.catch(showToast)`
+  fires `showToast` ("Couldn't save — try again.", `shell.py:197`) *and*
+  `.finally(load)` runs, whose own fetch fails → `app.textContent = 'Could not
+  load dashboard.'` (`shell.py:191`). Both exact strings in 3c.8 verified; the
+  "whole app area reverts, not just the field" narrative is accurate.
+- **3c.6/3c.7 undo toast**. `showUndoToast` (`shell.py:207`) renders
+  `'Deleted ' + amount + ' · <button>Undo</button>'` with a 5000ms auto-dismiss.
+  Matches.
+
+### Minor (non-blocking)
+
+- `docs/TESTING.md` 3c.1 says "Tap **any** row … Delete/**Refund** as labelled
+  buttons", but Refund only renders for `type_ == "expense"` (`recent.py:196`).
+  A tester who taps a transfer/income/refund row sees only Delete and could mark
+  3c.1 failed. Worth narrowing to "an expense row" for the Refund half. Cosmetic,
+  not a correctness issue with the code.
+
+Every embedded code-behaviour claim in the new rows matches source; nothing to
+fix before the next iteration.
+
+---
+
 ## 2026-08-16 — `4a57dbc` add manual test rows for recurring rules
 
 **Scope:** docs-only — `TASKS.md` ticks the "manual test rows for recurring

@@ -1654,7 +1654,7 @@ than a guarantee.
 
 ### Defects found after the Phase 10 merge
 
-- [ ] Gate the dashboard's per-row account dropdown the way the confirm card is
+- [x] Gate the dashboard's per-row account dropdown the way the confirm card is
       gated. `webapp/recent.py::_row_editor` renders `_account_select` for every
       non-transfer row with no count check, so a household with one account gets a
       `<select>` holding a single option — a dead control that reads as a failed
@@ -1662,6 +1662,14 @@ than a guarantee.
       rule (`show_accounts = bool(accounts) and len(accounts) > 1`); §18's
       "accounts become visible only when a second one exists" applies to both
       surfaces, and right now only one obeys it.
+      Done: `_edit_panel` (`kanakko/webapp/recent.py`) now only calls
+      `_account_select` when `type_ != "transfer" and len(accounts) > 1` — the
+      same test `confirm.py:126` already applies. Guard
+      `test_recent_list_edit_panel_hides_account_select_for_a_single_account`
+      (`tests/test_webapp.py`) verified red without the `len(accounts) > 1`
+      check (reverted it, watched the assertion fail on a live
+      `class="edit-account"` in the output, restored it). `uv run pytest` →
+      481 passed.
 - [ ] Show account balances in the dashboard. `account_balances` has exactly one
       consumer — the weekly reconcile job — so "how much do I have", the headline
       number of the whole accounts feature, is answered once a week in a Telegram

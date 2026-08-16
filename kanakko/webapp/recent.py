@@ -47,8 +47,11 @@ def _account_select(txn_id: int, accounts: list[tuple[int, str]], current: int |
     pre-selected. `data-id` carries the `txn_id`, `data-edit-field="account_id"`
     is the shared hook `shell.py`'s change handler dispatches on to build the
     `POST /app/edit` body — the same attribute every other edit control in this
-    row carries. Only called for a non-`transfer` row: a transfer names two ends,
-    not one (§18), so it has no single account to reassign here.
+    row carries. Only called for a non-`transfer` row with more than one live
+    account: a transfer names two ends, not one (§18), so it has no single
+    account to reassign here, and a single-account household has nothing to
+    choose between — the same `show_accounts` gate `confirm.py` applies to the
+    confirm card.
     """
     opts = "".join(
         f'<option value="{account_id}"{" selected" if account_id == current else ""}>'
@@ -88,7 +91,9 @@ def _edit_panel(
     ₹-and-commas form, since this is the value a number input edits, not displays.
     """
     account_field = (
-        _account_select(txn_id, accounts, account_id) if type_ != "transfer" else ""
+        _account_select(txn_id, accounts, account_id)
+        if type_ != "transfer" and len(accounts) > 1
+        else ""
     )
     return (
         f'<div class="txn-edit" hidden data-id="{txn_id}">'

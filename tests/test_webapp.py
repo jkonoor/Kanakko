@@ -824,6 +824,17 @@ def test_recent_list_renders_edit_toggle_and_hidden_panel():
     assert '<option value="4">Wallet</option>' in out
 
 
+def test_recent_list_edit_panel_hides_account_select_for_a_single_account():
+    """A household with one account gets no account `<select>` in the row editor
+    — a single-option dropdown is a dead control, not a real choice. Mirrors
+    `confirm.py`'s `show_accounts = bool(accounts) and len(accounts) > 1`
+    (§18): the same rule applies wherever an account picker can appear."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3)]
+    accounts = [(3, "Bank")]
+    out = recent_list(rows, accounts)
+    assert "edit-account" not in out
+
+
 def test_recent_list_transfer_edit_panel_has_no_account_select():
     """A transfer's amount/date/note are still editable, but it has no single
     account to reassign — it names two ends, not one (§18)."""

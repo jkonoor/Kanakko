@@ -12,6 +12,77 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `5e90ba8` rebuild the dashboard row (actions out, category in, labelled)
+
+**Scope:** Task 1704. `kanakko/webapp/recent.py`, `kanakko/webapp/shell.py`,
+`tests/test_webapp.py`. The collapsed recent-transactions row was three
+always-visible action glyphs (✕/✎/↩), each pinned to its own 44px grid lane, so
+every expense row was ≥132px tall. Rebuilt so the collapsed row is one
+`.txn-head` button showing data only (date · category-as-text, amount, note),
+tapping it toggles a sibling `.txn-panel` holding the five labelled correction
+fields (Amount/Category/Date/Account/Note) and, below a rule, labelled
+Delete/Refund. Pure presentation — no money math, timezone, or SQL touched.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run, actual output)
+
+- `git show HEAD` — read the full diff for all four files.
+- `uv run pytest -q` → **487 passed**, 1 warning (pre-existing starlette/httpx
+  deprecation). Matches the commit message.
+- `uv run pytest tests/test_webapp.py -q` → **98 passed**.
+- `uv run ruff check` on the three changed source files → **All checks passed!**
+- Exercised `recent_list` directly (`uv run python`) across row types to confirm
+  behaviour rather than trust the tests:
+  - **transfer** `(…,'transfer',…,'Bank','SIP',None)` → head shows `Bank → SIP`,
+    **no** `Category</span>` label, **no** account field, **no** `refund-toggle`,
+    Delete present. Correct: a transfer has no category and no single account to
+    reassign (§18).
+  - **income** `(…,'income','Salary',…)` → **no** `refund-toggle` (only expenses
+    are refundable, §18/task 1082); amount carries `amt in` accent class.
+  - **expense, null category** → collapsed head reads `Uncategorised`, panel
+    still carries `cat-select`. Matches the panel's own null-category handling.
+- Confirmed money/format invariants preserved: the editable amount input still
+  emits the plain `Decimal` string (`value="50.00"`), display amounts still go
+  through `format_amount`; no `float` introduced.
+- Confirmed the note is still `html.escape`d on the summary line and in the note
+  input — stored-XSS guard intact.
+- `grep _edit_panel|txn-edit|edit-toggle` — no *live* code still references the
+  removed markup; only TASKS.md/REVIEWS.md history and the new test's
+  `"edit-toggle" not in out` negative assertion. The surviving
+  `test_recent_list_edit_panel_hides_account_select_for_a_single_account` was
+  updated to the new panel and passes.
+
+### Guards — do they fail for the right reason?
+
+- `test_collapsed_row_height_no_longer_depends_on_which_actions_it_has` replaces
+  the old grid-placement test. It pins the *mechanism* (no `grid-row` anywhere in
+  the CSS; `.txn-head` has a bounded `min-height: 44px` and no fixed `height:`;
+  neither a note-carrying nor a note-less collapsed row exposes `.del`/
+  `.refund-toggle`). This is the honest shape the review guide asks for — it does
+  not claim to assert a rendered pixel height, which is explicitly left to eyes on
+  a phone. Reintroducing a fixed-lane rule reddens it.
+- `test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel`
+  partitions on `class="txn-panel"` and asserts the destructive buttons are absent
+  from the collapsed head and present (as words `>Delete<`/`>Refund<`) in the
+  panel — reddens if either button leaks back into the always-visible row, which
+  is the exact regression that caused the height bug.
+- Field order/label and aria-expanded guards are structural and would fail if the
+  labels or ordering regressed.
+
+### Non-blocking observation (not a finding)
+
+- `recent.py:243` nests the note `<div class="txn-note">` inside the
+  `<button class="txn-head">`. A block-level `<div>` inside a `<button>` is
+  invalid HTML (button's content model is phrasing content). Every current
+  browser tolerates it and renders the note below the flex summary as intended,
+  and the button's `aria-label` carries the full announcement so no assistive
+  tech reads the nested div — so there is no observed breakage. If it ever wants
+  to be strictly valid, `<span class="txn-note">` with `display:block` would do
+  the same job. Not blocking.
+
+---
+
 ## 2026-08-16 — `63eaa67` show account balances in the dashboard
 
 **Scope:** Adds `account_balances_section` (`kanakko/webapp/render.py`) — one

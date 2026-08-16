@@ -834,17 +834,25 @@ def test_category_route_rejects_a_stale_init_data(conn, monkeypatch):
 # --- Per-row field edit from the dashboard: amount, date, note, account (§13, §18, task 974) ---
 
 
-def test_recent_list_renders_edit_toggle_and_hidden_panel():
-    """Each row carries a hidden per-row editor — date, amount, note, and (for a
-    non-transfer row) an account `<select>` naming the `txn_id` `POST /app/edit`
-    needs, current values pre-filled (§13, §18)."""
+def test_recent_list_renders_a_labelled_editor_panel_reached_by_tapping_the_row():
+    """The row editor is now reached by tapping the collapsed row (`.txn-head`),
+    not a separate ✎ glyph button (task 1704) — every field carries a visible
+    text label, not just an `aria-label`, and appears in consequence order
+    (§5: category is the most-often-wrong field) — Amount, Category, Date,
+    Account, Note — current values pre-filled."""
     rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3)]
     accounts = [(3, "Bank"), (4, "Wallet")]
     out = recent_list(rows, accounts)
-    assert 'class="edit-toggle" data-id="7"' in out
-    assert 'class="txn-edit" hidden data-id="7"' in out
+    assert 'class="txn-head" data-id="7"' in out
+    assert 'class="txn-panel" hidden data-id="7"' in out
+    assert "edit-toggle" not in out  # the old separate toggle button is gone
+    order = [out.index(marker) for marker in (
+        "Amount (₹)</span>", "Category</span>", "Date</span>", "Account</span>", "Note</span>",
+    )]
+    assert order == sorted(order)
     assert 'class="edit-date" data-id="7" data-edit-field="occurred_on"' in out
     assert 'value="2026-08-06"' in out
+    assert "06 Aug 2026" in out  # human-readable date beside the native input
     assert 'class="edit-amount" data-id="7" data-edit-field="amount"' in out
     assert 'value="50.00"' in out
     assert 'class="edit-note" data-id="7" data-edit-field="note"' in out
@@ -852,6 +860,43 @@ def test_recent_list_renders_edit_toggle_and_hidden_panel():
     assert 'class="edit-account" data-id="7" data-edit-field="account_id"' in out
     assert '<option value="3" selected>Bank</option>' in out
     assert '<option value="4">Wallet</option>' in out
+
+
+def test_recent_list_header_shows_category_as_text_not_a_dropdown():
+    """The collapsed row is data only — the category `<select>` now lives inside
+    the hidden panel (task 1704). Before this, the picker's own chevron sat
+    beside a row that also expands, two chevron-ish affordances for one
+    meaning."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    out = recent_list(rows)
+    head, _, panel = out.partition('class="txn-panel"')
+    assert "Food" in head
+    assert "cat-select" not in head
+    assert "cat-select" in panel
+
+
+def test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel():
+    """Delete and Refund are words, not glyphs, and reachable only once the row
+    is expanded (task 1704) — deleting a row is now two deliberate taps
+    (expand, then Delete), not one tap on a ✕ that read as "close" on a card
+    that also expands. Reddens if either button reappears in the always-visible
+    collapsed part of the row, which is the bug that made every expense row at
+    least 132px tall."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    out = recent_list(rows)
+    head, _, panel = out.partition('class="txn-panel"')
+    assert 'class="del"' not in head and 'class="refund-toggle"' not in head
+    assert 'class="del" data-id="7"' in panel and ">Delete<" in panel
+    assert 'class="refund-toggle" data-id="7"' in panel and ">Refund<" in panel
+
+
+def test_recent_list_head_button_carries_aria_expanded():
+    """`aria-expanded` names the row's own state so a screen reader announces
+    whether tapping it opens or closes the panel; `shell.py`'s click handler
+    flips it alongside `.txn-panel[hidden]`."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1)]
+    out = recent_list(rows)
+    assert 'aria-expanded="false"' in out
 
 
 def test_recent_list_edit_panel_hides_account_select_for_a_single_account():
@@ -1686,34 +1731,30 @@ def test_refund_route_logs_the_money_mutation(conn, monkeypatch):
     conn.rollback()
 
 
-def test_txn_row_places_note_and_delete():
-    """A transaction row is a grid: note on its own row, delete pinned to row 1 (§13).
+def test_collapsed_row_height_no_longer_depends_on_which_actions_it_has():
+    """Before task 1704, `.del`/`.edit-toggle`/`.refund-toggle` were each pinned to
+    their own 44px grid row unconditionally, so every expense row was at least
+    132px tall for content needing 44-64px, whether or not it carried a note.
 
-    What this catches, and what it can't. The original CSS made `.txn` a wrapping
-    flex row with `.txn-note` at `flex-basis:100%`; because `.del` is a sibling
-    *after* the note, it was pushed onto a third line and the row's text collided
-    with itself — every row carrying a note was unreadable, while the note-less
-    rows looked fine, which is why it survived review. That is a rendered-layout
-    bug: no headless assertion can see it. Verified by rendering the real markup
-    in Chrome at 390px in both themes, before and after.
-
-    So this guard pins the *mechanism* that fixes it — grid placement — rather
-    than claiming to check the appearance. Reverting `.txn` to the wrapping flex
-    layout reddens it. Anything subtler than that still needs eyes on a phone.
+    What this catches, and what it can't. A rendered-pixel-height comparison is a
+    rendered-layout fact: no headless assertion can see it (verified by rendering
+    the real markup in Chrome at 390px in both themes, before and after). So this
+    guard pins the *mechanism* instead — the always-visible part of a row is one
+    button (`.txn-head`) with a single bounded `min-height`, and no CSS rule gives
+    an action button a fixed `grid-row` lane any more, which is what used to force
+    the height regardless of content. Reddens if that fixed-lane CSS returns.
     """
-    def rule(selector: str) -> str:
-        """The body of the rule that *starts* a line with `selector`.
+    assert "grid-row" not in SHELL_HTML
+    head_rule = SHELL_HTML.split("\n.txn-head {", 1)[1].split("}", 1)[0]
+    assert "min-height: 44px" in head_rule
+    assert "height:" not in head_rule.replace("min-height:", "")  # bounded, not fixed
 
-        Anchored to the newline on purpose: `.txn-note` also appears in the shared
-        `.label, .txn-note { color: ... }` rule, and an unanchored search finds
-        that colour declaration instead of the layout one — which is how the first
-        version of this test passed the wrong string and failed against correct CSS.
-        """
-        return SHELL_HTML.split(f"\n{selector} {{", 1)[1].split("}", 1)[0]
-
-    assert "display: grid" in rule(".txn")
-    assert "grid-row: 1" in rule(".del")  # delete button stays on the first row
-    assert "grid-column: 1" in rule(".txn-note")  # note gets a row of its own
+    note = recent_list([(1, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)])
+    no_note = recent_list([(2, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1)])
+    # Neither collapsed row carries an action button — both are data-only, so
+    # neither pays the old fixed-lane height regardless of the note.
+    for out in (note.split('class="txn-panel"')[0], no_note.split('class="txn-panel"')[0]):
+        assert 'class="del"' not in out and 'class="refund-toggle"' not in out
 
 
 def test_shell_reloads_when_the_mini_app_is_reopened():

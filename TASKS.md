@@ -1701,7 +1701,7 @@ From four screenshots of a real row plus a read of `webapp/recent.py` and the
 carries a real `aria-label` ("Delete ₹500.00 on 16 Aug"), so screen readers are
 fine — it is **sighted** users who get five unlabelled grey boxes.
 
-- [ ] Rebuild the row: actions out of the collapsed row, category in, fields
+- [x] Rebuild the row: actions out of the collapsed row, category in, fields
       labelled and reordered. One task, not five — they are the same markup, and
       doing them separately means restyling it four times.
       **Why the collapsed row changes:** `.del` is grid-row 1, `.edit-toggle` row
@@ -1738,6 +1738,36 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       lands first and this rebuild must not undo it.
       Guard: a row with a note and one with none both render at the same height,
       and that height is well under 132px.
+      Done: `kanakko/webapp/recent.py` — the collapsed row is one `<button
+      class="txn-head">` showing date, category (plain text now — a `<select>`
+      never lived in the always-visible part again), amount and the note
+      beneath; tapping it toggles the sibling `.txn-panel` (`aria-expanded`
+      flipped in `shell.py`'s click handler, replacing the old `.edit-toggle`
+      glyph). `_txn_panel` renders the five fields via a new `_field(label,
+      control)` helper — Amount (labelled "Amount (₹)"), Category (the existing
+      `_category_select`, only for a non-transfer row), Date (with a
+      `.date-human` "16 Aug 2026" span beside the native input), Account (only
+      `type_ != "transfer" and len(accounts) > 1` — the gate from the task above,
+      unchanged), Note — then a `<hr class="txn-rule">` and labelled
+      Delete/Refund buttons (`>Delete<`, `>Refund<`, no glyphs); Refund still
+      reveals `_refund_panel` (its full-amount default is the next task).
+      `shell.py`'s CSS dropped the three `grid-row`-pinned 44px lanes entirely
+      (`.del`/`.edit-toggle`/`.refund-toggle` no longer exist as always-visible
+      grid children) in favour of one `.txn-head { min-height: 44px }` button —
+      the mechanism that bounded every row to 132px regardless of content is
+      gone, not hidden. Guards, all verified red-without-fix, green-with-fix:
+      `test_recent_list_renders_a_labelled_editor_panel_reached_by_tapping_the_row`
+      (field order + labels + the human date), `test_recent_list_header_shows_category_as_text_not_a_dropdown`,
+      `test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel`
+      (reddens if either button reappears in the collapsed head),
+      `test_recent_list_head_button_carries_aria_expanded`, and
+      `test_collapsed_row_height_no_longer_depends_on_which_actions_it_has`
+      (replaces `test_txn_row_places_note_and_delete` — pins the absence of any
+      `grid-row` rule and that neither a note-carrying nor a note-less collapsed
+      row exposes `.del`/`.refund-toggle`, the same mechanism-pinning shape the
+      test it replaces used, per its own note that a rendered pixel height needs
+      eyes on a phone, not a headless assertion). `uv run pytest` → 487 passed,
+      `ruff check` clean.
 - [ ] Undo a delete, rather than confirm it. `.del` fires `POST /app/delete`
       immediately — no confirmation, and the ✕ glyph at a card's top-right is the
       universal *dismiss* symbol on a card that also expands, so "close" is a

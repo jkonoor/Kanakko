@@ -1,12 +1,13 @@
-"""`/account`: the onboarding ask for a credit card or locked savings (§18).
+"""`/account`: set a spending, credit or locked account's opening balance (§18).
 
-`WELCOME` points a new user at this command rather than an interactive wizard —
-everyday spending already has a default account (minted by
-`create_household_of_one`), so the command only ever adds the other two kinds.
-The guard this proves: a bad kind or a bad amount refuses and stores nothing, a
-good call sets the signed opening balance (credit negated — "how much you owe"
-reads back as what is owed, never what is in the account), and a repeat call
-corrects the same account rather than minting a second one.
+`WELCOME` points a new user at this command rather than an interactive wizard.
+`credit`/`locked` mint a fixed-named account; any other first word (with an
+amount after it) sets — or on first use, creates — a spending account by that
+name. The guard this proves: a bad amount refuses and stores nothing, a good
+call sets the signed opening balance (credit negated — "how much you owe" reads
+back as what is owed, never what is in the account), and a repeat call corrects
+the same account rather than minting a second one — even across two
+same-kind, differently-named spending accounts (Bank vs Cash).
 """
 
 from decimal import Decimal
@@ -51,14 +52,36 @@ def test_bare_command_is_a_usage_hint_and_stores_nothing(conn, monkeypatch):
     conn.rollback()
 
 
-def test_unknown_kind_is_refused(conn, monkeypatch):
+def test_a_name_that_is_neither_credit_nor_locked_sets_a_spending_account(conn, monkeypatch):
+    """`/account cash 500` sets a spending account named "Cash", creating it on
+    first use — the same command that onboards `credit`/`locked` now covers
+    "the rest" too (§18), keyed by name so a second spending account never
+    collides with the first (see the collision guard in `test_accounts.py`).
+    """
     migrate(conn)
     user_id = _seed(conn)
     sent = _stub_send(monkeypatch)
     result = handle_account(conn, _account("/account cash 500"))
-    assert result is None
-    assert sent == [(USER_TG, account_command.ACCOUNT_BAD_KIND)]
+    assert result["kind"] == "spending" and result["name"] == "cash"
+    assert sent == [(USER_TG, "Got it — cash (spending), you have ₹500.00.")]
+    balances = {a["name"]: a for a in account_balances(conn, user_id)}
+    assert balances["cash"]["balance"] == Decimal("500.00")
     assert {a["kind"] for a in account_balances(conn, user_id)} == {"spending", "external"}
+    conn.rollback()
+
+
+def test_a_spending_account_matched_case_insensitively_updates_not_duplicates(conn, monkeypatch):
+    """`/account bank 52000` finds the household's existing default "Bank"
+    account by name (case-insensitively) and updates it, rather than minting
+    a second spending account."""
+    migrate(conn)
+    user_id = _seed(conn)
+    _stub_send(monkeypatch)
+    result = handle_account(conn, _account("/account bank 52000"))
+    balances = {a["name"]: a for a in account_balances(conn, user_id)}
+    assert result["account_id"] == balances["Bank"]["account_id"]
+    assert balances["Bank"]["balance"] == Decimal("52000.00")
+    assert len([a for a in balances.values() if a["kind"] == "spending"]) == 1
     conn.rollback()
 
 
@@ -222,24 +245,6 @@ def test_year_suffixed_locked_account_name_is_reachable_as_a_query(conn, monkeyp
     assert result is not None and result["name"] == "Goa 2026"
     assert sent == [(USER_TG,
                      "Goa 2026 — put in ₹0.00, got back ₹0.00, started with ₹500.00.")]
-    conn.rollback()
-
-
-def test_two_word_bad_kind_attempt_is_still_refused_as_a_bad_kind(conn, monkeypatch):
-    """F1's fix must not swallow the existing "unknown kind" refusal: a
-    two-word attempt whose second word looks like an amount ("cash 500") is a
-    botched onboarding call, not a query for an account literally named
-    "cash 500".
-    """
-    migrate(conn)
-    user_id = _seed(conn)
-    sent = _stub_send(monkeypatch)
-
-    result = handle_account(conn, _account("/account cash 500"))
-
-    assert result is None
-    assert sent == [(USER_TG, account_command.ACCOUNT_BAD_KIND)]
-    assert {a["kind"] for a in account_balances(conn, user_id)} == {"spending", "external"}
     conn.rollback()
 
 

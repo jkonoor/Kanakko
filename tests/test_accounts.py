@@ -184,6 +184,30 @@ def test_set_account_opening_balance_negates_credit_and_updates_on_a_repeat(conn
     conn.rollback()
 
 
+def test_set_account_opening_balance_keys_on_name_not_just_kind(conn):
+    """Two `spending` accounts (Bank, Cash) must not collide (Phase 11 warning):
+    a lookup keyed on `kind` alone can't tell them apart, so setting Cash's
+    opening balance would find and overwrite whichever `spending` row
+    `fetchone()` happened to return first — here, Bank's. Keying the lookup on
+    `kind` *and* `name` together is what stops that. Reddens if the `WHERE`
+    clause in `set_account_opening_balance` drops the name filter.
+    """
+    migrate(conn)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (telegram_user_id) VALUES (7303) RETURNING user_id")
+        (uid,) = cur.fetchone()
+    create_household_of_one(conn, uid)
+
+    bank = set_account_opening_balance(conn, uid, "spending", parse_amount("52000"), name="Bank")
+    set_account_opening_balance(conn, uid, "spending", parse_amount("2000"), name="Cash")
+
+    balances = {a["account_id"]: a for a in account_balances(conn, uid)}
+    assert balances[bank["account_id"]]["name"] == "Bank"
+    assert balances[bank["account_id"]]["balance"] == Decimal("52000.00")
+    assert len([a for a in balances.values() if a["kind"] == "spending"]) == 2
+    conn.rollback()
+
+
 def test_list_accounts_excludes_external_and_orders_default_first(conn):
     """`list_accounts` feeds the parse schema's `account` enum (§18).
 

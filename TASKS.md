@@ -1606,7 +1606,7 @@ than a guarantee.
 
 ### Opening balances
 
-- [ ] Let `/account` set a **spending** account's opening balance —
+- [x] Let `/account` set a **spending** account's opening balance —
       `/account bank 52000`, `/account cash 2000` — creating Cash on first use.
       §18 says the onboarding ask covers "an opening balance for each"; what
       shipped covers only `credit` and `locked`, so a household's bank sits at ₹0
@@ -1617,6 +1617,23 @@ than a guarantee.
       "what's already in it") and their sign handling; a spending account is asked
       plainly what is in it. Guard: Bank 52,000 then Cash 2,000 leaves Bank at
       52,000, and it reddens if the lookup still keys on kind.
+      Done: `set_account_opening_balance` (`kanakko/db/accounts.py`) gains a
+      `name` param and now matches `WHERE kind = %s AND lower(name) = lower(%s)`
+      — kind *and* name together, not kind alone (name-only would trade the
+      Bank/Cash collision for a new one: a spending account named "card" would
+      match the fixed `credit` account "Card", since `accounts.name` has no
+      uniqueness constraint). `credit`/`locked` keep passing no `name` and get
+      their fixed onboarding name as before, so every existing call site and test
+      is unchanged. `handle_account` (`kanakko/commands/account.py`): a first
+      word that isn't `credit`/`locked` and doesn't match a live `locked`
+      account, followed by a word that parses as an amount, now sets that
+      spending account (creating it on first use) instead of refusing with
+      `ACCOUNT_BAD_KIND`, which is now unreachable and removed along with its
+      test. `ACCOUNT_USAGE` reworded to mention spending accounts. Guard
+      (`test_set_account_opening_balance_keys_on_name_not_just_kind` in
+      `tests/test_accounts.py`) verified red without the name filter — reverted
+      the `WHERE` clause to kind-only, watched it fail, restored it. `uv run
+      pytest` → 479 passed.
 - [ ] Point at it once from the welcome message — one line, e.g. *"Want your
       balance to be right? Tell me what you have: `/account bank 52000`."*
       Deliberately **not** an onboarding questionnaire: a multi-step "which

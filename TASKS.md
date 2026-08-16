@@ -1555,7 +1555,7 @@ the implementation narrowed, or a defect found after the merge.
 
 ### First — the dashboard fails silently on every write
 
-- [ ] Surface a failed mutation instead of swallowing it. Every write in
+- [x] Surface a failed mutation instead of swallowing it. Every write in
       `webapp/shell.py` ends `\.then(r => { if (r.ok) load(); })` — edit, delete,
       refund, category, recurring pause, recurring delete, **six copies, none with
       an `else` and none with a `.catch`**. So a 4xx, a 5xx, a dropped connection
@@ -1572,6 +1572,15 @@ the implementation narrowed, or a defect found after the merge.
       definition per thing). Guard: stub a route to 500 and assert the value on
       screen returns to the stored one *and* the toast appears — a test that only
       checks the toast passes on a version that leaves the wrong number showing.
+      Done: added `mutate(url, body)` in `webapp/shell.py`, replacing all six
+      inlined fetches; it always `.finally(load)`s and calls `showToast()` (a
+      fixed-position `#toast` div) on `!r.ok` or a thrown/network error. No
+      DOM/browser test harness exists in this repo (the existing shell.py tests
+      are all structural, per `test_txn_row_places_note_and_delete`'s own note),
+      so the guard (`test_a_failed_mutation_is_surfaced_not_swallowed`) pins the
+      mechanism — `load()` unconditional in `.finally`, the toast strictly on
+      failure, all six call sites routed through `mutate(` — rather than driving
+      a real browser; verified it reddens against the reverted single-copy bug.
 
 ### The one that can corrupt a number — read before starting
 

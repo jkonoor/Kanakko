@@ -1678,6 +1678,63 @@ def test_shell_reloads_when_the_mini_app_is_reopened():
     assert "load()" in listener
 
 
+def test_a_failed_mutation_is_surfaced_not_swallowed():
+    """Every mutating call goes through one helper that always reloads and only
+    toasts on failure (task 1558) — not the old `.then(r => { if (r.ok) load(); })`.
+
+    The bug: six inlined call sites (edit, delete, refund, category, recurring
+    pause, recurring delete) only called `load()` when the response was `ok`, so
+    a 4xx/5xx or a dropped connection did *nothing* — the field kept showing what
+    the user typed, and the next `load()` (which fires on every re-activation)
+    silently reverted it with no sign anything had gone wrong.
+
+    This pins the two halves of the fix, not just that a `mutate` name exists:
+    `load()` is unconditional (in `.finally`, not gated on `r.ok`) and the toast
+    fires exactly on failure (`!r.ok` and the network-error `.catch`). A version
+    that renamed the old bug (e.g. `.then(r => { if (r.ok) load(); else showToast() })`,
+    which still skips the reload on failure) would still fail this.
+    """
+
+    def body_of(fn_name: str) -> str:
+        start = SHELL_HTML.index(f"function {fn_name}(")
+        # Balance braces from the first `{` after the signature to find the
+        # matching close, since the body itself contains nested `{ ... }`.
+        brace_start = SHELL_HTML.index("{", start)
+        depth = 0
+        for i in range(brace_start, len(SHELL_HTML)):
+            if SHELL_HTML[i] == "{":
+                depth += 1
+            elif SHELL_HTML[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return SHELL_HTML[brace_start : i + 1]
+        raise AssertionError(f"unbalanced braces in function {fn_name}")
+
+    mutate = body_of("mutate")
+    assert ".then(r => { if (!r.ok) showToast(); })" in mutate
+    assert ".catch(showToast)" in mutate, "a thrown/network error must toast too"
+    assert ".finally(load)" in mutate, "load() must run unconditionally"
+    # load() must not be inside the `.then(...)` success branch — it has to run
+    # whether or not the request succeeded, so the only `load` in the whole
+    # function body is the one in `.finally`.
+    assert mutate.count("load") == 1
+
+    # None of the old inlined, success-only reloads survive at any call site.
+    assert "if (r.ok) load()" not in SHELL_HTML
+
+    # Every one of the six mutating actions routes through the helper, not a
+    # bespoke fetch.
+    for route in (
+        "/app/refund",
+        "/app/recurring/active",
+        "/app/recurring/delete",
+        "/app/delete",
+        "/app/category",
+        "/app/edit",
+    ):
+        assert f"mutate('{route}'," in SHELL_HTML, f"{route} bypasses mutate()"
+
+
 def test_mini_app_refuses_a_user_who_was_never_admitted(conn, monkeypatch):
     """A valid `initData` from an unadmitted user gets 403 and mints no row (§16).
 

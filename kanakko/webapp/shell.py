@@ -144,14 +144,24 @@ h2 {
   color: var(--tg-theme-hint-color, #707579);
   width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
 }
+/* A failed mutation (task 1558) surfaces here instead of nowhere. Fixed to the
+   viewport, not the flow, so it doesn't shift anything else when it appears. */
+#toast {
+  position: fixed; left: 16px; right: 16px; bottom: 16px; padding: 12px 16px;
+  border-radius: 8px; background: #d64545; color: #fff; text-align: center;
+  font-size: 14px;
+}
+#toast[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div id="app">Loading…</div>
+<div id="toast" hidden>Couldn't save — try again.</div>
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready();
 const app = document.getElementById('app');
+const toast = document.getElementById('toast');
 // Stamp Telegram's own light/dark scheme on <html> so the income accent can pick
 // the step that clears contrast on this surface. `prefers-color-scheme` is not a
 // substitute — it reports the OS theme, which need not match the theme the user
@@ -177,6 +187,28 @@ function load() {
     .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
     .then(html => { app.innerHTML = html; applyPeriod(); })
     .catch(() => { app.textContent = 'Could not load dashboard.'; });
+}
+let toastTimer;
+function showToast() {
+  clearTimeout(toastTimer);
+  toast.hidden = false;
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 3000);
+}
+// The one fetch every mutating action (edit, delete, refund, category,
+// recurring pause/delete — six call sites) goes through. Always reloads,
+// success or not: that discards whatever the user just typed and re-renders
+// the server's actual state, so a rejected write visibly snaps back instead of
+// silently staying wrong. The toast fires only when the write itself failed,
+// so "reverted because it failed" is distinguishable from an ordinary refresh.
+function mutate(url, body) {
+  fetch(url, {
+    method: 'POST',
+    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  })
+    .then(r => { if (!r.ok) showToast(); })
+    .catch(showToast)
+    .finally(load);
 }
 app.addEventListener('click', e => {
   // Switching period is a local view change — every panel is already in the
@@ -205,11 +237,7 @@ app.addEventListener('click', e => {
   if (refundSubmit) {
     const amount = refundSubmit.closest('.txn-refund').querySelector('.refund-amount').value;
     if (!amount) return;
-    fetch('/app/refund', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(refundSubmit.dataset.id), amount}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/refund', {id: Number(refundSubmit.dataset.id), amount});
     return;
   }
   // The recurring-rule pause/resume toggle (task 1161 split 2/2a) — sends the
@@ -218,38 +246,22 @@ app.addEventListener('click', e => {
   // server-side.
   const ruleToggle = e.target.closest('.rule-toggle');
   if (ruleToggle) {
-    fetch('/app/recurring/active', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(ruleToggle.dataset.id), active: ruleToggle.dataset.active !== 'true'}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/recurring/active', {id: Number(ruleToggle.dataset.id), active: ruleToggle.dataset.active !== 'true'});
     return;
   }
   const ruleDel = e.target.closest('.rule-del');
   if (ruleDel) {
-    fetch('/app/recurring/delete', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(ruleDel.dataset.id)}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/recurring/delete', {id: Number(ruleDel.dataset.id)});
     return;
   }
   const btn = e.target.closest('.del');
   if (!btn) return;
-  fetch('/app/delete', {
-    method: 'POST',
-    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-    body: JSON.stringify({id: Number(btn.dataset.id)}),
-  }).then(r => { if (r.ok) load(); });
+  mutate('/app/delete', {id: Number(btn.dataset.id)});
 });
 app.addEventListener('change', e => {
   const sel = e.target.closest('.cat-select');
   if (sel && sel.value) {
-    fetch('/app/category', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/category', {id: Number(sel.dataset.id), category: sel.value});
     return;
   }
   // The four row-editor fields (`_edit_panel`) share one dispatch: each carries
@@ -261,11 +273,7 @@ app.addEventListener('change', e => {
   const field = e.target.closest('[data-edit-field]');
   if (!field) return;
   if (field.value === '' && field.dataset.editField !== 'note') return;
-  fetch('/app/edit', {
-    method: 'POST',
-    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-    body: JSON.stringify({id: Number(field.dataset.id), field: field.dataset.editField, value: field.value}),
-  }).then(r => { if (r.ok) load(); });
+  mutate('/app/edit', {id: Number(field.dataset.id), field: field.dataset.editField, value: field.value});
 });
 load();
 // Reload when the Mini App comes back to the foreground. Without this the page

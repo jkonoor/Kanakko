@@ -12,6 +12,52 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `fedd5da` gate the dashboard row editor's account dropdown on account count
+
+**Scope:** Dashboard row editor. `_edit_panel` (`kanakko/webapp/recent.py`) now
+only renders the per-row account `<select>` when `type_ != "transfer" and
+len(accounts) > 1`, matching the `show_accounts = bool(accounts) and
+len(accounts) > 1` gate `confirm.py:126` already applies (§18: "accounts become
+visible only when a second one exists"). One test added.
+
+**Status: ✅ DONE** — no blocking issues.
+
+**What I checked (commands and their output):**
+
+- `git show HEAD` — read the whole diff: three lines in `recent.py` (the gate
+  plus a docstring update), one new test, one `TASKS.md` box ticked.
+- Confirmed the gate matches the reference. `grep -n show_accounts kanakko/` and
+  `sed -n '115,140p' kanakko/confirm.py` — `confirm.py:126` is `show_accounts =
+  bool(accounts) and len(accounts) > 1`. The new `len(accounts) > 1` is
+  equivalent (the `bool(accounts)` conjunct is redundant with `> 1`, not a
+  behaviour difference). `accounts` is already the non-`external` live list per
+  the docstring, so the two surfaces gate on the same population.
+- Confirmed the spec. `docs/DECISIONS.md:785-786` — "Accounts become visible
+  only when a second one exists." The change makes the row editor obey the rule
+  the confirm card already did.
+- Exercised the function directly (`uv run python`): a 1-account household →
+  `edit-account` absent; 2 accounts → present; 0 accounts → absent. Correct on
+  all three.
+- Guard is genuinely red without the fix. Reverted the `and len(accounts) > 1`
+  clause and ran
+  `test_recent_list_edit_panel_hides_account_select_for_a_single_account` → it
+  **FAILED** on a live `class="edit-account"` in the output; restored the fix
+  (`git checkout`) and it passes. So the guard fails for the reason it exists,
+  not on a surface string.
+- Checked the fix doesn't regress the sibling tests: the pre-existing
+  `test_recent_list_renders_edit_toggle_and_hidden_panel` supplies two accounts
+  (`[(3,"Bank"),(4,"Wallet")]`), so it still asserts the `<select>` renders; the
+  transfer test still gets no `<select>` for the separate `type_` reason.
+- `uv run pytest` → **481 passed** (matches the commit's claim);
+  `tests/test_webapp.py` → 92 passed.
+
+**Findings:** none. The change is a three-line behavioural fix that reuses the
+existing `confirm.py` rule rather than inventing a second one, the docstring was
+updated to match, no money/timezone/soft-delete path is touched, and the guard
+was verified red-then-green by hand. Nothing to fix.
+
+---
+
 ## 2026-08-16 — `05e67c5` point at `/account bank` from welcome and `/help`
 
 **Scope:** Docs/UX only. Adds one `WELCOME` line ("Want your balance to be

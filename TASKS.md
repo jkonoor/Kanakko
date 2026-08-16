@@ -1553,6 +1553,26 @@ Raised 2026-08-16 from using the shipped bot and re-reading Phase 10 against
 §18. Nothing here is a new idea: every item is either §18 asking for something
 the implementation narrowed, or a defect found after the merge.
 
+### First — the dashboard fails silently on every write
+
+- [ ] Surface a failed mutation instead of swallowing it. Every write in
+      `webapp/shell.py` ends `\.then(r => { if (r.ok) load(); })` — edit, delete,
+      refund, category, recurring pause, recurring delete, **six copies, none with
+      an `else` and none with a `.catch`**. So a 4xx, a 5xx, a dropped connection
+      or an expired `initData` (the mutating routes enforce a 24h `auth_date`
+      window) produces *nothing at all*: the field keeps showing the value the
+      user typed, the server keeps the old one, and the next `load()` — which
+      fires on every re-activation — silently reverts it. The user's conclusion is
+      that the app randomly forgets edits, on a money screen.
+      Replace all six with **one** helper that always calls `load()` and shows a
+      toast when the response is not ok or the fetch throws. Always reloading is
+      the load-bearing half: it discards the optimistic local value and re-renders
+      the server's truth, so a failed edit visibly snaps back rather than lying.
+      One helper also deletes six copies of the same fetch block (CLAUDE.md, one
+      definition per thing). Guard: stub a route to 500 and assert the value on
+      screen returns to the stored one *and* the toast appears — a test that only
+      checks the toast passes on a version that leaves the wrong number showing.
+
 ### The one that can corrupt a number — read before starting
 
 `db/accounts.py::set_account_opening_balance` finds the account to update **by
@@ -1616,6 +1636,70 @@ than a guarantee.
       shorter. `credit` reads as what is owed (§18's sign convention, already in
       the query); `external` stays hidden as everywhere else.
 
+### The row editor, reviewed against the live UI (2026-08-16)
+
+From four screenshots of a real row plus a read of `webapp/recent.py` and the
+`.txn` grid in `webapp/shell.py`. Credit where due first: every control already
+carries a real `aria-label` ("Delete ₹500.00 on 16 Aug"), so screen readers are
+fine — it is **sighted** users who get five unlabelled grey boxes.
+
+- [ ] Rebuild the row: actions out of the collapsed row, category in, fields
+      labelled and reordered. One task, not five — they are the same markup, and
+      doing them separately means restyling it four times.
+      **Why the collapsed row changes:** `.del` is grid-row 1, `.edit-toggle` row
+      2, `.refund-toggle` row 3, all column 2 at 44px, so **every expense row is
+      at least 132px tall** for content needing 44–64px. A Mini App viewport shows
+      about four transactions where it could show ten. They are also three
+      near-identical grey glyphs, one of which deletes money, in the lane the
+      thumb reaches for; `↩` reads as "reply", not "refund".
+      Collapsed shows data only — `16 Aug · Food · −₹500.00`, note beneath —
+      and the whole row expands on tap. The panel ends with **labelled** `Delete`
+      and `Refund` buttons, words not glyphs, below a rule that separates them
+      from the corrective fields: those two create and destroy, the fields above
+      only correct. Delete becoming two deliberate taps is the point, not a cost.
+      **Category moves into the panel** and the header becomes plain text. Its
+      `<select>` chevron currently sits beside a row that expands, so it reads as
+      "expand this row" — two chevron-ish affordances for one meaning. The
+      `/app/category` route may stay as it is; this is about where the control
+      lives, not which endpoint it calls.
+      **Labels left, field right** (two columns, label ~90px). This is what kills
+      the worst state in the screenshots: with both panels open there are two
+      identical `500.00` boxes, one silently overwriting the amount and one
+      issuing a refund. Do **not** pair date and amount side by side — a date
+      input with its picker is ~140–150px and will wrap unpredictably at 360px.
+      **Order by consequence:** Amount, Category, Date, Account, Note. Category
+      second because §5 says outright it is the most-often-wrong field; note last
+      because it is cosmetic.
+      Also here, since it is the same markup: label the amount `Amount (₹)` — the
+      field shows a bare `500.00` while the header shows `−₹500.00` — and put a
+      small helper beside the date rendering it as `16 Aug 2026`. `<input
+      type="date">` formats to the *device* locale and cannot be styled, so an
+      Indian user sees `08/16/2026` under a header reading `16 Aug`; keep the
+      native input (§7, §13 are right about native-first) and disambiguate beside
+      it. **Preserve the one-account dropdown gate** from the task above — it
+      lands first and this rebuild must not undo it.
+      Guard: a row with a note and one with none both render at the same height,
+      and that height is well under 132px.
+- [ ] Undo a delete, rather than confirm it. `.del` fires `POST /app/delete`
+      immediately — no confirmation, and the ✕ glyph at a card's top-right is the
+      universal *dismiss* symbol on a card that also expands, so "close" is a
+      reasonable misreading of a control that removes a transaction. §6 already
+      soft-deletes, so `deleted_at` is sitting there and un-deleting is one route
+      setting it back to NULL. A toast reading `Deleted ₹500.00 · Undo` beats a
+      confirmation dialog: it does not tax the case where the user meant it.
+      The undo must write its own audit row (§17) — restoring a transaction is a
+      money mutation, and migration 013's action set will need a value for it.
+- [ ] Stop the refund field defaulting to the full amount, and show what is
+      actually left. `_refund_panel` sets `value="{amount}"` under a full-width
+      primary button — the only prominent button on the card — so opening it by
+      accident puts a complete refund one tap away. Migration 014's trigger stops
+      a refund *exceeding* the original; it does nothing about an unintended
+      *full* one, which is the likelier mistake. Leave the input empty with the
+      ceiling as placeholder, and make that ceiling **what remains**, not the
+      original — otherwise the field invites an amount the trigger will reject.
+      That means the row data has to carry refunded-so-far, so this is a real
+      change to `recent_transactions`, not a markup tweak.
+
 ### The spec no longer describes the code
 
 - [ ] Reconcile `docs/DECISIONS.md` §5 with the editor that shipped. §5 is titled
@@ -1651,6 +1735,12 @@ than a guarantee.
       card" for something that is a card. Check what actually happens and record
       it; if it does misfile, that is a finding for `REVIEWS.md`, not a silent fix
       here.
+      This task runs **after** the row rebuild, so write the rows against the new
+      editor, not the old one: a collapsed row showing data only, `Delete` and
+      `Refund` as labelled buttons inside the panel, the delete-undo toast, and —
+      the one no automated check can cover — **turn the network off mid-edit and
+      confirm the value snaps back with a toast** rather than sitting on screen
+      looking saved.
 
 ---
 

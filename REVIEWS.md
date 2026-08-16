@@ -12,6 +12,43 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `05e67c5` point at `/account bank` from welcome and `/help`
+
+**Scope:** Docs/UX only. Adds one `WELCOME` line ("Want your balance to be
+right? Tell me what you have: `/account bank 52000`.") and a matching
+`HELP_TEXT` entry (`/account bank 52000 — set what a spending account like Bank
+or Cash holds`) so the spending-account onboarding shipped in `f97355c` is
+discoverable. New guard `test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help`.
+Ticks the Phase 11 "Point at it once from the welcome message" task.
+
+**Status:** ✅ DONE — no blocking issues.
+
+### What I checked
+
+- **The copy points at a real command.** `/account bank <amount>` is implemented
+  in `kanakko/commands/account.py:110` (`handle_account`), added and separately
+  reviewed at `f97355c` (✅ DONE). String concatenation renders cleanly:
+  `"...bank "` + `"52000`.\n\n"` → `/account bank 52000`. The help/welcome wording
+  matches the command's actual `ACCOUNT_USAGE` semantics ("what's in it").
+- **Guard reddens for the reason it exists.** Reverted `kanakko/handlers.py` to
+  `HEAD~1` and ran the new test:
+  `FAILED ... test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help`
+  (1 failed). Restored the file (`git diff --stat` → clean) and it passes. This
+  is a copy task, so asserting the string is present in `WELCOME`/`HELP_TEXT` is
+  the right guard — the risk *is* the copy being absent, not a hidden behaviour.
+- **Full suite:** `uv run pytest` → **480 passed, 1 warning** (matches the
+  commit's claim; `tests/test_help.py` → 3 passed).
+- **Spec fit.** Deliberately no onboarding questionnaire — consistent with §5's
+  rejection of multi-step state machines. No money, timezone, `active_transactions`,
+  or category paths touched.
+
+### Findings
+
+None. This is a two-line copy change with a matching guard that verifiably
+fails without it.
+
+---
+
 ## 2026-08-16 — `f97355c` let `/account` set a spending account's opening balance
 
 **Scope:** `/account bank 52000` / `/account cash 2000` now set (creating on

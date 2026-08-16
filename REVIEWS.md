@@ -12,6 +12,51 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `262fc5d` don't crash rendering a refund whose original was deleted
+
+**Scope:** `kanakko/webapp/recent.py`'s `refund` branch no longer formats
+`refund_of_occurred_on` unconditionally. When the refunded expense is
+soft-deleted, the `LEFT JOIN active_transactions orig` returns NULL for both
+joined columns, and `{None:%d %b}` raised `TypeError`, blanking the whole
+recent list. Now falls back to "Refund of a deleted expense". Fixes finding 1
+of my `51d1712` review.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **The NULL-travel-together premise holds.** `db.recent_transactions`
+  (`kanakko/db/reports.py:135,139`) selects `orig.note, orig.occurred_on` from
+  one `LEFT JOIN active_transactions orig ON orig.txn_id = t.refund_of_txn_id`.
+  Both columns come from the same joined row, so either the join matched (both
+  present — `occurred_on` is NOT NULL on any live transaction) or it did not
+  (both NULL: non-refund row, or original soft-deleted out of the view).
+  Testing `refund_of_occurred_on is None` therefore selects exactly the
+  deleted/absent-original case; the else branch still handles a live original
+  with a NULL note via `if refund_of_note`. The guard fails for the reason it
+  exists.
+- **Reproduced the original crash.** `f'{None:%d %b}'` →
+  `TypeError: unsupported format string passed to NoneType.__format__`. The
+  pre-fix line formatted the date whether or not the note fell back, so a
+  deleted original crashed. Confirmed directly rather than trusting the message.
+- **The new test catches it.**
+  `test_recent_list_refund_row_falls_back_when_the_original_is_deleted`
+  (`tests/test_webapp.py:1026`) passes a 12-column refund row with both
+  `refund_of_note` and `refund_of_occurred_on` as `None` and asserts
+  "Refund of a deleted expense" renders. Column count matches the unpack in
+  `recent.py:267-271`. Without the fix the row would raise the `TypeError`
+  above instead of returning markup, so the test goes red — silent breakage
+  (a blanked list, no exception surfaced to the user) made observable.
+- **Ran the suites.** `uv run pytest tests/test_webapp.py -q` → **113 passed**;
+  `uv run pytest -q` → **508 passed**.
+- **No spec violations.** Reads still go through `active_transactions` (§6);
+  money untouched (`Decimal`); the change is display text only. No `float`, no
+  new dependency, no port/secret concerns.
+
+No findings.
+
+---
+
 ## 2026-08-16 — `51d1712` render a refund row as a refund, not uncategorised income
 
 **Scope:** `recent_transactions` gains columns 11/12 (`refund_of_note`,

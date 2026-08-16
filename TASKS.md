@@ -1921,7 +1921,7 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       read from source (`kanakko/commands/recurring.py`, `kanakko/confirm.py`,
       `kanakko/jobs/recurring.py`, `kanakko/webapp/recurring.py`,
       `kanakko/webapp/render.py`, `kanakko/webapp/shell.py`), not guessed.
-- [ ] Add manual test rows for **dashboard editing and opening balances** —
+- [x] Add manual test rows for **dashboard editing and opening balances** —
       editing an amount, a date and an account on an existing row (and that each
       leaves an audit row, migration 013's `edit` action); setting a `credit`
       account's balance and confirming it is asked as *what you owe*; and setting a
@@ -1940,6 +1940,28 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       the one no automated check can cover — **turn the network off mid-edit and
       confirm the value snaps back with a toast** rather than sitting on screen
       looking saved.
+      Added `docs/TESTING.md` §3c (9 rows: expand-to-edit, amount/date/account
+      fields, the panel re-collapsing after every edit — `shell.py`'s `mutate()`
+      always reloads, so a second edit needs re-expanding, which 3c.2 calls out
+      by name since it reads like a bug — Delete/Refund as labelled buttons, the
+      undo toast and its auto-dismiss, and the network-off case: offline, the
+      post-edit reload fails too, so the whole app area says "Could not load
+      dashboard" rather than just the one field reverting), two rows in §5a
+      (5a.19-20, same query shape as 5a.7, confirming the `edit` audit action
+      for amount/date/account), and four in §9 (9.19-22: no Account field with
+      one account, `/account credit`'s exact "you owe" reply, `/account
+      <name>`'s "you have" reply for a spending account, and 9.20 for the
+      credit-card-bill risk). Read `parse.py` for 9.20 rather than guessing:
+      `new_locked_account`/`transfer`/the account-vocabulary prompt text are all
+      gated on `len(accounts) > 1` (`parse_schema`, `build_request`), so a
+      single-account household's prompt carries none of them — the specific
+      misfile named in this task (minting a `locked` "Credit card" account)
+      cannot happen through that path. The row asks the tester to record what
+      the model does instead, since that's still unverified without a live call.
+      9.19-20 must run before 9.2, which permanently ends the single-account
+      state — noted inline since renumbering 9.2 onward would have touched
+      `REVIEWS.md` and `docs/DECISIONS.md`'s existing row references.
+      `uv run pytest` → 508 passed (docs-only change).
 
 ---
 

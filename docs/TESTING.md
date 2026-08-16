@@ -124,6 +124,31 @@ Telegram update.
 | 3b.3 | Switch Telegram to **light**, reopen | Light background, dark text, everything still legible | ⬜ | |
 | 3b.4 | In either theme, read the percentages and notes | Grey text is readable, not washed out | ⬜ | |
 
+### 3c. The row editor: amount, date, account (task 1704)
+
+The row rebuild replaced three always-visible action glyphs with one collapsed
+row — date, category, amount, note — that expands into an editor on tap. These
+rows test that editor directly, not the pre-rebuild shape 3a.3/3a.4 above still
+describe.
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 3c.1 | Tap any row in Recent | Row expands into a panel: **Amount, Category, Date**, then **Account** (only if a second account exists), then **Note**, then a rule and **Delete**/**Refund** as labelled buttons — not glyphs | ⬜ | |
+| 3c.2 | Change the Amount field to a different value | The dashboard's totals reload to match the new amount, and the panel you were editing **closes back to the collapsed row** — every field edit reloads the whole list from the server, so it doesn't stay open for a second edit | ⬜ | |
+| 3c.3 | Re-expand that row, change the Date field, then re-expand it once more | The Date field now shows your new date, and the `date-human` span beside it (e.g. "06 Aug 2026") spells out the same date | ⬜ | |
+| 3c.4 | With a second account on the household, re-expand a non-transfer row and change its Account field | The dashboard's per-account balances (the Accounts panel, §18) shift accordingly | ⬜ | |
+| 3c.5 | Open the panel on a `transfer` row | No Category field, no Account field (a transfer names two ends, not one) — only Amount, Date, Note | ⬜ | |
+| 3c.6 | Tap **Delete** inside a row's panel | Row disappears immediately; a toast reads "Deleted ₹N.NN · Undo" for a few seconds | ⬜ | |
+| 3c.7 | Tap **Undo** on that toast before it clears; on a separate delete, let the toast sit instead | Undo restores the row and totals; left alone, the toast **auto-dismisses** on its own | ⬜ | |
+| 3c.8 | Turn the device's network off, then edit any field (e.g. Amount) | A "Couldn't save — try again." toast appears. `shell.py`'s `mutate()` always reloads after a write, success or failure — offline, that reload fails too, so the **whole** app area turns into "Could not load dashboard.", not just the one field reverting | ⬜ | |
+| 3c.9 | Restore the network, reopen the dashboard | The field you tried to edit in 3c.8 shows its **original**, pre-edit value — nothing was silently saved while offline | ⬜ | |
+
+**3c.1 and 3c.5 are the field-set checks** — a `transfer` row must never offer a
+Category or Account control, since it has neither (§18). **3c.2 is easy to
+misread as a bug**: the panel closing after every edit is `mutate()`'s
+always-reload design working as intended, not a lost edit — the value did save;
+re-expand to see it. **3c.8–3c.9 are the one no automated check can cover.**
+
 ---
 
 ## 4. Scheduled reminders
@@ -189,6 +214,8 @@ below refer back to it. Note its `update_id` from the log.
 | 5a.16 | *(operator)* In `kanakko-cron`, write a file into `$LOG_DIR` and read it back from `kanakko-web` | The **same** volume is mounted on both — §17 requires it, and the jobs are the reason | ⬜ | |
 | 5a.17 | *(operator)* Run `python -m kanakko.jobs.evening` in `kanakko-cron`, then `jq 'select(.event\|startswith("job."))' $LOG_DIR/events.jsonl` | **One** line per run — `event":"job.evening"`, `"status":"ok"`, `"source":"cron"`, with `considered`, `delivered`, `skipped`, `failed` and `duration_ms`. One event per *run*, not per user | ⬜ | |
 | 5a.18 | *(operator)* Force a delivery failure (a blocked recipient), re-run the job | A `"status":"error"` line **and** the job exits non-zero (`echo $?` ≠ 0) — the log line is *in addition* to the raise, never instead of it. Earlier users' `reminder_log` rows are still present | ⬜ | |
+| 5a.19 | Change the ₹3.33 row's Amount in the dashboard, then its Date, re-running 5a.6's query after each | **Two** more rows, same shape as 5a.7's `recategorise`: `action='edit'`, `source='miniapp'`, `update_id` NULL — one with `before='{"amount": ...}'`/`after='{"amount": ...}'`, the next with `before='{"occurred_on": ...}'`/`after='{"occurred_on": ...}'` (migration 013's `edit` action, task 974) | ⬜ | |
+| 5a.20 | If a second account exists, also change the row's Account field, re-run the query | A third `edit` row: `before='{"account_id": <old id>}'`/`after='{"account_id": <new id>}'` | ⬜ | |
 
 **5a.5 and 5a.9 are the two that matter.** A token in the log is a leak that
 survives on disk until rotation, and an orphan ledger row means the audit write is
@@ -367,6 +394,17 @@ earlier in the flow. **9.13 is the second one**:
 a refund exceeding what remains is a silent over-refund if it is ever allowed
 through. **9.1 is the regression check**: every account feature in this section
 must leave the single-account daily path exactly as it was.
+
+**Run 9.19 and 9.20 before 9.2** — they need the household still on its one
+default account, which 9.2 permanently ends by creating a credit account. If
+you already ran 9.2+ here, use a second, never-onboarded household instead.
+
+| # | Step | Expected | Status | Notes |
+|---|---|---|---|---|
+| 9.19 | Still single-account (before 9.2), open any row in the dashboard's editor | **No Account field at all** — not a dropdown with one dead option. `recent.py`'s `_txn_panel` only renders it when `len(accounts) > 1` | ⬜ | |
+| 9.20 | Still single-account, send `paid the credit card bill 2000` | **Record what actually happens.** The risk noted 2026-08-16 was the model minting a `locked` account named "Credit card" for this — per `parse.py`, that specific misfile can't happen here: `new_locked_account`, `transfer` and the account vocabulary guidance are all gated on `len(accounts) > 1` (`parse_schema`, `build_request`), so a single-account household's prompt carries none of them and the model can only return a plain `expense`/`income`. What it actually guesses (type, category) for a bill payment with no card account yet is untested — if it inflates spending or does anything else surprising, that is a finding for `REVIEWS.md`, not a silent fix | ⬜ | |
+| 9.21 | Send `/account credit 5000` (updates the account 9.2 created) | Reply: "Got it — Card (credit), you owe ₹5,000.00." — the onboarding ask is phrased as what you **owe**, never what you have | ⬜ | |
+| 9.22 | Send `/account bank 2000` (or your default account's name) | Reply: "Got it — Bank (spending), you have ₹2,000.00."; the dashboard's **Accounts** panel shows Bank's balance shifted by the same ₹2,000 | ⬜ | |
 
 ---
 

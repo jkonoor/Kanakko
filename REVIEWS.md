@@ -12,6 +12,64 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `66d28f2` surface a failed dashboard mutation instead of swallowing it
+
+**Scope:** Mini App JS/CSS. Collapses the six inlined `.then(r => { if (r.ok)
+load(); })` mutating fetches in `kanakko/webapp/shell.py` (edit, delete, refund,
+category, recurring pause, recurring delete) into one `mutate(url, body)` helper
+that `.finally(load)`s unconditionally and toasts (`#toast`) on `!r.ok` or a
+thrown/network error. Adds `test_a_failed_mutation_is_surfaced_not_swallowed`.
+Ticks the first Phase 11 task in `TASKS.md`.
+
+**Status:** ✅ DONE — correct, well-scoped, and the guard verifiably fails for
+the reason it exists.
+
+### What I checked
+
+- `git show HEAD` — touches only `TASKS.md`, `kanakko/webapp/shell.py`, and
+  `tests/test_webapp.py`. No server/money/SQL code, no new dependency.
+- `uv run pytest tests/test_webapp.py -q` → **91 passed**.
+- **Guard reddens against the real bug** (not just a renamed symptom). I
+  reverted `mutate`'s body back to the old `.then(r => { if (r.ok) load(); })`
+  single-copy pattern and ran the new test in isolation → **1 failed**;
+  restored the file and reran → **1 passed**. `git diff --stat` afterward is
+  empty, so the tree is back to the committed state. The test also explicitly
+  rejects the plausible half-fix `if (r.ok) load(); else showToast()` (which
+  still skips the reload on failure) by pinning `load` to a single occurrence
+  inside `.finally`.
+- Read the full `shell.py` (all six call sites now route through `mutate(`,
+  confirmed by the test's per-route assertions and by eye at
+  `shell.py:240,249,254,259,264,276`).
+- **Correctness of the always-reload change.** Old code reloaded only on
+  success, so a rejected write left the typed value on screen until the next
+  re-activation silently reverted it. `mutate` reloads in `.finally` regardless
+  of outcome, so a failed write snaps back to server state immediately and the
+  toast distinguishes "reverted because it failed" from an ordinary refresh —
+  exactly what the task asked. No call site relied on reload-only-on-success.
+- **CSS specificity guard is real, not cosmetic.** `#toast` sets
+  `position: fixed` (id specificity), which would out-specify the UA
+  `[hidden] { display: none }`; the added `#toast[hidden] { display: none; }`
+  (id+attribute) restores the hide. Same class of fix already documented for
+  `.txn-edit[hidden]` at `shell.py:123`. Without it the toast would never hide.
+- **Security:** unchanged. `initData` still travels in the `tma` Authorization
+  header on every mutate; no payload trusted before the server validates it.
+
+### Findings
+
+**Low — the failure toast is not announced to assistive tech (`shell.py:159`).**
+`#toast` is a plain `<div hidden>` with no `role="alert"` / `aria-live`, so a
+screen-reader user gets no notification that a write was rejected and reverted —
+the one signal this commit exists to add is silent for them. The CSS throughout
+this file is scrupulous about WCAG (2.5.8 targets, 1.4.1 colour, contrast in two
+themes), so this is a gap in that same standard rather than a nitpick.
+Non-blocking. Suggested fix: `<div id="toast" role="alert" hidden>` (and set the
+text via `toast.textContent` on show so the live region re-announces).
+
+Everything else is correct. No money, timezone, soft-delete, categories, or
+`initData`-validation path is touched by this change.
+
+---
+
 ## 2026-08-13 — `4f2646e` 9.6's manual-test money check reworked as a delta
 
 **Scope:** docs-only. Reworks `docs/TESTING.md` row 9.6 and the money-path callout

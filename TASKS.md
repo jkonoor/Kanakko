@@ -1634,7 +1634,7 @@ than a guarantee.
       `tests/test_accounts.py`) verified red without the name filter — reverted
       the `WHERE` clause to kind-only, watched it fail, restored it. `uv run
       pytest` → 479 passed.
-- [ ] Point at it once from the welcome message — one line, e.g. *"Want your
+- [x] Point at it once from the welcome message — one line, e.g. *"Want your
       balance to be right? Tell me what you have: `/account bank 52000`."*
       Deliberately **not** an onboarding questionnaire: a multi-step "which
       accounts, how much in each" conversation is the state machine §5 rejected as
@@ -1643,6 +1643,14 @@ than a guarantee.
       the same numbers (verified: an adjustment is written as a `transfer`
       (`db/reconcile.py:229`), which is excluded from both totals, and an opening
       balance never enters those reports either). Add the same line to `/help`.
+      Done: added the line verbatim to `WELCOME` (after the credit/locked
+      paragraph) and a matching `/account bank 52000 — set what a spending
+      account like Bank or Cash holds` line to `HELP_TEXT`, alongside the
+      existing `/account credit`/`/account locked` lines.
+      `test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help`
+      (`tests/test_help.py`) verified red without the fix (reverted the
+      `handlers.py` change, watched it fail on the `WELCOME` assertion, restored
+      it). `uv run pytest` → 480 passed.
 
 ### Defects found after the Phase 10 merge
 

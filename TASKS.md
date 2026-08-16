@@ -1820,7 +1820,7 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       partial-refund sum rather than a stale `account_id` in that column
       (`tests/test_db.py::test_recent_transactions_reports_what_remains_refundable`).
       `uv run pytest` → 500 passed, `ruff check` clean.
-- [ ] Render a refund row as a refund. Found 2026-08-16 in a live screenshot: a
+- [x] Render a refund row as a refund. Found 2026-08-16 in a live screenshot: a
       ₹501 refund of a `Health` expense renders as **"Uncategorised · +₹501.00" in
       the income green**, with nothing saying what it refunds. **The data is
       correct** — `refund_of_txn_id` is stored (migration 014) and
@@ -1863,6 +1863,22 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       Guard: a refund of a categorised expense renders that category, carries
       neither `+` nor the income class, and names its original — and the check
       reddens if `CATEGORIES_BY_TYPE` regains a `refund` key and papers over it.
+      Done: `recent_transactions` (`kanakko/db/reports.py`) gains columns 11/12,
+      `refund_of_note`/`refund_of_occurred_on`, via a `LEFT JOIN active_transactions
+      orig` on `refund_of_txn_id` — the view, not base `transactions`, so the join
+      itself doesn't reopen the §6 bypass `test_read_paths.py` guards against; a
+      soft-deleted original just falls back to "Refund of an expense" instead of
+      surfacing deleted-row text. `recent_list` (`kanakko/webapp/recent.py`)
+      branches `type_ == "refund"` in three places: `_category_known` checks its
+      category against `expense`'s set (the one `CATEGORIES_BY_TYPE` has no
+      `refund` key for), sign/tint go neutral like a `transfer`'s, and the note
+      lane names what it refunds instead of showing its own (always-empty) note.
+      `_txn_panel`'s category field renders as text, not `_category_select`, for
+      the same "must not be editable" reason a `transfer` skips it entirely. The
+      refunded expense gets a `· refunded` / `· ₹200.00 refunded` suffix on its
+      own amount span. Six guards verified red-without-fix, green-with-fix (one
+      per branch above, plus the DB join itself) by reverting each in turn.
+      `uv run pytest` → 507 passed, `ruff check` clean.
 
 ### The spec no longer describes the code
 

@@ -118,16 +118,25 @@ def recent_transactions(
     live refunds" aggregate migration 014's trigger enforces and
     `refund_candidates` already computes. The dashboard's refund panel needs it to
     offer what actually remains rather than an amount the trigger will reject.
+    Columns 11/12 are the note and date of the transaction a `refund` row
+    refunds — `NULL` for every other type. Joined against `active_transactions`
+    like every other read here (§6): the original could since have been
+    soft-deleted, and this is a read, so it goes through the view rather than
+    the base table even though the value only ever reaches display text.
+    `recent_list` needs this to name what a refund row refunds instead of
+    showing it as a bare, uncategorised income-tinted amount (§18).
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT t.txn_id, t.amount, t.type, t.category, t.note, t.occurred_on,"
             " fa.name, ta.name, t.account_id,"
             " coalesce((SELECT sum(r.amount) FROM active_transactions r"
-            "  WHERE r.refund_of_txn_id = t.txn_id), 0)"
+            "  WHERE r.refund_of_txn_id = t.txn_id), 0),"
+            " orig.note, orig.occurred_on"
             " FROM active_transactions t"
             " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
             " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"
+            " LEFT JOIN active_transactions orig ON orig.txn_id = t.refund_of_txn_id"
             " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " ORDER BY t.created_at DESC, t.txn_id DESC LIMIT %s",
             (user_id, limit),

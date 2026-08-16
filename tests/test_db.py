@@ -825,8 +825,26 @@ def test_recent_transactions_reports_what_remains_refundable(conn):
                    source="webhook", update_id=None)
 
     by_id = {row[0]: row for row in recent_transactions(conn, a)}
-    assert by_id[untouched][-1] == Decimal("0")
-    assert by_id[refunded][-1] == Decimal("30.00")
+    assert by_id[untouched][9] == Decimal("0")
+    assert by_id[refunded][9] == Decimal("30.00")
+    conn.rollback()
+
+
+def test_recent_transactions_names_what_a_refund_row_refunds(conn):
+    """`recent_transactions`'s last two columns carry the refunded expense's own
+    note and date (task 1823) — the dashboard needs them to render "Refund of
+    "..." · 05 Aug" instead of a bare, uncategorised amount. `NULL` for every
+    row that isn't itself a refund.
+    """
+    migrate(conn)
+    a = _seed_user(conn, 90102)
+    original = _confirm(conn, a, 91003, "100.00")  # _txn(): note "lunch at cafe", 2026-08-05
+    refund = create_refund(conn, a, original, Decimal("30.00"), date(2026, 8, 6),
+                            source="webhook", update_id=None)["txn_id"]
+
+    by_id = {row[0]: row for row in recent_transactions(conn, a)}
+    assert by_id[refund][10:12] == ("lunch at cafe", date(2026, 8, 5))
+    assert by_id[original][10:12] == (None, None)
     conn.rollback()
 
 

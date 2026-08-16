@@ -47,6 +47,18 @@ def _category_select(txn_id: int, type_: str, current: str | None) -> str:
     )
 
 
+def _category_known(type_: str, category: str | None) -> bool:
+    """Whether `category` is a real option for `type_` (§13, §18, task 1823).
+
+    A `refund` has no entry in `CATEGORIES_BY_TYPE` — it is not something a
+    user picks, it is inherited from the expense it refunds (`create_refund`
+    copies it verbatim) — so it is checked against `expense`'s set instead,
+    the same set the original was chosen from.
+    """
+    lookup_type = "expense" if type_ == "refund" else type_
+    return category in CATEGORIES_BY_TYPE.get(lookup_type, ())
+
+
 def _account_select(txn_id: int, accounts: list[tuple[int, str]], current: int | None) -> str:
     """A per-row account `<select>` for the row editor (§13, §18, tasks 974, 1704).
 
@@ -147,9 +159,15 @@ def _txn_panel(
         f'<input type="number" step="0.01" min="0.01" class="edit-amount" data-id="{txn_id}" '
         f'data-edit-field="amount" aria-label="Amount" value="{amount}">',
     )
-    category_field = (
-        "" if type_ == "transfer" else _field("Category", _category_select(txn_id, type_, category))
-    )
+    if type_ == "transfer":
+        category_field = ""
+    elif type_ == "refund":
+        # Inherited from the expense it refunds (`create_refund`) — editing it
+        # here independently of the original would desync the category totals
+        # both rows feed into, so it renders as text, not a `<select>` (task 1823).
+        category_field = _field("Category", html.escape(category) if category else "Uncategorised")
+    else:
+        category_field = _field("Category", _category_select(txn_id, type_, category))
     date_field = _field(
         "Date",
         f'<input type="date" class="edit-date" data-id="{txn_id}" data-edit-field="occurred_on" '
@@ -200,16 +218,19 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     (§13, §18, tasks 100, 101, 974, 1704).
 
     Each `rows` entry is `(txn_id, amount, type, category, note, occurred_on,
-    from_account, to_account, account_id, refunded_so_far)` from
-    `db.recent_transactions` — `from_account`/`to_account` are `NULL` for every
-    type but `transfer`, `account_id` is `NULL` for exactly that one type and
-    nothing else (§18), and `refunded_so_far` is 0 except on a partially- or
-    fully-refunded `expense` — it is what makes `_refund_panel`'s placeholder
-    (task 1799) the amount still refundable, not the original.
+    from_account, to_account, account_id, refunded_so_far, refund_of_note,
+    refund_of_occurred_on)` from `db.recent_transactions` — `from_account`/
+    `to_account` are `NULL` for every type but `transfer`, `account_id` is
+    `NULL` for exactly that one type and nothing else (§18), `refunded_so_far`
+    is 0 except on a partially- or fully-refunded `expense` — it is what makes
+    `_refund_panel`'s placeholder (task 1799) the amount still refundable, not
+    the original — and `refund_of_note`/`refund_of_occurred_on` are `NULL`
+    except on a `refund` row, where they name the note and date of the expense
+    it refunds (task 1823).
     `note` is the first *user-typed* string the dashboard renders — §11 keeps the
     note's original wording, so it is arbitrary text that arrived through the bot
     — and it is HTML-escaped: an unescaped `<img src=x onerror=...>` in a logged
-    expense would be stored XSS.
+    expense would be stored XSS. `refund_of_note` gets the same treatment.
 
     Task 1704 rebuilt the row after a live-UI review found the previous shape
     unusable: three always-visible action glyphs stacked one per grid row made
@@ -227,6 +248,18 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     than spending it, an `income`/`refund` row is not an expense to refund, and
     `create_refund` itself only accepts a live `expense`. An empty ledger renders
     nothing.
+
+    A `refund` is neither an expense nor income (§18): it renders with a
+    `transfer`-style neutral sign and colour — a live screenshot on 2026-08-16
+    found it wearing the income green with "Uncategorised", the one look §18
+    says a refund must never have — and its inherited category (§18,
+    `create_refund`) is checked against `expense`'s set via `_category_known`,
+    since `CATEGORIES_BY_TYPE` has no `refund` key of its own. Its note lane
+    names what it refunds instead of showing its own (empty) `note`, and the
+    expense it refunds gets a `· refunded` / `· ₹200.00 refunded` suffix on its
+    own amount once anything has been taken against it, so a housemate who
+    lands on either row alone can still tell what happened without hunting for
+    the other one (task 1823).
     """
     if not rows:
         return ""
@@ -234,20 +267,35 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
     for (
         txn_id, amount, type_, category, note, occurred_on,
         from_account, to_account, account_id, refunded_so_far,
+        refund_of_note, refund_of_occurred_on,
     ) in rows:
         if type_ == "transfer":
             sign = ""
             amt_cls = "amt"
             summary_detail = f'{html.escape(from_account or "?")} → {html.escape(to_account or "?")}'
         else:
-            sign = "−" if type_ == "expense" else "+"
-            # The one accent: income reads as positive at a glance. The sign
-            # carries the same meaning, so colour is never the sole signal
-            # (WCAG 1.4.1).
-            amt_cls = "amt" if type_ == "expense" else "amt in"
-            known = category in CATEGORIES_BY_TYPE.get(type_, ())
-            summary_detail = html.escape(category) if known else "Uncategorised"
-        note_html = f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
+            if type_ == "refund":
+                # Neither an expense nor income (§18) — same neutral tint as
+                # a transfer, not the income green it was wrongly wearing.
+                sign, amt_cls = "", "amt"
+            else:
+                sign = "−" if type_ == "expense" else "+"
+                # The one accent: income reads as positive at a glance. The
+                # sign carries the same meaning, so colour is never the sole
+                # signal (WCAG 1.4.1).
+                amt_cls = "amt" if type_ == "expense" else "amt in"
+            summary_detail = html.escape(category) if _category_known(type_, category) else "Uncategorised"
+        amt_suffix = ""
+        if type_ == "expense" and refunded_so_far > 0:
+            amt_suffix = (
+                " · refunded" if refunded_so_far >= amount
+                else f" · {format_amount(refunded_so_far)} refunded"
+            )
+        if type_ == "refund":
+            detail = f'Refund of "{html.escape(refund_of_note)}"' if refund_of_note else "Refund of an expense"
+            note_html = f'<div class="txn-note">{detail} · {refund_of_occurred_on:%d %b}</div>'
+        else:
+            note_html = f'<div class="txn-note">{html.escape(note)}</div>' if note else ""
         label = f"{sign}{format_amount(amount)} on {occurred_on:%d %b}"
         items.append(
             '<div class="txn">'
@@ -255,7 +303,7 @@ def recent_list(rows: list[tuple], accounts: list[tuple[int, str]] = ()) -> str:
             f'aria-expanded="false" aria-label="Edit {label}">'
             '<span class="txn-main">'
             f'<span>{occurred_on:%d %b} · {summary_detail}</span>'
-            f'<span class="{amt_cls}">{sign}{format_amount(amount)}</span>'
+            f'<span class="{amt_cls}">{sign}{format_amount(amount)}{amt_suffix}</span>'
             "</span>"
             + note_html
             + "</button>"

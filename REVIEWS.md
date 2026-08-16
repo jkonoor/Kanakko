@@ -12,6 +12,81 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `f97355c` let `/account` set a spending account's opening balance
+
+**Scope:** `/account bank 52000` / `/account cash 2000` now set (creating on
+first use) a `spending` account by name, closing the §18 gap where only
+`credit`/`locked` could be onboarded. `set_account_opening_balance`
+(`kanakko/db/accounts.py`) gains a `name` param and keys its lookup on `kind`
+*and* `lower(name)`, not `kind` alone. `handle_account`
+(`kanakko/commands/account.py`) routes any non-`credit`/`locked` first word +
+amount to the spending-set branch; `ACCOUNT_BAD_KIND` removed as unreachable.
+Ticks the Phase 11 "Opening balances" task in `TASKS.md`.
+
+**Status:** ✅ DONE — correct, spec-fitting, and the new collision guard
+verifiably reddens for the reason it exists.
+
+### What I checked
+
+- `git show HEAD` — touches `TASKS.md`, `kanakko/commands/account.py`,
+  `kanakko/db/accounts.py`, `tests/test_account_command.py`,
+  `tests/test_accounts.py`. No new dependency, no `float`, no direct
+  `transactions` read (balances still go through `active_transactions`, view
+  unchanged).
+- `uv run pytest -q` → **479 passed** (matches the commit message).
+- **Collision guard is real, not a surface assertion.** Reverted the `WHERE`
+  clause in `set_account_opening_balance` back to `kind`-only
+  (`AND kind = %s AND deleted_at IS NULL`) and ran
+  `test_set_account_opening_balance_keys_on_name_not_just_kind` →
+  **1 failed**; restored → passes. The guard fails precisely when the name
+  filter is dropped, i.e. when `/account cash 2000` would find and overwrite
+  the household's existing `Bank` spending row. `git status` clean afterwards.
+- **Money/sign.** `amount` is `Decimal` from `parse_amount`; `signed =
+  -amount if kind == 'credit' else amount` — a spending account stores what's
+  in it as a positive opening balance, and `account_balances` (multiplier +1
+  for non-credit) reads it back correctly. No float anywhere on the path.
+- **Routing traced by hand:**
+  - `/account cash 2000` → not credit/locked → no live `locked` named
+    "cash 2000" → two parts, amount parses → `spending`/"cash" created. ✔
+  - `/account bank 52000` → matches the default `Bank` case-insensitively via
+    `lower(name)` → **updates** it, no duplicate. ✔ (covered by
+    `test_a_spending_account_matched_case_insensitively_updates_not_duplicates`).
+  - `/account Goa 2026` where a `locked` pool "Goa 2026" exists → the
+    `_find_locked_account` lookup runs *before* the spending branch, so the
+    query still wins (`test_year_suffixed_locked_account_name_is_reachable_as_a_query`
+    still green). The F4 regression stays fixed.
+  - `credit`/`locked` still pass `name=None` and fall back to the fixed
+    `ACCOUNT_ONBOARDING_KINDS` name, so every prior call site is unchanged.
+  - No-household path: `set_account_opening_balance` returns `None` (empty
+    `RETURNING`) → `ACCOUNT_NO_HOUSEHOLD`, not a crash. ✔
+- **Cross-kind collision** the docstring claims to prevent: a spending account
+  a user names "card" and the fixed `credit` "Card" — keeping `kind` in the
+  `WHERE` keeps them distinct, no clobber. Confirmed by reading the SQL.
+- `ACCOUNT_BAD_KIND` fully removed; only a stale prose mention of the
+  "bad-kind heuristic" survives in a test comment
+  (`tests/test_account_command.py:232`) — cosmetic, not a finding.
+
+### Findings
+
+None blocking.
+
+- **Observation, not a defect (behaviour change, documented in the docstring):**
+  a *typo'd* `locked` pool name whose trailing word parses as an amount —
+  e.g. `/account Goq 2026` (misspelled "Goa 2026") when no locked account
+  matches — now silently mints a `spending` account "Goq" at ₹2026 instead of
+  the old `ACCOUNT_BAD_KIND` refusal. No total is corrupted and no existing
+  account is touched; it is the accepted cost of making any-name-plus-amount
+  mean "set a spending account." The exact-match locked lookup guards the
+  common case. No test pins this branch, but it is not a silent money error.
+
+- **Latent trap (not on any live path):** `set_account_opening_balance` with
+  `kind="spending"` and `name=None` would raise `KeyError` on
+  `ACCOUNT_ONBOARDING_KINDS["spending"]`. `handle_account` always passes a
+  name for the spending branch and the docstring says so, so no caller hits
+  it today — noting it only so a future caller doesn't reintroduce it.
+
+---
+
 ## 2026-08-16 — `66d28f2` surface a failed dashboard mutation instead of swallowing it
 
 **Scope:** Mini App JS/CSS. Collapses the six inlined `.then(r => { if (r.ok)

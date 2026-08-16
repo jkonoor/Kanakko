@@ -1699,6 +1699,49 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       original — otherwise the field invites an amount the trigger will reject.
       That means the row data has to carry refunded-so-far, so this is a real
       change to `recent_transactions`, not a markup tweak.
+- [ ] Render a refund row as a refund. Found 2026-08-16 in a live screenshot: a
+      ₹501 refund of a `Health` expense renders as **"Uncategorised · +₹501.00" in
+      the income green**, with nothing saying what it refunds. **The data is
+      correct** — `refund_of_txn_id` is stored (migration 014) and
+      `refunds.create_refund` copies the original's category onto the refund row,
+      which is exactly what lets `month_summary` net it with a plain
+      `GROUP BY category`. Every fault here is in the rendering. Runs after the two
+      tasks above: the rebuild owns the markup, and the refund-default task is what
+      puts refunded-so-far into the row data.
+      1. **"Uncategorised" is false** — that row's category *is* `Health`.
+         `_category_select` builds its options from
+         `CATEGORIES_BY_TYPE.get(type_, ())`, which has only `expense` and
+         `income` keys, so a `refund` row gets zero options and falls through to
+         the disabled placeholder. Render the category as **text, not a select**,
+         the way a `transfer` already renders its two account names: a refund's
+         category is inherited and must stay in sync with its original or the
+         netting silently breaks, so it must not be editable at all. `recent_list`
+         branches on `type_ == "transfer"`; `refund` needs the same branch, and
+         its absence is why this got through.
+      2. **The `+` and the income tint are wrong.** `sign = "−" if type_ ==
+         "expense" else "+"` and `amt_cls` follow the same rule, so a refund wears
+         the one accent reserved for income — the single thing §18 says a refund
+         must never look like. The reports are right and the screen contradicts
+         them. Render it neutrally, as a transfer already is.
+      3. **Say what it refunds, in words.** `recent_transactions` does not select
+         `refund_of_txn_id`; add a `LEFT JOIN` back to `transactions` on it — the
+         query already left-joins twice for account names, so it is the same shape
+         — and show `Refund of "Spent 500 medicine cash" · 16 Aug` in the note
+         lane. **No reference numbers**: `txn_id` is internal identity, "Refund of
+         #1284" says nothing about what was refunded, and a personal finance app
+         should not make people learn one. The note, date and amount already
+         identify a row to a human.
+      4. **Close the loop on the original too.** The refunded expense still reads
+         a bare `−₹501.00`, so a user has to spot two rows and do the arithmetic.
+         Show `· refunded` when it is whole and `· ₹200.00 refunded` when partial,
+         off the refunded-so-far the previous task already adds.
+      Deliberately **not** nesting a refund visually under its original: the list
+      is flat, ordered by entry time and capped at ten, so the original is often
+      outside the window — indenting would mean fetching rows past the limit and
+      the ordering would stop meaning anything.
+      Guard: a refund of a categorised expense renders that category, carries
+      neither `+` nor the income class, and names its original — and the check
+      reddens if `CATEGORIES_BY_TYPE` regains a `refund` key and papers over it.
 
 ### The spec no longer describes the code
 

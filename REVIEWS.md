@@ -12,6 +12,60 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `3927149` refund panel offers what remains, not the full amount
+
+**Scope:** `_refund_panel` no longer pre-fills the amount input with the row's
+full original value; the input is empty with the still-refundable ceiling
+(amount − refunds already recorded) as `placeholder` and native `max`.
+`recent_transactions` gains a 10th column `refunded_so_far` to carry it.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- `git show HEAD` — read the full diff across `reports.py`, `recent.py`, the
+  two test files, and `TASKS.md`.
+- **The new column matches the trigger it defers to.** The subquery is
+  `coalesce((SELECT sum(r.amount) FROM active_transactions r WHERE
+  r.refund_of_txn_id = t.txn_id), 0)` (`kanakko/db/reports.py:126-127`). This
+  is the same "sum of live refunds against this row" aggregate that migration
+  014's trigger enforces (`014_refunds.sql:67-71`, summing
+  `deleted_at IS NULL` refund rows) and that `refund_candidates` computes
+  (`refunds.py:105`). `remaining = amount − refunded_so_far` is therefore
+  exactly the ceiling the trigger will accept, not a second guess at it.
+- **Reads through the view, no float.** Both `t` and the correlated `r` read
+  `active_transactions`, never base `transactions` — a soft-deleted refund can't
+  understate the remainder, matching §6 and `refund_candidates`. `sum` over
+  `NUMERIC` → `Decimal`; `amount − refunded_so_far` stays `Decimal` end to end.
+  No `float` on the amount path.
+- `uv run pytest` → **500 passed** (22.3s). Targeted run of the three new/edited
+  guards → 3 passed.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Both guards fail red without the fix — verified live, not trusted:**
+  - Reverted the 10th column in `reports.py`;
+    `test_recent_transactions_reports_what_remains_refundable` → **FAILED**
+    (falls back to reading `account_id` in the last column). Restored.
+  - Reintroduced `value="{remaining}"` (dropping `placeholder`/`max`) in
+    `_refund_panel`; both `test_refund_panel_amount_is_empty_not_prefilled` and
+    `test_refund_panel_placeholder_is_what_remains_not_the_original` → **FAILED**.
+    Restored. Working tree clean (`git status --short` empty) after both reverts.
+
+### Findings
+
+None blocking.
+
+- **Non-issue, noted for the record:** a fully-refunded expense (remaining 0)
+  still renders the refund toggle, now with `max="0"` / `placeholder="0"` so no
+  valid amount can be entered. That is pre-existing toggle behaviour and this
+  change strictly improves it (before, it offered `value="50.00"`, which the
+  trigger would reject). Not a regression, not in scope for task 1799.
+
+The task 1799 box in `TASKS.md` is correctly ticked: real behaviour change,
+not a stub, with the money-path guard and the placeholder guard both proven to
+redden without their respective fix.
+
+---
+
 ## 2026-08-16 — `4c3a67e` undo a dashboard delete instead of confirming it
 
 **Scope:** Task 1771. Migration `020`, `kanakko/db/edits.py`

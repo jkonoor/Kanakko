@@ -23,6 +23,7 @@ from kanakko.webapp import (
     SHELL_HTML,
     InitDataError,
     Period,
+    account_balances_section,
     category_bars,
     current_month_ist,
     current_week_ist,
@@ -453,6 +454,35 @@ def test_dashboard_route_month_delta_needs_a_baseline(conn, monkeypatch):
     assert "▲ 67% vs last month" in month_panel  # (500-300)/300 = 66.7% → 67
 
 
+def test_dashboard_route_shows_account_balances(conn, monkeypatch):
+    """`GET /app/data` answers "how much do I have" (§18) — before this task
+    `account_balances` had exactly one consumer, the weekly reconcile job, and
+    nowhere a user could look."""
+    from kanakko.db import get_or_create_user, set_account_opening_balance
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    first, _ = current_month_ist()
+    _insert_txn(conn, uid, "500.00", "income", "Salary", first)  # mints the household
+    set_account_opening_balance(conn, uid, "credit", Decimal("2000"))
+
+    init_data = _sign(FIELDS)
+    resp = client.get("/app/data", headers={"Authorization": "tma " + init_data})
+    conn.rollback()
+
+    body = resp.text
+    accounts_section = body.split('<section class="accounts">', 1)[1].split(
+        "</section>", 1)[0]
+    assert "Bank" in accounts_section and "₹500.00" in accounts_section
+    # A fresh `credit` account owes what was reported, positively (§18's sign
+    # convention) — never the negative asset figure the ledger stores it as.
+    assert "Card" in accounts_section and "₹2,000.00" in accounts_section
+    assert "External" not in accounts_section
+
+
 def test_dashboard_route_rejects_a_forged_payload(conn, monkeypatch):
     """A payload signed with the wrong token is a 401, not a dashboard (§13)."""
     migrate(conn)
@@ -504,7 +534,7 @@ def test_recent_list_escapes_the_note():
     Mini App. Assert the *escaped bytes* are present and the raw `<script>` tag is
     not — not merely that the page "looks fine".
     """
-    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "<script>alert(1)</script>", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert "<script>alert(1)</script>" not in out  # not rendered live
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out  # rendered inert
@@ -513,7 +543,7 @@ def test_recent_list_escapes_the_note():
 def test_recent_list_renders_row_with_delete_button_and_amount():
     """Each row shows its amount (through `format_amount`, §9) and a delete button
     carrying the `txn_id` the `POST /app/delete` route needs."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert "₹50.00" in out
     assert 'data-id="7"' in out
@@ -521,7 +551,7 @@ def test_recent_list_renders_row_with_delete_button_and_amount():
 
 
 def test_recent_list_null_category_is_uncategorised():
-    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1)]
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert "Uncategorised" in out
 
@@ -534,7 +564,7 @@ def test_recent_list_transfer_shows_accounts_not_a_category_dropdown():
     """A transfer reads as "Bank → SIP" (§18), not as a category-less expense —
     the bug this task fixes. Before the fix, `_category_select` fell through
     `CATEGORIES_BY_TYPE.get("transfer", ())` to an empty, useless dropdown."""
-    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert "Bank → SIP" in out
     assert "cat-select" not in out  # no category dropdown for a transfer
@@ -544,7 +574,7 @@ def test_recent_list_transfer_shows_accounts_not_a_category_dropdown():
 def test_recent_list_transfer_has_no_income_or_expense_sign():
     """A transfer is neither spending nor income (§18) — no −/+ sign, no income
     tint. Both directions are asserted so an unconditional sign can't sneak by."""
-    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert "₹5,000.00" in out
     assert "−₹5,000.00" not in out
@@ -653,7 +683,7 @@ def test_delete_route_logs_the_money_mutation(conn, monkeypatch):
 def test_recent_list_renders_a_category_select():
     """Each row carries a `<select>` of the type's categories, current one selected,
     naming the `txn_id` the `POST /app/category` route needs (§5, §13)."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert 'class="cat-select" data-id="7"' in out
     assert "<option selected>Food</option>" in out
@@ -662,7 +692,7 @@ def test_recent_list_renders_a_category_select():
 
 
 def test_recent_list_null_category_select_defaults_to_uncategorised():
-    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1)]
+    rows = [(9, Decimal("10.00"), "expense", None, "", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert '<option value="" disabled selected>Uncategorised</option>' in out
 
@@ -804,17 +834,25 @@ def test_category_route_rejects_a_stale_init_data(conn, monkeypatch):
 # --- Per-row field edit from the dashboard: amount, date, note, account (§13, §18, task 974) ---
 
 
-def test_recent_list_renders_edit_toggle_and_hidden_panel():
-    """Each row carries a hidden per-row editor — date, amount, note, and (for a
-    non-transfer row) an account `<select>` naming the `txn_id` `POST /app/edit`
-    needs, current values pre-filled (§13, §18)."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3)]
+def test_recent_list_renders_a_labelled_editor_panel_reached_by_tapping_the_row():
+    """The row editor is now reached by tapping the collapsed row (`.txn-head`),
+    not a separate ✎ glyph button (task 1704) — every field carries a visible
+    text label, not just an `aria-label`, and appears in consequence order
+    (§5: category is the most-often-wrong field) — Amount, Category, Date,
+    Account, Note — current values pre-filled."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3, Decimal("0"), None, None)]
     accounts = [(3, "Bank"), (4, "Wallet")]
     out = recent_list(rows, accounts)
-    assert 'class="edit-toggle" data-id="7"' in out
-    assert 'class="txn-edit" hidden data-id="7"' in out
+    assert 'class="txn-head" data-id="7"' in out
+    assert 'class="txn-panel" hidden data-id="7"' in out
+    assert "edit-toggle" not in out  # the old separate toggle button is gone
+    order = [out.index(marker) for marker in (
+        "Amount (₹)</span>", "Category</span>", "Date</span>", "Account</span>", "Note</span>",
+    )]
+    assert order == sorted(order)
     assert 'class="edit-date" data-id="7" data-edit-field="occurred_on"' in out
     assert 'value="2026-08-06"' in out
+    assert "06 Aug 2026" in out  # human-readable date beside the native input
     assert 'class="edit-amount" data-id="7" data-edit-field="amount"' in out
     assert 'value="50.00"' in out
     assert 'class="edit-note" data-id="7" data-edit-field="note"' in out
@@ -824,10 +862,58 @@ def test_recent_list_renders_edit_toggle_and_hidden_panel():
     assert '<option value="4">Wallet</option>' in out
 
 
+def test_recent_list_header_shows_category_as_text_not_a_dropdown():
+    """The collapsed row is data only — the category `<select>` now lives inside
+    the hidden panel (task 1704). Before this, the picker's own chevron sat
+    beside a row that also expands, two chevron-ish affordances for one
+    meaning."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
+    out = recent_list(rows)
+    head, _, panel = out.partition('class="txn-panel"')
+    assert "Food" in head
+    assert "cat-select" not in head
+    assert "cat-select" in panel
+
+
+def test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel():
+    """Delete and Refund are words, not glyphs, and reachable only once the row
+    is expanded (task 1704) — deleting a row is now two deliberate taps
+    (expand, then Delete), not one tap on a ✕ that read as "close" on a card
+    that also expands. Reddens if either button reappears in the always-visible
+    collapsed part of the row, which is the bug that made every expense row at
+    least 132px tall."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
+    out = recent_list(rows)
+    head, _, panel = out.partition('class="txn-panel"')
+    assert 'class="del"' not in head and 'class="refund-toggle"' not in head
+    assert 'class="del" data-id="7"' in panel and ">Delete<" in panel
+    assert 'class="refund-toggle" data-id="7"' in panel and ">Refund<" in panel
+
+
+def test_recent_list_head_button_carries_aria_expanded():
+    """`aria-expanded` names the row's own state so a screen reader announces
+    whether tapping it opens or closes the panel; `shell.py`'s click handler
+    flips it alongside `.txn-panel[hidden]`."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
+    out = recent_list(rows)
+    assert 'aria-expanded="false"' in out
+
+
+def test_recent_list_edit_panel_hides_account_select_for_a_single_account():
+    """A household with one account gets no account `<select>` in the row editor
+    — a single-option dropdown is a dead control, not a real choice. Mirrors
+    `confirm.py`'s `show_accounts = bool(accounts) and len(accounts) > 1`
+    (§18): the same rule applies wherever an account picker can appear."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 3, Decimal("0"), None, None)]
+    accounts = [(3, "Bank")]
+    out = recent_list(rows, accounts)
+    assert "edit-account" not in out
+
+
 def test_recent_list_transfer_edit_panel_has_no_account_select():
     """A transfer's amount/date/note are still editable, but it has no single
     account to reassign — it names two ends, not one (§18)."""
-    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    rows = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"), None, None)]
     accounts = [(3, "Bank"), (4, "SIP")]
     out = recent_list(rows, accounts)
     assert "edit-account" not in out
@@ -837,9 +923,8 @@ def test_recent_list_transfer_edit_panel_has_no_account_select():
 
 def test_recent_list_renders_a_refund_toggle_and_panel_for_an_expense():
     """An `expense` row carries a refund toggle and a hidden refund panel naming
-    the `txn_id` `POST /app/refund` needs, the amount pre-filled (§13, §18, task
-    1082)."""
-    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1)]
+    the `txn_id` `POST /app/refund` needs (§13, §18, task 1082)."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
     out = recent_list(rows)
     assert 'class="refund-toggle" data-id="7"' in out
     assert 'class="txn-refund" hidden data-id="7"' in out
@@ -847,14 +932,120 @@ def test_recent_list_renders_a_refund_toggle_and_panel_for_an_expense():
     assert 'class="refund-submit" data-id="7"' in out
 
 
+def test_refund_panel_amount_is_empty_not_prefilled():
+    """The refund input starts empty, not the row's full amount (task 1799) — a
+    full-width primary button under a pre-filled full amount put a complete
+    refund one tap away from opening the panel by accident."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
+    out = recent_list(rows)
+    assert 'class="refund-amount" data-id="7" aria-label="Refund amount" placeholder="50.00">' in out
+    assert 'value="50.00"' not in out.split('class="refund-amount"')[1].split(">")[0]
+
+
+def test_refund_panel_placeholder_is_what_remains_not_the_original():
+    """Once part of a ₹50 expense is already refunded, the panel's placeholder
+    (and its `max`) is the ₹30 still refundable, not the ₹50 original — offering
+    the original would invite an amount migration 014's trigger rejects."""
+    rows = [(7, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("20.00"), None, None)]
+    out = recent_list(rows)
+    assert 'placeholder="30.00"' in out
+    assert 'max="30.00"' in out
+    assert 'placeholder="50.00"' not in out
+
+
 def test_recent_list_no_refund_control_for_income_or_transfer():
     """Only an `expense` is refundable (§18, task 1082): `create_refund` accepts
     nothing else, so offering the control on income or a transfer would just be a
     tap that always 404s."""
-    income = [(8, Decimal("20000.00"), "income", "Salary", "", date(2026, 8, 6), None, None, 1)]
-    transfer = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None)]
+    income = [(8, Decimal("20000.00"), "income", "Salary", "", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
+    transfer = [(11, Decimal("5000.00"), "transfer", None, "", date(2026, 8, 6), "Bank", "SIP", None, Decimal("0"), None, None)]
     assert "refund-toggle" not in recent_list(income)
     assert "refund-toggle" not in recent_list(transfer)
+
+
+# --- A refund row renders as a refund, not a bare uncategorised income (task 1823) ---
+
+
+def test_recent_list_refund_row_is_neutral_not_income_tinted():
+    """§18: a refund is neither income nor an expense. A live screenshot on
+    2026-08-16 found it wearing `+` and the income-green class — this reddens
+    if that regresses."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              "medicine", date(2026, 8, 10))]
+    out = recent_list(rows)
+    head = out.split('class="txn-panel"')[0]
+    assert '<span class="amt">₹501.00</span>' in head
+    assert '<span class="amt in">' not in head
+    assert "+₹501.00" not in head
+
+
+def test_recent_list_refund_row_shows_its_inherited_category_not_uncategorised():
+    """`CATEGORIES_BY_TYPE` has no `refund` key, so a naive `category in
+    CATEGORIES_BY_TYPE.get(type_, ())` check always misses and falls back to
+    "Uncategorised" — even though `create_refund` copies a real `expense`
+    category onto the row. Checked against `expense`'s set instead."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              "medicine", date(2026, 8, 10))]
+    out = recent_list(rows)
+    head = out.split('class="txn-panel"')[0]
+    assert "Health" in head
+    assert "Uncategorised" not in head
+
+
+def test_recent_list_refund_row_category_is_text_not_a_select_in_the_editor():
+    """A refund's category is inherited from the expense it refunds — editing it
+    here independently would desync the two rows' totals, so the panel shows it
+    as text, not a `<select>`. Still holds even if `CATEGORIES_BY_TYPE` grows a
+    `refund` key that would otherwise let `_category_select` render "for free"."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              "medicine", date(2026, 8, 10))]
+    out = recent_list(rows)
+    panel = out.split('class="txn-panel"', 1)[1]
+    assert "Health" in panel
+    assert "cat-select" not in panel
+
+
+def test_recent_list_refund_row_names_what_it_refunds():
+    """The refund's own `note` is empty (`create_refund` doesn't set one) — the
+    note lane instead names the expense it refunds, by note and date, not by
+    `txn_id` (personal finance app, not a ledger of reference numbers)."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              "spent 500 on medicine", date(2026, 8, 10))]
+    out = recent_list(rows)
+    assert 'Refund of "spent 500 on medicine" · 10 Aug' in out
+
+
+def test_recent_list_refund_row_falls_back_when_the_original_has_no_note():
+    """A refund of a note-less expense still names *something*, not a blank."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              None, date(2026, 8, 10))]
+    out = recent_list(rows)
+    assert "Refund of an expense · 10 Aug" in out
+
+
+def test_recent_list_refund_row_falls_back_when_the_original_is_deleted():
+    """The expense a refund refers to can be soft-deleted afterwards — the
+    `LEFT JOIN active_transactions` then returns NULL for *both* the note and
+    the date, not just the note, so the date must not be blindly formatted."""
+    rows = [(9, Decimal("501.00"), "refund", "Health", None, date(2026, 8, 16), None, None, 1, Decimal("0"),
+              None, None)]
+    out = recent_list(rows)
+    assert "Refund of a deleted expense" in out
+
+
+def test_recent_list_refunded_expense_shows_what_remains():
+    """The refunded expense closes the loop too (task 1823): a bare `−₹501.00`
+    forces a reader to find the refund row and subtract by hand. Whole and
+    partial refunds get different wording."""
+    whole = [(7, Decimal("501.00"), "expense", "Health", "medicine", date(2026, 8, 10), None, None, 1,
+              Decimal("501.00"), None, None)]
+    partial = [(7, Decimal("501.00"), "expense", "Health", "medicine", date(2026, 8, 10), None, None, 1,
+                Decimal("200.00"), None, None)]
+    untouched = [(7, Decimal("501.00"), "expense", "Health", "medicine", date(2026, 8, 10), None, None, 1,
+                  Decimal("0"), None, None)]
+    assert "· refunded" in recent_list(whole).split("txn-note")[0]
+    assert "· ₹200.00 refunded" in recent_list(partial).split("txn-note")[0]
+    assert "refunded" not in recent_list(untouched).split("txn-note")[0]
 
 
 def test_recurring_list_renders_a_rule_with_pause_and_delete():
@@ -884,6 +1075,28 @@ def test_recurring_list_paused_rule_shows_resume_and_paused_class():
 
 def test_recurring_list_empty_renders_nothing():
     assert recurring_list([]) == ""
+
+
+def test_account_balances_section_renders_a_row_per_account_and_hides_external():
+    """"How much do I have?" (§18) — one row per live account, credit already
+    signed as what is owed by `account_balances`'s own query, `external` never
+    shown (structural, same rule every other account list follows)."""
+    balances = [
+        {"account_id": 1, "name": "Bank", "kind": "spending",
+         "is_default": True, "balance": Decimal("15000.00")},
+        {"account_id": 2, "name": "Card", "kind": "credit",
+         "is_default": False, "balance": Decimal("2000.00")},
+        {"account_id": 3, "name": "External", "kind": "external",
+         "is_default": False, "balance": Decimal("0.00")},
+    ]
+    out = account_balances_section(balances)
+    assert "Bank" in out and "₹15,000.00" in out
+    assert "Card" in out and "₹2,000.00" in out
+    assert "External" not in out
+
+
+def test_account_balances_section_empty_renders_nothing():
+    assert account_balances_section([]) == ""
 
 
 def _insert_rule(conn, user_id, account_id, category="Food", amount="5000.00", day=5):
@@ -1453,6 +1666,109 @@ def test_delete_route_rejects_a_stale_init_data(conn, monkeypatch):
     assert resp.status_code == 401
 
 
+# --- Undo a delete from the dashboard toast (§6, §13, task 1771) ---
+
+
+def test_recent_list_delete_button_carries_the_amount_for_the_undo_toast():
+    """`.del` carries `data-amount` so the client can build "Deleted ₹500.00 ·
+    Undo" without parsing the button's `aria-label` — a separate string with a
+    different shape ("Delete −₹500.00 on 16 Aug")."""
+    rows = [(7, Decimal("500.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)]
+    out = recent_list(rows)
+    assert 'data-amount="₹500.00"' in out
+
+
+def test_restore_route_undeletes_the_users_row(conn, monkeypatch):
+    """`POST /app/restore` clears `deleted_at` and the row is live again through
+    the view the dashboard reads (§6, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))
+    delete = client.post("/app/delete", headers={"Authorization": "tma " + _fresh_init_data()},
+                         json={"id": txn_id})
+    assert delete.status_code == 204
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 204
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 1  # back in the view
+    conn.rollback()
+
+
+def test_restore_route_cannot_undelete_another_users_row(conn, monkeypatch):
+    """A deleted row belonging to a different user is a 404, never restored —
+    scoped to the signed user id, the same rule `/app/delete` follows (§1, §13)."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    get_or_create_user(conn, 42)
+    other = get_or_create_user(conn, 99)
+    txn_id = _insert_txn(conn, other, "500.00", "expense", "Food", date(2026, 8, 6))
+    with conn.cursor() as cur:
+        cur.execute("UPDATE transactions SET deleted_at = now() WHERE txn_id = %s", (txn_id,))
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _fresh_init_data(user_id=42)},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 404
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM active_transactions WHERE txn_id = %s", (txn_id,))
+        assert cur.fetchone()[0] == 0  # still deleted — the other user's row untouched
+    conn.rollback()
+
+
+def test_restore_route_on_a_live_row_is_404(conn, monkeypatch):
+    """Restoring an id that was never deleted (a stale/replayed Undo tap, or one
+    fired twice) is a 404, not a silent no-op that could be mistaken for success."""
+    from kanakko.db import get_or_create_user
+
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    uid = get_or_create_user(conn, 42)
+    txn_id = _insert_txn(conn, uid, "500.00", "expense", "Food", date(2026, 8, 6))  # never deleted
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _fresh_init_data()},
+        json={"id": txn_id},
+    )
+    assert resp.status_code == 404
+    conn.rollback()
+
+
+def test_restore_route_rejects_a_stale_init_data(conn, monkeypatch):
+    """Like `/app/delete`, `/app/restore` passes `max_age` — a captured Undo tap
+    must not stay live forever (§13)."""
+    migrate(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setattr(app_module, "connect", lambda: _Reuse(conn))
+
+    resp = client.post(
+        "/app/restore",
+        headers={"Authorization": "tma " + _sign(FIELDS)},  # auth_date = 2023
+        json={"id": 1},
+    )
+    conn.rollback()
+    assert resp.status_code == 401
+
+
 # --- Refund from the dashboard row (§13, §16, §18, task 1082) ---
 
 
@@ -1623,34 +1939,30 @@ def test_refund_route_logs_the_money_mutation(conn, monkeypatch):
     conn.rollback()
 
 
-def test_txn_row_places_note_and_delete():
-    """A transaction row is a grid: note on its own row, delete pinned to row 1 (§13).
+def test_collapsed_row_height_no_longer_depends_on_which_actions_it_has():
+    """Before task 1704, `.del`/`.edit-toggle`/`.refund-toggle` were each pinned to
+    their own 44px grid row unconditionally, so every expense row was at least
+    132px tall for content needing 44-64px, whether or not it carried a note.
 
-    What this catches, and what it can't. The original CSS made `.txn` a wrapping
-    flex row with `.txn-note` at `flex-basis:100%`; because `.del` is a sibling
-    *after* the note, it was pushed onto a third line and the row's text collided
-    with itself — every row carrying a note was unreadable, while the note-less
-    rows looked fine, which is why it survived review. That is a rendered-layout
-    bug: no headless assertion can see it. Verified by rendering the real markup
-    in Chrome at 390px in both themes, before and after.
-
-    So this guard pins the *mechanism* that fixes it — grid placement — rather
-    than claiming to check the appearance. Reverting `.txn` to the wrapping flex
-    layout reddens it. Anything subtler than that still needs eyes on a phone.
+    What this catches, and what it can't. A rendered-pixel-height comparison is a
+    rendered-layout fact: no headless assertion can see it (verified by rendering
+    the real markup in Chrome at 390px in both themes, before and after). So this
+    guard pins the *mechanism* instead — the always-visible part of a row is one
+    button (`.txn-head`) with a single bounded `min-height`, and no CSS rule gives
+    an action button a fixed `grid-row` lane any more, which is what used to force
+    the height regardless of content. Reddens if that fixed-lane CSS returns.
     """
-    def rule(selector: str) -> str:
-        """The body of the rule that *starts* a line with `selector`.
+    assert "grid-row" not in SHELL_HTML
+    head_rule = SHELL_HTML.split("\n.txn-head {", 1)[1].split("}", 1)[0]
+    assert "min-height: 44px" in head_rule
+    assert "height:" not in head_rule.replace("min-height:", "")  # bounded, not fixed
 
-        Anchored to the newline on purpose: `.txn-note` also appears in the shared
-        `.label, .txn-note { color: ... }` rule, and an unanchored search finds
-        that colour declaration instead of the layout one — which is how the first
-        version of this test passed the wrong string and failed against correct CSS.
-        """
-        return SHELL_HTML.split(f"\n{selector} {{", 1)[1].split("}", 1)[0]
-
-    assert "display: grid" in rule(".txn")
-    assert "grid-row: 1" in rule(".del")  # delete button stays on the first row
-    assert "grid-column: 1" in rule(".txn-note")  # note gets a row of its own
+    note = recent_list([(1, Decimal("50.00"), "expense", "Food", "lunch", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)])
+    no_note = recent_list([(2, Decimal("50.00"), "expense", "Food", "", date(2026, 8, 6), None, None, 1, Decimal("0"), None, None)])
+    # Neither collapsed row carries an action button — both are data-only, so
+    # neither pays the old fixed-lane height regardless of the note.
+    for out in (note.split('class="txn-panel"')[0], no_note.split('class="txn-panel"')[0]):
+        assert 'class="del"' not in out and 'class="refund-toggle"' not in out
 
 
 def test_shell_reloads_when_the_mini_app_is_reopened():
@@ -1676,6 +1988,95 @@ def test_shell_reloads_when_the_mini_app_is_reopened():
     # and the handler must actually reload, not merely be registered
     listener = SHELL_HTML.split(call, 1)[1].split("\n", 1)[0]
     assert "load()" in listener
+
+
+def test_a_failed_mutation_is_surfaced_not_swallowed():
+    """Every mutating call goes through one helper that always reloads and only
+    toasts on failure (task 1558) — not the old `.then(r => { if (r.ok) load(); })`.
+
+    The bug: six inlined call sites (edit, delete, refund, category, recurring
+    pause, recurring delete) only called `load()` when the response was `ok`, so
+    a 4xx/5xx or a dropped connection did *nothing* — the field kept showing what
+    the user typed, and the next `load()` (which fires on every re-activation)
+    silently reverted it with no sign anything had gone wrong.
+
+    This pins the two halves of the fix, not just that a `mutate` name exists:
+    `load()` is unconditional (in `.finally`, not gated on `r.ok`) and the toast
+    fires exactly on failure (`!r.ok` and the network-error `.catch`). A version
+    that renamed the old bug (e.g. `.then(r => { if (r.ok) load(); else showToast() })`,
+    which still skips the reload on failure) would still fail this.
+    """
+
+    def body_of(fn_name: str) -> str:
+        start = SHELL_HTML.index(f"function {fn_name}(")
+        # Balance braces from the first `{` after the signature to find the
+        # matching close, since the body itself contains nested `{ ... }`.
+        brace_start = SHELL_HTML.index("{", start)
+        depth = 0
+        for i in range(brace_start, len(SHELL_HTML)):
+            if SHELL_HTML[i] == "{":
+                depth += 1
+            elif SHELL_HTML[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return SHELL_HTML[brace_start : i + 1]
+        raise AssertionError(f"unbalanced braces in function {fn_name}")
+
+    mutate = body_of("mutate")
+    assert ".then(r => { if (!r.ok) { showToast(); return; } if (onSuccess) onSuccess(); })" in mutate
+    assert ".catch(showToast)" in mutate, "a thrown/network error must toast too"
+    assert ".finally(load)" in mutate, "load() must run unconditionally"
+    # load() must not be inside the `.then(...)` success branch — it has to run
+    # whether or not the request succeeded, so the only `load` in the whole
+    # function body is the one in `.finally`.
+    assert mutate.count("load") == 1
+
+    # None of the old inlined, success-only reloads survive at any call site.
+    assert "if (r.ok) load()" not in SHELL_HTML
+
+    # Every one of the seven mutating actions routes through the helper, not a
+    # bespoke fetch.
+    for route in (
+        "/app/refund",
+        "/app/recurring/active",
+        "/app/recurring/delete",
+        "/app/delete",
+        "/app/restore",
+        "/app/category",
+        "/app/edit",
+    ):
+        assert f"mutate('{route}'," in SHELL_HTML, f"{route} bypasses mutate()"
+
+
+def test_delete_offers_undo_instead_of_confirming_first():
+    """The dashboard doesn't ask "are you sure?" before a delete — it deletes,
+    then offers Undo (task 1771). A `confirm(...)` dialog is the one shape this
+    task explicitly rejects: it taxes the (likelier) case where the user meant
+    it, where an undo toast doesn't."""
+    assert "confirm(" not in SHELL_HTML
+
+    def body_of(fn_name: str) -> str:
+        start = SHELL_HTML.index(f"function {fn_name}(")
+        brace_start = SHELL_HTML.index("{", start)
+        depth = 0
+        for i in range(brace_start, len(SHELL_HTML)):
+            if SHELL_HTML[i] == "{":
+                depth += 1
+            elif SHELL_HTML[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return SHELL_HTML[brace_start : i + 1]
+        raise AssertionError(f"unbalanced braces in function {fn_name}")
+
+    undo = body_of("showUndoToast")
+    assert "Undo" in undo
+    assert "toast-undo" in undo
+    # The delete call site passes the toast as an onSuccess callback, not a
+    # bespoke .then() — the shape that would let a delete skip the toast.
+    assert "mutate('/app/delete', {id}, () => showUndoToast(id, btn.dataset.amount));" in SHELL_HTML
+    # The toast's own Undo button restores through the same mutate() helper,
+    # so a failed restore still toasts and still reloads.
+    assert "mutate('/app/restore', {id: Number(undo.dataset.id)});" in SHELL_HTML
 
 
 def test_mini_app_refuses_a_user_who_was_never_admitted(conn, monkeypatch):

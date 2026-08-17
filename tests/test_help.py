@@ -120,3 +120,14 @@ def test_help_lists_every_command_and_the_failed_parse_stays_a_correction():
     assert "amount" in handlers.REPHRASE_PROMPT
     assert handlers.REPHRASE_PROMPT != handlers.HELP_TEXT
     assert "/undo" not in handlers.REPHRASE_PROMPT
+
+
+def test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help():
+    """A new household's default account sits at ₹0 until someone tells the bot
+    what's really in it — `/account bank 52000` does that (Phase 11), but nothing
+    ever said so. Both the first message a user sees and the permanent manual
+    must name it, or the fix stays undiscoverable exactly like the commands the
+    test above already guards.
+    """
+    assert "/account bank" in handlers.WELCOME
+    assert "/account bank" in handlers.HELP_TEXT

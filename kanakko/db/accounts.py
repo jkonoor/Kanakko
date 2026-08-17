@@ -47,32 +47,41 @@ def create_default_accounts(
 
 
 def set_account_opening_balance(
-    conn: psycopg.Connection, user_id: int, kind: str, amount: Decimal
+    conn: psycopg.Connection, user_id: int, kind: str, amount: Decimal, name: str | None = None
 ) -> dict | None:
-    """Create or update the caller's household's `kind` account with `amount` (§18).
+    """Create or update one of the caller's household's accounts with `amount` (§18).
 
     The onboarding ask: `amount` is always what the user reports positively — "how
-    much you owe" for `credit`, "how much is already in it" for `locked` — and this
-    is the one place that turns it into the signed `opening_balance` the ledger
-    stores (§18: "same column, different question"). One account per kind per
-    household: a second call updates the opening balance rather than minting a
-    duplicate, so a typo is correctable. `kind` is trusted — the caller
-    (`handlers.handle_account`) has already restricted it to `credit`/`locked`,
-    the two kinds this command may create; `spending` and `external` are structural
-    and never made this way. Returns `{account_id, kind, name}`, or `None` when
-    `user_id` has no household yet — open signup mode admits a user before
-    `/start` mints one (`create_household_of_one`), so a first message of
-    `/account credit 5000` must be a refusal, not a crash on an empty
-    `RETURNING`. Does not commit — the caller owns the transaction.
+    much you owe" for `credit`, "how much is already in it" for `locked`/`spending`
+    — and this is the one place that turns it into the signed `opening_balance` the
+    ledger stores (§18: "same column, different question"). `name` defaults to the
+    fixed onboarding name for `credit`/`locked` (`ACCOUNT_ONBOARDING_KINDS`); a
+    `spending` account has no fixed name, so the caller (`handle_account`) always
+    passes the one the user typed — "Bank", "Cash".
+
+    **The lookup is keyed on `kind` *and* `name` together, never `kind` alone.**
+    `spending` covers several differently-named accounts (Bank, Cash, ...), so a
+    `kind`-only match once two exist picks between them arbitrarily —
+    `/account cash 2000` would find and overwrite Bank's opening balance instead of
+    minting Cash. Name alone would trade that for a different collision: a spending
+    account someone names "card" would match the fixed `credit` account named
+    "Card" (`accounts.name` carries no uniqueness constraint). Matching on both is
+    what makes a second call update *that* account rather than mint or clobber a
+    different one, so a typo is correctable without touching its neighbours.
+    Returns `{account_id, kind, name}`, or `None` when `user_id` has no household
+    yet — open signup mode admits a user before `/start` mints one
+    (`create_household_of_one`), so a first message of `/account credit 5000` must
+    be a refusal, not a crash on an empty `RETURNING`. Does not commit — the caller
+    owns the transaction.
     """
-    name = ACCOUNT_ONBOARDING_KINDS[kind]
+    name = name or ACCOUNT_ONBOARDING_KINDS[kind]
     signed = -amount if kind == "credit" else amount
     with conn.cursor() as cur:
         cur.execute(
             "SELECT account_id FROM accounts"
             " WHERE household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
-            "   AND kind = %s AND deleted_at IS NULL",
-            (user_id, kind),
+            "   AND kind = %s AND lower(name) = lower(%s) AND deleted_at IS NULL",
+            (user_id, kind, name),
         )
         row = cur.fetchone()
         if row is not None:

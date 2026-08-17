@@ -165,6 +165,7 @@ HELP_TEXT = (
     "/transfer <name> — hand over ownership\n"
     "/account credit <amount> — add a credit card, what you currently owe\n"
     "/account locked <amount> — add an FD/SIP/chit, what's already in it\n"
+    "/account bank 52000 — set what a spending account like Bank or Cash holds\n"
     "/account <name> — what an FD/SIP/chit has received and paid out\n"
     "/recurring <amount> <day> <category> <account> — an auto-debit I'll ask "
     "you to confirm each month, e.g. `/recurring 5000 5 Bills & Utilities Bank`\n"
@@ -201,6 +202,8 @@ WELCOME = (
     "Got a credit card or an FD/SIP/chit? `/account credit 5000` (what you owe) "
     "or `/account locked 20000` (what's already in it) adds it — skip this if "
     "you don't, nothing else needs it.\n\n"
+    "Want your balance to be right? Tell me what you have: `/account bank "
+    "52000`.\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went, "
     "and send /help any time for everything I can do."
 )

@@ -1,10 +1,10 @@
 """The dashboard's per-row mutations (§6, §13, §16, §17).
 
-Split off `reports.py` — that module is reads, this is writes. All three
-functions here write an audit row inside their own transaction, like the
-bot-side pair in `pending`, and are scoped to `user_id` so one user cannot
-change another's row by guessing an id (§1) — §16: "Edit / delete a row: only
-the member who entered it".
+Split off `reports.py` — that module is reads, this is writes. Every function
+here writes an audit row inside its own transaction, like the bot-side pair in
+`pending`, and is scoped to `user_id` so one user cannot change another's row
+by guessing an id (§1) — §16: "Edit / delete a row: only the member who
+entered it".
 """
 
 import psycopg
@@ -60,6 +60,60 @@ def soft_delete_transaction(
         }
         _record_event(cur, txn_id=tid, user_id=user_id, action="delete",
                       before=before, after=None, source=source, update_id=update_id)
+    return {"txn_id": tid, "amount": amount}
+
+
+def restore_transaction(
+    conn: psycopg.Connection,
+    user_id: int,
+    txn_id: int,
+    *,
+    source: str,
+    update_id: int | None,
+) -> dict | None:
+    """Undo a soft-delete: clear `deleted_at` on one of `user_id`'s own rows (§6, §13, §17, task 1771).
+
+    The dashboard's post-delete toast ("Deleted ₹500.00 · Undo") calls this
+    instead of a confirm-before-delete dialog — §6 already made a soft delete
+    recoverable in the schema, this is what actually reverses it. Unlike every
+    other write in this module, the row this needs to find is exactly the one
+    `active_transactions` hides, so the `WHERE` targets `transactions` directly
+    — the one place in the codebase that is correct rather than a violation of
+    "reads go through the view" (CLAUDE.md): a live row is never a candidate
+    here, `deleted_at IS NOT NULL` is the whole point of the clause, and (unlike
+    `soft_delete_transaction`'s "already gone" no-op) there is no view of
+    deleted rows to read through instead. Still scoped to `user_id` and its
+    `household_id`, so one user cannot revive another's deleted row (§1, §16). A
+    row that is already live, or belongs to someone else, or does not exist,
+    matches nothing and returns `None`.
+
+    Mirrors `soft_delete_transaction`: the restore and its audit row (§17) share
+    one `conn.transaction()`; `before` is `None` and `after` carries the
+    restored fields, the opposite of a delete's `before`/`after`. Returns the
+    restored row's `txn_id` and amount, or `None`. Does not commit — the caller
+    owns the transaction.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transactions SET deleted_at = NULL"
+            " WHERE user_id = %s AND txn_id = %s AND deleted_at IS NOT NULL"
+            " AND household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
+            " RETURNING txn_id, amount, type, category, note, occurred_on",
+            (user_id, txn_id, user_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        tid, amount, type_, category, note, occurred_on = row
+        after = {
+            "amount": amount,
+            "type": type_,
+            "category": category,
+            "note": note,
+            "occurred_on": occurred_on,
+        }
+        _record_event(cur, txn_id=tid, user_id=user_id, action="restore",
+                      before=None, after=after, source=source, update_id=update_id)
     return {"txn_id": tid, "amount": amount}
 
 

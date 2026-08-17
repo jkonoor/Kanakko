@@ -22,6 +22,7 @@ from kanakko.webapp.periods import (
 )
 from kanakko.webapp.recent import recent_list
 from kanakko.webapp.render import (
+    account_balances_section,
     category_bars,
     dashboard_html,
     recurring_list,
@@ -32,6 +33,7 @@ __all__ = [
     "InitDataError",
     "Period",
     "SHELL_HTML",
+    "account_balances_section",
     "category_bars",
     "current_month_ist",
     "current_week_ist",

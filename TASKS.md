@@ -1555,7 +1555,7 @@ the implementation narrowed, or a defect found after the merge.
 
 ### First — the dashboard fails silently on every write
 
-- [ ] Surface a failed mutation instead of swallowing it. Every write in
+- [x] Surface a failed mutation instead of swallowing it. Every write in
       `webapp/shell.py` ends `\.then(r => { if (r.ok) load(); })` — edit, delete,
       refund, category, recurring pause, recurring delete, **six copies, none with
       an `else` and none with a `.catch`**. So a 4xx, a 5xx, a dropped connection
@@ -1572,6 +1572,15 @@ the implementation narrowed, or a defect found after the merge.
       definition per thing). Guard: stub a route to 500 and assert the value on
       screen returns to the stored one *and* the toast appears — a test that only
       checks the toast passes on a version that leaves the wrong number showing.
+      Done: added `mutate(url, body)` in `webapp/shell.py`, replacing all six
+      inlined fetches; it always `.finally(load)`s and calls `showToast()` (a
+      fixed-position `#toast` div) on `!r.ok` or a thrown/network error. No
+      DOM/browser test harness exists in this repo (the existing shell.py tests
+      are all structural, per `test_txn_row_places_note_and_delete`'s own note),
+      so the guard (`test_a_failed_mutation_is_surfaced_not_swallowed`) pins the
+      mechanism — `load()` unconditional in `.finally`, the toast strictly on
+      failure, all six call sites routed through `mutate(` — rather than driving
+      a real browser; verified it reddens against the reverted single-copy bug.
 
 ### The one that can corrupt a number — read before starting
 
@@ -1597,7 +1606,7 @@ than a guarantee.
 
 ### Opening balances
 
-- [ ] Let `/account` set a **spending** account's opening balance —
+- [x] Let `/account` set a **spending** account's opening balance —
       `/account bank 52000`, `/account cash 2000` — creating Cash on first use.
       §18 says the onboarding ask covers "an opening balance for each"; what
       shipped covers only `credit` and `locked`, so a household's bank sits at ₹0
@@ -1608,7 +1617,24 @@ than a guarantee.
       "what's already in it") and their sign handling; a spending account is asked
       plainly what is in it. Guard: Bank 52,000 then Cash 2,000 leaves Bank at
       52,000, and it reddens if the lookup still keys on kind.
-- [ ] Point at it once from the welcome message — one line, e.g. *"Want your
+      Done: `set_account_opening_balance` (`kanakko/db/accounts.py`) gains a
+      `name` param and now matches `WHERE kind = %s AND lower(name) = lower(%s)`
+      — kind *and* name together, not kind alone (name-only would trade the
+      Bank/Cash collision for a new one: a spending account named "card" would
+      match the fixed `credit` account "Card", since `accounts.name` has no
+      uniqueness constraint). `credit`/`locked` keep passing no `name` and get
+      their fixed onboarding name as before, so every existing call site and test
+      is unchanged. `handle_account` (`kanakko/commands/account.py`): a first
+      word that isn't `credit`/`locked` and doesn't match a live `locked`
+      account, followed by a word that parses as an amount, now sets that
+      spending account (creating it on first use) instead of refusing with
+      `ACCOUNT_BAD_KIND`, which is now unreachable and removed along with its
+      test. `ACCOUNT_USAGE` reworded to mention spending accounts. Guard
+      (`test_set_account_opening_balance_keys_on_name_not_just_kind` in
+      `tests/test_accounts.py`) verified red without the name filter — reverted
+      the `WHERE` clause to kind-only, watched it fail, restored it. `uv run
+      pytest` → 479 passed.
+- [x] Point at it once from the welcome message — one line, e.g. *"Want your
       balance to be right? Tell me what you have: `/account bank 52000`."*
       Deliberately **not** an onboarding questionnaire: a multi-step "which
       accounts, how much in each" conversation is the state machine §5 rejected as
@@ -1617,10 +1643,18 @@ than a guarantee.
       the same numbers (verified: an adjustment is written as a `transfer`
       (`db/reconcile.py:229`), which is excluded from both totals, and an opening
       balance never enters those reports either). Add the same line to `/help`.
+      Done: added the line verbatim to `WELCOME` (after the credit/locked
+      paragraph) and a matching `/account bank 52000 — set what a spending
+      account like Bank or Cash holds` line to `HELP_TEXT`, alongside the
+      existing `/account credit`/`/account locked` lines.
+      `test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help`
+      (`tests/test_help.py`) verified red without the fix (reverted the
+      `handlers.py` change, watched it fail on the `WELCOME` assertion, restored
+      it). `uv run pytest` → 480 passed.
 
 ### Defects found after the Phase 10 merge
 
-- [ ] Gate the dashboard's per-row account dropdown the way the confirm card is
+- [x] Gate the dashboard's per-row account dropdown the way the confirm card is
       gated. `webapp/recent.py::_row_editor` renders `_account_select` for every
       non-transfer row with no count check, so a household with one account gets a
       `<select>` holding a single option — a dead control that reads as a failed
@@ -1628,13 +1662,37 @@ than a guarantee.
       rule (`show_accounts = bool(accounts) and len(accounts) > 1`); §18's
       "accounts become visible only when a second one exists" applies to both
       surfaces, and right now only one obeys it.
-- [ ] Show account balances in the dashboard. `account_balances` has exactly one
+      Done: `_edit_panel` (`kanakko/webapp/recent.py`) now only calls
+      `_account_select` when `type_ != "transfer" and len(accounts) > 1` — the
+      same test `confirm.py:126` already applies. Guard
+      `test_recent_list_edit_panel_hides_account_select_for_a_single_account`
+      (`tests/test_webapp.py`) verified red without the `len(accounts) > 1`
+      check (reverted it, watched the assertion fail on a live
+      `class="edit-account"` in the output, restored it). `uv run pytest` →
+      481 passed.
+- [x] Show account balances in the dashboard. `account_balances` has exactly one
       consumer — the weekly reconcile job — so "how much do I have", the headline
       number of the whole accounts feature, is answered once a week in a Telegram
       message and nowhere a user can look. **This is the one item in this phase
       that is a new surface rather than a fix**; drop it if the phase needs to be
       shorter. `credit` reads as what is owed (§18's sign convention, already in
       the query); `external` stays hidden as everywhere else.
+      Done: `webapp/render.py::account_balances_section` — one `.stat` row per
+      live, non-`external` account (`db.account_balances`'s own list, its
+      `credit` sign convention already baked into `balance`), reusing the
+      `.stat`/`.substats` markup and CSS the period panels already define, so no
+      new styling was needed. Rendered in `dashboard_html` right after the period
+      panels and before `recurring_list` — the flow figure, then the stock
+      figure, then automation, then detail. `mini_app_data` (`webapp/routes.py`)
+      queries `account_balances(conn, user_id)` alongside the other reads and
+      threads it through as the new `balances` param. Guard
+      (`test_account_balances_section_renders_a_row_per_account_and_hides_external`)
+      verified red without the `external` filter — briefly changed it to
+      `list(balances)`, watched "External" leak into the output, restored it. A
+      route-level test (`test_dashboard_route_shows_account_balances`) drives the
+      real route against Postgres: the default account's income and a fresh
+      `credit` account's opening balance both show, positively signed for the
+      card. `uv run pytest` → 484 passed.
 
 ### The row editor, reviewed against the live UI (2026-08-16)
 
@@ -1643,7 +1701,7 @@ From four screenshots of a real row plus a read of `webapp/recent.py` and the
 carries a real `aria-label` ("Delete ₹500.00 on 16 Aug"), so screen readers are
 fine — it is **sighted** users who get five unlabelled grey boxes.
 
-- [ ] Rebuild the row: actions out of the collapsed row, category in, fields
+- [x] Rebuild the row: actions out of the collapsed row, category in, fields
       labelled and reordered. One task, not five — they are the same markup, and
       doing them separately means restyling it four times.
       **Why the collapsed row changes:** `.del` is grid-row 1, `.edit-toggle` row
@@ -1680,7 +1738,37 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       lands first and this rebuild must not undo it.
       Guard: a row with a note and one with none both render at the same height,
       and that height is well under 132px.
-- [ ] Undo a delete, rather than confirm it. `.del` fires `POST /app/delete`
+      Done: `kanakko/webapp/recent.py` — the collapsed row is one `<button
+      class="txn-head">` showing date, category (plain text now — a `<select>`
+      never lived in the always-visible part again), amount and the note
+      beneath; tapping it toggles the sibling `.txn-panel` (`aria-expanded`
+      flipped in `shell.py`'s click handler, replacing the old `.edit-toggle`
+      glyph). `_txn_panel` renders the five fields via a new `_field(label,
+      control)` helper — Amount (labelled "Amount (₹)"), Category (the existing
+      `_category_select`, only for a non-transfer row), Date (with a
+      `.date-human` "16 Aug 2026" span beside the native input), Account (only
+      `type_ != "transfer" and len(accounts) > 1` — the gate from the task above,
+      unchanged), Note — then a `<hr class="txn-rule">` and labelled
+      Delete/Refund buttons (`>Delete<`, `>Refund<`, no glyphs); Refund still
+      reveals `_refund_panel` (its full-amount default is the next task).
+      `shell.py`'s CSS dropped the three `grid-row`-pinned 44px lanes entirely
+      (`.del`/`.edit-toggle`/`.refund-toggle` no longer exist as always-visible
+      grid children) in favour of one `.txn-head { min-height: 44px }` button —
+      the mechanism that bounded every row to 132px regardless of content is
+      gone, not hidden. Guards, all verified red-without-fix, green-with-fix:
+      `test_recent_list_renders_a_labelled_editor_panel_reached_by_tapping_the_row`
+      (field order + labels + the human date), `test_recent_list_header_shows_category_as_text_not_a_dropdown`,
+      `test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel`
+      (reddens if either button reappears in the collapsed head),
+      `test_recent_list_head_button_carries_aria_expanded`, and
+      `test_collapsed_row_height_no_longer_depends_on_which_actions_it_has`
+      (replaces `test_txn_row_places_note_and_delete` — pins the absence of any
+      `grid-row` rule and that neither a note-carrying nor a note-less collapsed
+      row exposes `.del`/`.refund-toggle`, the same mechanism-pinning shape the
+      test it replaces used, per its own note that a rendered pixel height needs
+      eyes on a phone, not a headless assertion). `uv run pytest` → 487 passed,
+      `ruff check` clean.
+- [x] Undo a delete, rather than confirm it. `.del` fires `POST /app/delete`
       immediately — no confirmation, and the ✕ glyph at a card's top-right is the
       universal *dismiss* symbol on a card that also expands, so "close" is a
       reasonable misreading of a control that removes a transaction. §6 already
@@ -1689,7 +1777,26 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       confirmation dialog: it does not tax the case where the user meant it.
       The undo must write its own audit row (§17) — restoring a transaction is a
       money mutation, and migration 013's action set will need a value for it.
-- [ ] Stop the refund field defaulting to the full amount, and show what is
+      Done: migration 020 widens `transaction_events_action_check` with
+      `'restore'`. `kanakko/db/edits.py` gets `restore_transaction` — the one
+      place in the codebase that correctly reads `transactions` directly rather
+      than the `active_transactions` view, since a soft-deleted row is exactly
+      what the view hides; scoped to `user_id`/`household_id` like its siblings,
+      writes a `restore` audit row (`after` only, mirroring delete's `before`
+      only). `POST /app/restore` in `routes.py` exposes it with the same 24h
+      `max_age` and 404-on-no-match shape as `/app/delete`. `_txn_panel`'s
+      `.del` button now also carries `data-amount`. `shell.py`: `mutate()` takes
+      an optional `onSuccess` callback; the delete click handler passes one that
+      calls the new `showUndoToast(id, amount)`, which repaints `#toast` (now
+      empty by default, populated by JS either way) as "Deleted ₹500.00 ·
+      Undo" for 5s: `.toast-undo`, on its own `toast` click listener (the
+      button lives outside `#app`, so the `app` listener never sees it), calls
+      `mutate('/app/restore', ...)`. `uv run pytest` → 497 passed, `ruff check`
+      clean. Guards, all verified red-without-fix: the audit-row tests
+      (constraint value removed from the migration), `restore_of_a_live_row`
+      (dropped `deleted_at IS NOT NULL`), and the shell.py wiring test (delete
+      call site reverted to skip the toast).
+- [x] Stop the refund field defaulting to the full amount, and show what is
       actually left. `_refund_panel` sets `value="{amount}"` under a full-width
       primary button — the only prominent button on the card — so opening it by
       accident puts a complete refund one tap away. Migration 014's trigger stops
@@ -1699,7 +1806,21 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       original — otherwise the field invites an amount the trigger will reject.
       That means the row data has to carry refunded-so-far, so this is a real
       change to `recent_transactions`, not a markup tweak.
-- [ ] Render a refund row as a refund. Found 2026-08-16 in a live screenshot: a
+      Done: `db.recent_transactions` (`kanakko/db/reports.py`) gains a 10th
+      column, `refunded_so_far` — a correlated subquery summing live refunds
+      against each row, the same "amount minus its live refunds" aggregate
+      migration 014's trigger enforces and `refund_candidates` already computes
+      (0 for anything that isn't a refunded `expense`). `recent_list`/`_txn_panel`
+      thread it through as `remaining = amount - refunded_so_far`; `_refund_panel`
+      drops the `value="{amount}"` pre-fill for an empty input with `placeholder`
+      *and* `max` set to `remaining` — the native HTML5 ceiling, not just a hint.
+      Two guards verified red-without-fix, green-with-fix: the placeholder/`max`
+      pointing at `remaining` instead of the original amount
+      (`tests/test_webapp.py`), and `recent_transactions` itself reporting the
+      partial-refund sum rather than a stale `account_id` in that column
+      (`tests/test_db.py::test_recent_transactions_reports_what_remains_refundable`).
+      `uv run pytest` → 500 passed, `ruff check` clean.
+- [x] Render a refund row as a refund. Found 2026-08-16 in a live screenshot: a
       ₹501 refund of a `Health` expense renders as **"Uncategorised · +₹501.00" in
       the income green**, with nothing saying what it refunds. **The data is
       correct** — `refund_of_txn_id` is stored (migration 014) and
@@ -1742,6 +1863,22 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       Guard: a refund of a categorised expense renders that category, carries
       neither `+` nor the income class, and names its original — and the check
       reddens if `CATEGORIES_BY_TYPE` regains a `refund` key and papers over it.
+      Done: `recent_transactions` (`kanakko/db/reports.py`) gains columns 11/12,
+      `refund_of_note`/`refund_of_occurred_on`, via a `LEFT JOIN active_transactions
+      orig` on `refund_of_txn_id` — the view, not base `transactions`, so the join
+      itself doesn't reopen the §6 bypass `test_read_paths.py` guards against; a
+      soft-deleted original just falls back to "Refund of an expense" instead of
+      surfacing deleted-row text. `recent_list` (`kanakko/webapp/recent.py`)
+      branches `type_ == "refund"` in three places: `_category_known` checks its
+      category against `expense`'s set (the one `CATEGORIES_BY_TYPE` has no
+      `refund` key for), sign/tint go neutral like a `transfer`'s, and the note
+      lane names what it refunds instead of showing its own (always-empty) note.
+      `_txn_panel`'s category field renders as text, not `_category_select`, for
+      the same "must not be editable" reason a `transfer` skips it entirely. The
+      refunded expense gets a `· refunded` / `· ₹200.00 refunded` suffix on its
+      own amount span. Six guards verified red-without-fix, green-with-fix (one
+      per branch above, plus the DB join itself) by reverting each in turn.
+      `uv run pytest` → 507 passed, `ruff check` clean.
 
 ### The spec no longer describes the code
 
@@ -1756,16 +1893,35 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       is never edited to match the code — this is the other case, a decision that
       was made and never written down, and leaving it is the drift CLAUDE.md calls
       the most expensive damage in this codebase.
+      **Blocked, 2026-08-16:** this task's own wording argues for an exception to
+      "never edit `docs/DECISIONS.md`", but neither `CLAUDE.md` nor this loop's
+      own final rules ("Never edit `docs/DECISIONS.md`. If the spec is wrong or
+      self-contradictory, add a task saying so.") carve out that exception — an
+      implementer iteration isn't the one positioned to decide the exception
+      applies here, since that decision is exactly what's supposed to make it
+      into the spec's own changelog/decision record, not a code commit's
+      say-so. Leaving unticked: a human should either edit §5 directly, or
+      explicitly amend the no-edit rule to name this exception before an
+      iteration acts on it.
 
 ### The manual test plan is missing three shipped features
 
-- [ ] Add manual test rows for **recurring rules** — `/recurring` creation, the
+- [x] Add manual test rows for **recurring rules** — `/recurring` creation, the
       cron card's Confirm / Change amount / Skip, and dashboard pause and delete.
       Migrations 015-017 shipped an entire feature with not one row in
       `docs/TESTING.md`, and it is the feature most worth testing by hand: it
       writes money on a schedule, unattended, and §18 chose the ask-first card
       precisely because a silently wrong recurring row is worse than a missing one.
-- [ ] Add manual test rows for **dashboard editing and opening balances** —
+      Added `docs/TESTING.md` §10 (17 rows: creation validation incl. a `locked`
+      account as a valid target, the cron card's exact button set, Confirm/Change
+      amount/Skip, dashboard pause/resume/delete, and 10.17 flagging a real gap
+      found while researching — no guard in `kanakko/jobs/recurring.py` stops a
+      second card going out for a rule whose card from the same month was never
+      resolved). Every command reply, button label, and route in the new rows was
+      read from source (`kanakko/commands/recurring.py`, `kanakko/confirm.py`,
+      `kanakko/jobs/recurring.py`, `kanakko/webapp/recurring.py`,
+      `kanakko/webapp/render.py`, `kanakko/webapp/shell.py`), not guessed.
+- [x] Add manual test rows for **dashboard editing and opening balances** —
       editing an amount, a date and an account on an existing row (and that each
       leaves an audit row, migration 013's `edit` action); setting a `credit`
       account's balance and confirming it is asked as *what you owe*; and setting a
@@ -1784,6 +1940,28 @@ fine — it is **sighted** users who get five unlabelled grey boxes.
       the one no automated check can cover — **turn the network off mid-edit and
       confirm the value snaps back with a toast** rather than sitting on screen
       looking saved.
+      Added `docs/TESTING.md` §3c (9 rows: expand-to-edit, amount/date/account
+      fields, the panel re-collapsing after every edit — `shell.py`'s `mutate()`
+      always reloads, so a second edit needs re-expanding, which 3c.2 calls out
+      by name since it reads like a bug — Delete/Refund as labelled buttons, the
+      undo toast and its auto-dismiss, and the network-off case: offline, the
+      post-edit reload fails too, so the whole app area says "Could not load
+      dashboard" rather than just the one field reverting), two rows in §5a
+      (5a.19-20, same query shape as 5a.7, confirming the `edit` audit action
+      for amount/date/account), and four in §9 (9.19-22: no Account field with
+      one account, `/account credit`'s exact "you owe" reply, `/account
+      <name>`'s "you have" reply for a spending account, and 9.20 for the
+      credit-card-bill risk). Read `parse.py` for 9.20 rather than guessing:
+      `new_locked_account`/`transfer`/the account-vocabulary prompt text are all
+      gated on `len(accounts) > 1` (`parse_schema`, `build_request`), so a
+      single-account household's prompt carries none of them — the specific
+      misfile named in this task (minting a `locked` "Credit card" account)
+      cannot happen through that path. The row asks the tester to record what
+      the model does instead, since that's still unverified without a live call.
+      9.19-20 must run before 9.2, which permanently ends the single-account
+      state — noted inline since renumbering 9.2 onward would have touched
+      `REVIEWS.md` and `docs/DECISIONS.md`'s existing row references.
+      `uv run pytest` → 508 passed (docs-only change).
 
 ---
 

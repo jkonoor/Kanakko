@@ -3,8 +3,9 @@
 Every read here goes through `active_transactions` (§6) and carries a
 `household_id` predicate so it can never span households (§16). Sums come back as
 `NUMERIC` → `Decimal`, never float (§9). The dashboard's per-row mutations
-(`soft_delete_transaction`, `set_transaction_category`, `edit_transaction_field`)
-are `kanakko.db.edits` — reads and writes are the seam this module split on.
+(`soft_delete_transaction`, `restore_transaction`, `set_transaction_category`,
+`edit_transaction_field`) are `kanakko.db.edits` — reads and writes are the
+seam this module split on.
 """
 
 from datetime import date
@@ -112,14 +113,30 @@ def recent_transactions(
     (§18) can render "Bank → SIP" without a second round trip. Column 9 is the
     row's own `account_id` — `NULL` for a `transfer` (it names two ends, not one,
     §18), otherwise the account the dashboard's edit control (task 974) pre-selects.
+    Column 10 is `refunded_so_far` — the sum of this row's live refunds (0 unless
+    it is a partially- or fully-refunded `expense`), the same "amount minus its
+    live refunds" aggregate migration 014's trigger enforces and
+    `refund_candidates` already computes. The dashboard's refund panel needs it to
+    offer what actually remains rather than an amount the trigger will reject.
+    Columns 11/12 are the note and date of the transaction a `refund` row
+    refunds — `NULL` for every other type. Joined against `active_transactions`
+    like every other read here (§6): the original could since have been
+    soft-deleted, and this is a read, so it goes through the view rather than
+    the base table even though the value only ever reaches display text.
+    `recent_list` needs this to name what a refund row refunds instead of
+    showing it as a bare, uncategorised income-tinted amount (§18).
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT t.txn_id, t.amount, t.type, t.category, t.note, t.occurred_on,"
-            " fa.name, ta.name, t.account_id"
+            " fa.name, ta.name, t.account_id,"
+            " coalesce((SELECT sum(r.amount) FROM active_transactions r"
+            "  WHERE r.refund_of_txn_id = t.txn_id), 0),"
+            " orig.note, orig.occurred_on"
             " FROM active_transactions t"
             " LEFT JOIN accounts fa ON fa.account_id = t.from_account_id"
             " LEFT JOIN accounts ta ON ta.account_id = t.to_account_id"
+            " LEFT JOIN active_transactions orig ON orig.txn_id = t.refund_of_txn_id"
             " WHERE t.household_id = (SELECT household_id FROM household_members WHERE user_id = %s)"
             " ORDER BY t.created_at DESC, t.txn_id DESC LIMIT %s",
             (user_id, limit),

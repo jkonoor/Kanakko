@@ -73,69 +73,63 @@ h2 {
    already carries the magnitude; per-category hues would encode identity nobody
    needs and would owe a colour-blind check in two themes. */
 .fill { background: var(--tg-theme-button-color, #3390ec); height: 100%; border-radius: 4px; }
-/* Grid, not wrapping flex: the note needs its own row while the delete button
-   stays on the first one. As sibling flex items with `.txn-note` at
-   flex-basis:100%, `.del` was pushed onto a third line and the rows collided —
-   visible only in a browser, which is why the test can guard just the structure
-   that makes this work (see test_txn_row_places_note_and_delete). */
-.txn { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: center; padding: 4px 0; }
-/* align-items:center, not the default stretch: the 44px select makes the row
-   tall, and a stretched amount span sits on a different baseline from the date
-   beside it. `.amt` gets a fixed slot so every amount shares one right-hand
-   lane however long the category name is. */
+/* Row rebuild (task 1704): a collapsed row was previously three always-visible
+   action glyphs, each its own 44px grid lane, so every expense row was at
+   least 132px tall for content needing 44-64px. `.txn-head` is now one button
+   showing data only; every action lives inside `.txn-panel`, hidden until the
+   row is tapped, so the collapsed height no longer depends on which actions a
+   row happens to offer. */
+.txn { padding: 4px 0; border-bottom: 1px solid rgba(128,128,128,.12); }
+.txn-head {
+  display: block; width: 100%; min-height: 44px; padding: 10px 0;
+  border: 0; background: none; text-align: left; cursor: pointer;
+  font: inherit; color: inherit;
+}
+/* align-items:center, not the default stretch: a stretched amount span would
+   sit on a different baseline from the date beside it. `.amt` gets a fixed
+   slot so every amount shares one right-hand lane however long the category
+   name is. */
 .txn-main { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-width: 0; font-size: 15px; }
 .amt { flex-shrink: 0; text-align: right; }
-.txn-note { grid-column: 1; font-size: 13px; padding-bottom: 6px; }
-/* 44px square: `.del` is destructive and sits next to the category control, so
-   it gets Apple's recommended target rather than WCAG 2.5.8's 24px floor. The
-   fixed width also gives every row's ✕ one vertical lane, however long the
-   amount beside it. */
-.del {
-  grid-row: 1; grid-column: 2; border: 0; background: none; cursor: pointer;
-  color: var(--tg-theme-hint-color, #707579);
-  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
-}
-.cat-select {
-  background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
-  min-height: 44px; max-width: 45vw;
-}
-/* Same lane as `.del` (44px square, same hint ink) but the note-row's column,
-   which is otherwise empty when a row carries no note — no layout cost. */
-.edit-toggle {
-  grid-row: 2; grid-column: 2; border: 0; background: none; cursor: pointer;
-  color: var(--tg-theme-hint-color, #707579);
-  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
-}
-/* Third action, `expense` rows only (task 1082) — its own row so it doesn't
-   contend with `.del`/`.edit-toggle` for row 1/2, column 2; row 3 column 1 is
-   simply left empty on these rows, same as it already is on every other row. */
-.refund-toggle {
-  grid-row: 3; grid-column: 2; border: 0; background: none; cursor: pointer;
-  color: var(--tg-theme-hint-color, #707579);
-  width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
-}
-/* The hidden per-row editor (task 974): amount, date, note, account. `[hidden]`
-   needs restating after `display: flex` below — an attribute selector and a
-   class selector have equal specificity, so without this rule the later
-   `.txn-edit` declaration would win and the panel would never actually hide.
-   `.txn-refund` (task 1082) shares the same shape. */
-.txn-edit, .txn-refund { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
-.txn-edit[hidden], .txn-refund[hidden] { display: none; }
-.txn-edit input, .txn-edit select, .txn-refund input {
-  font: inherit; color: inherit; background: var(--tg-theme-secondary-bg-color, rgba(128,128,128,.1));
+.txn-note { font-size: 13px; margin-top: 2px; }
+/* `[hidden]` needs restating after `display: flex` below — an attribute
+   selector and a class selector have equal specificity, so without this rule
+   the later `.txn-panel`/`.txn-refund` declaration would win and the panel
+   would never actually hide. */
+.txn-panel, .txn-refund { display: flex; flex-direction: column; gap: 10px; padding: 6px 0 10px; }
+.txn-panel[hidden], .txn-refund[hidden] { display: none; }
+/* Label left (~90px), field right — the layout that kills the worst state in
+   the old design, where two identical amount boxes (edit vs. refund) sat one
+   above the other with nothing telling them apart. */
+.field { display: flex; align-items: center; gap: 10px; }
+.field-label { flex: 0 0 90px; font-size: 13px; color: var(--tg-theme-hint-color, #707579); }
+.field input, .field select, .txn-refund input {
+  flex: 1; min-width: 0; font: inherit; color: inherit;
+  background: var(--tg-theme-secondary-bg-color, rgba(128,128,128,.1));
   border: 0; border-radius: 8px; padding: 8px 10px; min-height: 44px;
 }
-/* The refund panel's explicit submit (task 1082) — unlike the edit fields, which
-   auto-save on `change`, a refund adds a new row rather than overwriting one, so
-   it gets a real button rather than firing on blur. Telegram's own button colour,
-   the same var `.fill` already follows. */
-.refund-submit {
-  border: 0; border-radius: 8px; padding: 10px; min-height: 44px; font: inherit; font-weight: 600;
-  background: var(--tg-theme-button-color, #3390ec); color: var(--tg-theme-button-text-color, #fff);
-  cursor: pointer;
+/* `<input type="date">` formats to the device locale and can't be styled, so
+   this spells the date out the way the collapsed summary already does. */
+.date-human { flex-shrink: 0; font-size: 13px; color: var(--tg-theme-hint-color, #707579); }
+.txn-rule { border: 0; border-top: 1px solid rgba(128,128,128,.15); margin: 2px 0; }
+/* Delete and Refund: labelled, not glyphs, and reachable only from inside the
+   panel — deleting a row is now two deliberate taps (expand, then Delete)
+   rather than one tap on a ✕ that read as "close" on an expandable card. */
+.txn-actions { display: flex; gap: 8px; }
+.del, .refund-toggle, .refund-submit {
+  flex: 1; border: 0; border-radius: 8px; padding: 10px; min-height: 44px;
+  font: inherit; font-weight: 600; cursor: pointer;
 }
-/* The recurring-rules list (task 1161 split 2/2a) — same row grid as `.txn`,
-   its two actions in the same 44px lanes `.del`/`.edit-toggle` already use. */
+.del, .refund-toggle { background: rgba(128,128,128,.14); color: inherit; }
+/* The refund panel's explicit submit (task 1082) — unlike the fields above,
+   which auto-save on `change`, a refund adds a new row rather than
+   overwriting one, so it gets a real button rather than firing on blur.
+   Telegram's own button colour, the same var `.fill` already follows. */
+.refund-submit {
+  background: var(--tg-theme-button-color, #3390ec); color: var(--tg-theme-button-text-color, #fff);
+}
+/* The recurring-rules list (task 1161 split 2/2a) — its own row grid, its two
+   actions the same 44px tap target `.del` already uses. */
 .rule { display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; align-items: center; padding: 4px 0; }
 .rule.paused { opacity: .5; }
 .rule-main { font-size: 15px; min-width: 0; }
@@ -144,14 +138,32 @@ h2 {
   color: var(--tg-theme-hint-color, #707579);
   width: 44px; height: 44px; flex-shrink: 0; font-size: 16px;
 }
+/* A failed mutation (task 1558) surfaces here instead of nowhere; a delete
+   (task 1771) reuses the same fixed slot to offer Undo instead of asking to
+   confirm before the fact. Fixed to the viewport, not the flow, so it doesn't
+   shift anything else when it appears. Red only for the failure case — an
+   undo offer is not an error, so it gets `.undo`'s neutral dark instead. */
+#toast {
+  position: fixed; left: 16px; right: 16px; bottom: 16px; padding: 12px 16px;
+  border-radius: 8px; background: #d64545; color: #fff; text-align: center;
+  font-size: 14px;
+}
+#toast.undo { background: #323232; }
+#toast button {
+  background: none; border: 0; color: inherit; font: inherit; font-weight: 600;
+  text-decoration: underline; padding: 0; cursor: pointer;
+}
+#toast[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div id="app">Loading…</div>
+<div id="toast" hidden></div>
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready();
 const app = document.getElementById('app');
+const toast = document.getElementById('toast');
 // Stamp Telegram's own light/dark scheme on <html> so the income accent can pick
 // the step that clears contrast on this surface. `prefers-color-scheme` is not a
 // substitute — it reports the OS theme, which need not match the theme the user
@@ -178,17 +190,57 @@ function load() {
     .then(html => { app.innerHTML = html; applyPeriod(); })
     .catch(() => { app.textContent = 'Could not load dashboard.'; });
 }
+let toastTimer;
+function showToast() {
+  clearTimeout(toastTimer);
+  toast.className = '';
+  toast.textContent = "Couldn't save — try again.";
+  toast.hidden = false;
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 3000);
+}
+// The undo offer (task 1771) replaces a confirm-before-delete dialog: it
+// doesn't tax the case where the user meant it, and still leaves the mistake
+// recoverable. `id`/`amount` come off the `.del` button that was just tapped,
+// not the (now-gone) row, since the reload the delete triggers replaces the
+// list before this ever renders.
+function showUndoToast(id, amount) {
+  clearTimeout(toastTimer);
+  toast.className = 'undo';
+  toast.innerHTML = 'Deleted ' + amount + ' · <button type="button" class="toast-undo" data-id="' + id + '">Undo</button>';
+  toast.hidden = false;
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 5000);
+}
+// The one fetch every mutating action (edit, delete, restore, refund,
+// category, recurring pause/delete — seven call sites) goes through. Always
+// reloads, success or not: that discards whatever the user just typed and
+// re-renders the server's actual state, so a rejected write visibly snaps back
+// instead of silently staying wrong. The toast fires only when the write
+// itself failed, so "reverted because it failed" is distinguishable from an
+// ordinary refresh. `onSuccess`, when given, runs only on a 2xx response —
+// today only the delete call site uses it, to raise the undo offer.
+function mutate(url, body, onSuccess) {
+  fetch(url, {
+    method: 'POST',
+    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  })
+    .then(r => { if (!r.ok) { showToast(); return; } if (onSuccess) onSuccess(); })
+    .catch(showToast)
+    .finally(load);
+}
 app.addEventListener('click', e => {
   // Switching period is a local view change — every panel is already in the
   // fragment, so no request and no reload.
   const seg = e.target.closest('.seg');
   if (seg) { period = seg.dataset.period; applyPeriod(); return; }
-  // The edit toggle is a local view change too — it just reveals the hidden
-  // panel `_edit_panel` already rendered for this row, no request either.
-  const editBtn = e.target.closest('.edit-toggle');
-  if (editBtn) {
-    const panel = editBtn.closest('.txn').querySelector('.txn-edit');
+  // Tapping the collapsed row is a local view change too — it just reveals
+  // the hidden panel `_txn_panel` already rendered for this row, no request
+  // either (task 1704 — this replaced a separate ✎ glyph button).
+  const head = e.target.closest('.txn-head');
+  if (head) {
+    const panel = head.closest('.txn').querySelector('.txn-panel');
     panel.hidden = !panel.hidden;
+    head.setAttribute('aria-expanded', String(!panel.hidden));
     return;
   }
   // Same for the refund toggle (task 1082) — reveals `_refund_panel`.
@@ -205,11 +257,7 @@ app.addEventListener('click', e => {
   if (refundSubmit) {
     const amount = refundSubmit.closest('.txn-refund').querySelector('.refund-amount').value;
     if (!amount) return;
-    fetch('/app/refund', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(refundSubmit.dataset.id), amount}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/refund', {id: Number(refundSubmit.dataset.id), amount});
     return;
   }
   // The recurring-rule pause/resume toggle (task 1161 split 2/2a) — sends the
@@ -218,41 +266,36 @@ app.addEventListener('click', e => {
   // server-side.
   const ruleToggle = e.target.closest('.rule-toggle');
   if (ruleToggle) {
-    fetch('/app/recurring/active', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(ruleToggle.dataset.id), active: ruleToggle.dataset.active !== 'true'}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/recurring/active', {id: Number(ruleToggle.dataset.id), active: ruleToggle.dataset.active !== 'true'});
     return;
   }
   const ruleDel = e.target.closest('.rule-del');
   if (ruleDel) {
-    fetch('/app/recurring/delete', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(ruleDel.dataset.id)}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/recurring/delete', {id: Number(ruleDel.dataset.id)});
     return;
   }
   const btn = e.target.closest('.del');
   if (!btn) return;
-  fetch('/app/delete', {
-    method: 'POST',
-    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-    body: JSON.stringify({id: Number(btn.dataset.id)}),
-  }).then(r => { if (r.ok) load(); });
+  const id = Number(btn.dataset.id);
+  mutate('/app/delete', {id}, () => showUndoToast(id, btn.dataset.amount));
+});
+// The toast's own Undo button (task 1771) — separate listener because the
+// toast sits outside `#app` and is never replaced by `load()`'s innerHTML
+// swap, unlike everything the listener above handles.
+toast.addEventListener('click', e => {
+  const undo = e.target.closest('.toast-undo');
+  if (!undo) return;
+  toast.hidden = true;
+  clearTimeout(toastTimer);
+  mutate('/app/restore', {id: Number(undo.dataset.id)});
 });
 app.addEventListener('change', e => {
   const sel = e.target.closest('.cat-select');
   if (sel && sel.value) {
-    fetch('/app/category', {
-      method: 'POST',
-      headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-      body: JSON.stringify({id: Number(sel.dataset.id), category: sel.value}),
-    }).then(r => { if (r.ok) load(); });
+    mutate('/app/category', {id: Number(sel.dataset.id), category: sel.value});
     return;
   }
-  // The four row-editor fields (`_edit_panel`) share one dispatch: each carries
+  // The four row-editor fields (`_txn_panel`) share one dispatch: each carries
   // `data-edit-field` naming the column `/app/edit` changes, mirroring
   // `edit_transaction_field` taking one column name rather than four near-
   // duplicate routes. Empty is a no-op except for `note`, where it means "clear
@@ -261,11 +304,7 @@ app.addEventListener('change', e => {
   const field = e.target.closest('[data-edit-field]');
   if (!field) return;
   if (field.value === '' && field.dataset.editField !== 'note') return;
-  fetch('/app/edit', {
-    method: 'POST',
-    headers: {Authorization: 'tma ' + tg.initData, 'Content-Type': 'application/json'},
-    body: JSON.stringify({id: Number(field.dataset.id), field: field.dataset.editField, value: field.value}),
-  }).then(r => { if (r.ok) load(); });
+  mutate('/app/edit', {id: Number(field.dataset.id), field: field.dataset.editField, value: field.value});
 });
 load();
 // Reload when the Mini App comes back to the foreground. Without this the page

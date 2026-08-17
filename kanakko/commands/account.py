@@ -1,5 +1,5 @@
-"""`/account` — set up a credit/locked account's opening balance, or query a
-`locked` account's contributions and payouts (§18).
+"""`/account` — set an account's opening balance, or query a `locked` account's
+contributions and payouts (§18).
 
 Split out of `kanakko/handlers.py` (task: `handlers.py` split, slice 2/6).
 `_command_arg`/`TextMessage` stay in `handlers.py` (the shared spine every
@@ -19,15 +19,10 @@ from kanakko.tg import send_message
 ACCOUNT_COMMAND = "/account"
 
 ACCOUNT_USAGE = (
-    "Add a credit card or locked savings with its starting balance — e.g. "
-    "`/account credit 5000` (what you currently owe) or `/account locked 20000` "
-    "(what's already in an FD, SIP or chit). Everyday spending already has a "
-    "default account, so this is only for the rest."
-)
-
-ACCOUNT_BAD_KIND = (
-    "I only set up `credit` (a card — what you owe) and `locked` (FD, SIP, "
-    "chit — what's already in it) this way — e.g. `/account credit 5000`."
+    "Set an account's balance — e.g. `/account bank 52000` or `/account cash "
+    "2000` (what's in it), `/account credit 5000` (what you currently owe) or "
+    "`/account locked 20000` (what's already in an FD, SIP or chit). A new name "
+    "creates that account."
 )
 
 ACCOUNT_BAD_AMOUNT = "That doesn't look like an amount — try `/account credit 5000`."
@@ -110,28 +105,31 @@ def _handle_account_query(
 
 
 def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
-    """Set up a credit card or locked-savings account with its opening balance,
-    or query a `locked` account's contributions and payouts (§18).
+    """Set an account's opening balance, or query a `locked` account's
+    contributions and payouts (§18).
 
-    `/account credit <amount>` and `/account locked <amount>` are the onboarding
-    ask `WELCOME` points to: `amount` is always what the user reports positively —
-    "how much you owe" for a card, "how much is already in it" for savings —
-    `set_account_opening_balance` is the one place that turns it into the signed
-    `opening_balance` the ledger stores (§18: "same column, different question").
-    Everyday spending already has a default account minted at household creation
-    (`create_household_of_one`), so this command is only for the other two kinds,
-    and an abandoned onboarding still leaves a working bot. Running it twice
-    corrects a typo rather than minting a duplicate account. `/account <name>` —
-    everything else, one word or several — is the read side, delegated to
-    `_handle_account_query`; only text that *opens* with `credit`/`locked`
-    enters onboarding, so a multi-word `locked` account name (an auto-created
-    pool, see `new_locked_account`) is still reachable as a query. The query
-    lookup runs *before* the bad-kind check: a two-word arg whose second word
-    parses as an amount ("cash 500") is refused with `ACCOUNT_BAD_KIND` only
-    when no live `locked` account is named exactly that — otherwise an
-    auto-created pool with a year or amount in its name ("Goa 2026", "Car
-    2025") would be misrouted to the bad-kind refusal instead of its own
-    totals, the exact regression a prior review (F4 against `aaaeb21`) named.
+    `/account credit <amount>` and `/account locked <amount>` are the fixed
+    onboarding asks `WELCOME` points to: `amount` is always what the user reports
+    positively — "how much you owe" for a card, "how much is already in it" for
+    savings or a spending account — `set_account_opening_balance` is the one place
+    that turns it into the signed `opening_balance` the ledger stores (§18: "same
+    column, different question"). Everyday spending already has a default account
+    minted at household creation (`create_household_of_one`), so
+    `/account <name> <amount>` — any first word that isn't `credit`/`locked` and
+    isn't a live `locked` account's name — sets *that* spending account's opening
+    balance, creating it on first use ("`/account cash 2000`"). `set_account_
+    opening_balance` keys its lookup on the name (and kind) so this can never
+    collide with a differently-named account of the same kind — see its docstring.
+    Running any of these twice corrects a typo rather than minting a duplicate
+    account. `/account <name>` — everything else, one word or several, with no
+    amount — is the read side, delegated to `_handle_account_query`; a multi-word
+    `locked` account name (an auto-created pool, see `new_locked_account`) is still
+    reachable as a query because the lookup runs *before* the spending-account
+    branch: a two-word arg whose second word parses as an amount ("Goa 2026") is
+    read as a spending-account set only when no live `locked` account is named
+    exactly that — otherwise an auto-created pool with a year or amount in its name
+    would be misrouted away from its own totals, the exact regression a prior
+    review (F4 against `aaaeb21`) named.
     Does not commit — the caller owns the transaction. Returns the account row
     on success, or `None` on a usage/validation/query refusal — including a
     sender with no household yet (open signup mode, before their first
@@ -148,21 +146,21 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
                   source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
 
-    kind = parts[0].lower()
-    if kind not in {"credit", "locked"}:
-        match = _find_locked_account(conn, user_id, arg)
-        if match is None and len(parts) == 2 and _looks_like_amount(parts[1]):
-            send_message(msg.chat_id, ACCOUNT_BAD_KIND)
+    first = parts[0].lower()
+    if first in {"credit", "locked"}:
+        if len(parts) == 1:
+            send_message(msg.chat_id, ACCOUNT_USAGE)
             log_event("account.set_up", status="noop", update_id=msg.update_id,
                       source=msg.source, user_id=user_id, duration_ms=ms_since(start))
             return None
-        return _handle_account_query(conn, msg, user_id, arg, start, match)
-
-    if len(parts) == 1:
-        send_message(msg.chat_id, ACCOUNT_USAGE)
-        log_event("account.set_up", status="noop", update_id=msg.update_id,
-                  source=msg.source, user_id=user_id, duration_ms=ms_since(start))
-        return None
+        kind, name = first, None
+    else:
+        match = _find_locked_account(conn, user_id, arg)
+        if match is not None:
+            return _handle_account_query(conn, msg, user_id, arg, start, match)
+        if len(parts) != 2 or not _looks_like_amount(parts[1]):
+            return _handle_account_query(conn, msg, user_id, arg, start, match)
+        kind, name = "spending", parts[0]
 
     amount_text = parts[1]
     try:
@@ -173,7 +171,7 @@ def handle_account(conn: psycopg.Connection, msg: TextMessage) -> dict | None:
                   source=msg.source, user_id=user_id, duration_ms=ms_since(start))
         return None
 
-    account = set_account_opening_balance(conn, user_id, kind, amount)
+    account = set_account_opening_balance(conn, user_id, kind, amount, name=name)
     if account is None:
         send_message(msg.chat_id, ACCOUNT_NO_HOUSEHOLD)
         log_event("account.set_up", status="noop", update_id=msg.update_id,

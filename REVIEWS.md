@@ -12,6 +12,805 @@ returned, not what they were assumed to return.
 
 ---
 
+## 2026-08-16 — `594745e` add manual test rows for dashboard editing and opening balances
+
+**Scope:** docs-only. `TASKS.md` ticks the "dashboard editing and opening
+balances" row; `docs/TESTING.md` gains §3c (row editor), 5a.19–20 (edit audit
+rows), and 9.19–22 (single-account behaviour + `/account` wording).
+
+**Status: ✅ DONE** — no blocking issues.
+
+For a docs-only commit the real risk is a test row that *asserts the wrong
+behaviour*: a tester trusts it, and either files a false finding or (worse)
+marks a real bug "passed". So I verified every code claim the new rows make
+against source rather than the prose. All held.
+
+### What I checked (and what it returned)
+
+- `uv run pytest -q` → **508 passed, 1 warning in 21.12s**. Matches the commit
+  message; docs change touches no test.
+- **9.20 / parse.py gating** (the load-bearing claim). `parse.py:141`
+  (`parse_schema`) gates `account`, `type=transfer`, `from_account`,
+  `to_account` **and** `new_locked_account` on `if accounts and len(accounts) > 1`;
+  `parse.py:210` (`build_request`) gates `_ACCOUNT_GUIDANCE` on the same. So a
+  single-account household's schema and prompt carry none of the account
+  vocabulary — the "mint a locked Credit card account" misfile named in the task
+  genuinely cannot arise through that path. Row correctly reframes 9.20 as
+  "record what the model actually does" rather than asserting a pass — accurate.
+- **9.19 / recent.py panel**. `recent.py:177–181`: the Account field renders
+  only when `type_ != "transfer" and len(accounts) > 1`. Single account → no
+  field (not a one-option dropdown). Correct. Same line backs 3c.4/3c.5's
+  transfer field-set claim (transfer also drops Category at `recent.py:162`).
+- **9.21 / 9.22 wording**. `account.py:180` `verb = "owe" if kind == "credit" else "have"`,
+  emitted as `"Got it — {name} ({kind}), you {verb} {amount}."` — "you owe" for
+  credit, "you have" for spending, exactly as the rows quote.
+- **5a.19–20 / edit audit shape**. `edits.py:203` writes `action="edit"`,
+  `before={field: old}`, `after={field: new}`; `routes.py:329–330` passes
+  `source="miniapp", update_id=None`. `EDITABLE_TRANSACTION_FIELDS`
+  (`edits.py:123`) = `{amount, occurred_on, note, account_id}`, so the row's
+  `{"amount": …}` / `{"occurred_on": …}` / `{"account_id": …}` before/after keys
+  are the literal field names. Migration `013_transaction_events_edit_action.sql`
+  adds `'edit'` to the CHECK constraint. All correct; the 5a.6/5a.7 rows it
+  cross-references exist and match.
+- **3c.2 / 3c.8 reload + toast strings**. `shell.py:227–229` `mutate()` ends in
+  `.finally(load)`, so every edit reloads and the panel collapses — 3c.2's
+  "closes after every edit, not a lost edit" is right. Offline: `.catch(showToast)`
+  fires `showToast` ("Couldn't save — try again.", `shell.py:197`) *and*
+  `.finally(load)` runs, whose own fetch fails → `app.textContent = 'Could not
+  load dashboard.'` (`shell.py:191`). Both exact strings in 3c.8 verified; the
+  "whole app area reverts, not just the field" narrative is accurate.
+- **3c.6/3c.7 undo toast**. `showUndoToast` (`shell.py:207`) renders
+  `'Deleted ' + amount + ' · <button>Undo</button>'` with a 5000ms auto-dismiss.
+  Matches.
+
+### Minor (non-blocking)
+
+- `docs/TESTING.md` 3c.1 says "Tap **any** row … Delete/**Refund** as labelled
+  buttons", but Refund only renders for `type_ == "expense"` (`recent.py:196`).
+  A tester who taps a transfer/income/refund row sees only Delete and could mark
+  3c.1 failed. Worth narrowing to "an expense row" for the Refund half. Cosmetic,
+  not a correctness issue with the code.
+
+Every embedded code-behaviour claim in the new rows matches source; nothing to
+fix before the next iteration.
+
+---
+
+## 2026-08-16 — `4a57dbc` add manual test rows for recurring rules
+
+**Scope:** docs-only — `TASKS.md` ticks the "manual test rows for recurring
+rules" box, `docs/TESTING.md` gains §10 (17 rows) plus a summary-table row and
+two additions to the release-blocking money-path list (10.13, 10.16).
+
+**Status: ✅ DONE** — no blocking issues.
+
+The commit's whole claim is "every reply string, button label, and dashboard
+route was read from source, not guessed." I checked that claim row by row
+against source rather than trusting it, and it holds.
+
+**What I checked (commands run):**
+
+- `git show HEAD` — confirmed docs-only (`TASKS.md`, `docs/TESTING.md`), no code.
+- `uv run pytest -q` → **508 passed, 1 warning** (pre-existing Starlette
+  deprecation, unrelated).
+- `uv run python -c "…format_amount(parse_amount('5000'))"` → `'₹5,000.00'`,
+  confirming 10.2's exact reply string.
+- Read every source file the commit cites and matched each row to behaviour:
+  - **10.1–10.6 creation/validation** — `kanakko/commands/recurring.py`:
+    no-arg → `RECURRING_USAGE`; bad day → `RECURRING_BAD_DAY` (returns `None`,
+    never clamps — 10.3 correct); bad category/account → refusal; 10.2's reply
+    string matches `handle_recurring` line 137–138 verbatim.
+  - **10.6 locked account is a valid target** — `db/accounts.py:108`
+    `household_accounts` filters only `kind <> 'external'` and `deleted_at IS
+    NULL`; a locked FD is included. Correct.
+  - **10.7 button set** — `confirm.py` `confirm_card` with
+    `cancel_label=SKIP_LABEL` (`"⏭️ Skip"`) and `change_amount_button=True`
+    yields ✅ Confirm / ✏️ Change amount / ⏭️ Skip, `callback_data=CANCEL`
+    unchanged. "No plain Cancel" is accurate.
+  - **10.9 provenance link** — `jobs/recurring.py` `save_pending(...,
+    recurring_rule_id=rule["rule_id"])`; `db/pending.py` `confirm_pending`
+    carries it onto the stored `transactions` row (INSERT line 176). Migration
+    016 adds the column `REFERENCES recurring_rules ON DELETE SET NULL`.
+  - **10.10–10.12 Change amount** — `confirm_flow.py`:
+    `handle_change_amount_request` sends a *new* message (`CHANGE_AMOUNT_PROMPT`),
+    card untouched (10.10); unparseable reply → `CHANGE_AMOUNT_RETRY_PROMPT`
+    ("I couldn't read that as an amount…") and row stays `awaiting_amount`
+    (10.12). Strings match.
+  - **10.13 Skip writes nothing** — Skip is `callback_data=CANCEL` → `handle_cancel`
+    → `cancel_pending`, no ledger write. Correct (money check).
+  - **10.14/10.15 pause/resume** — `db/recurring.py` `due_rules_today` is
+    `WHERE r.active`; a paused rule is not sent. `render.py:154-168` glyphs ⏸/▶
+    and the `paused` (dimmed) class match.
+  - **10.16 delete detaches, keeps the transaction** — migration 016's `ON
+    DELETE SET NULL` means the past transaction survives with `recurring_rule_id`
+    nulled (money check, correct); `shell.py:274` fires `/app/recurring/delete`
+    with no confirm and no undo callback, whereas `shell.py:280` transaction
+    delete calls `showUndoToast`. "Immediate, no undo, unlike a row delete" is
+    accurate.
+
+**Confirmed real (already flagged in-row as 10.17, non-blocking, correctly
+deferred):** `jobs/recurring.py` `run()` iterates `due_rules_today` and calls
+`save_pending` with no check for an unresolved pending card for the same
+rule. There is no dedup in code and **no unique constraint** on
+`pending_transactions.recurring_rule_id` (checked migrations 015–017 and the
+`grep UNIQUE` over `migrations/*.sql`), so re-running the job on the same due
+day sends a *second* confirm card for the same rule — real money on a schedule,
+so worth a fix later. The commit documents this as an untested risk rather than
+silently patching it, which is the right call for a docs task; recording it
+here so it isn't lost. Not a defect in *this* commit.
+
+Nothing to change. The rows are honest, the strings are exact, and the two
+money-path rows (10.13, 10.16) are correctly added to the release-blocking set.
+
+---
+
+## 2026-08-16 — `844db29` flag DECISIONS.md §5 reconciliation task as blocked
+
+**Scope:** Docs-only. Adds a "Blocked, 2026-08-16" note under the open TASKS.md
+task that asks to reconcile `docs/DECISIONS.md` §5 ("No field editor") with the
+shipped `POST /app/edit` editor. No code, tests, migrations, or guards touched.
+
+**Status: ✅ DONE** — no blocking issues.
+
+**What I checked (commands run):**
+
+- `git show HEAD` — diff is +10 lines to `TASKS.md:1896`, nothing else. Commit
+  message is accurate ("No code changes this iteration").
+- Verified the block is *not* fabricated to dodge work: `POST /app/edit`
+  (`kanakko/webapp/routes.py:290`, `_parsed_edit_value` at :272) genuinely
+  parses and writes `amount`, `occurred_on`, `note`, and `account_id`; category
+  has its own `/app/category` route. So §5.2 ("Wrong amount or date → Cancel and
+  retype", `docs/DECISIONS.md:121`) and its echo at `docs/TESTING.md:72` really
+  are stale. The underlying drift the task names is real.
+- Confirmed the task is left **unticked** — correct; no falsely-ticked box.
+- Confirmed the note's premise against `CLAUDE.md:100` ("Don't edit
+  `docs/DECISIONS.md` to match the code").
+- `uv run pytest -q` → **508 passed**, 1 unrelated Starlette deprecation warning.
+  Tree is green (as expected for a docs-only change).
+
+**Findings:** none blocking.
+
+- *Advisory, non-blocking.* The block reasoning slightly over-reads the rule.
+  `CLAUDE.md:100` forbids editing DECISIONS.md **"to match the code"** — i.e.
+  laundering a code bug into the spec. The task pre-argues this is the opposite
+  case: a real decision (the dashboard editor extends §5's own point 4) that was
+  made but never written down, which is *not* code-matching. So a human could
+  reasonably just approve the §5 edit rather than treat it as needing a new
+  carve-out. That said, deferring to a human is the *safe* call — it changes
+  nothing that can break, ticks nothing falsely, and touches no money/tz/security
+  path. Recording the conflict and leaving it unticked is a legitimate outcome
+  for this iteration.
+
+---
+
+## 2026-08-16 — `262fc5d` don't crash rendering a refund whose original was deleted
+
+**Scope:** `kanakko/webapp/recent.py`'s `refund` branch no longer formats
+`refund_of_occurred_on` unconditionally. When the refunded expense is
+soft-deleted, the `LEFT JOIN active_transactions orig` returns NULL for both
+joined columns, and `{None:%d %b}` raised `TypeError`, blanking the whole
+recent list. Now falls back to "Refund of a deleted expense". Fixes finding 1
+of my `51d1712` review.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- **The NULL-travel-together premise holds.** `db.recent_transactions`
+  (`kanakko/db/reports.py:135,139`) selects `orig.note, orig.occurred_on` from
+  one `LEFT JOIN active_transactions orig ON orig.txn_id = t.refund_of_txn_id`.
+  Both columns come from the same joined row, so either the join matched (both
+  present — `occurred_on` is NOT NULL on any live transaction) or it did not
+  (both NULL: non-refund row, or original soft-deleted out of the view).
+  Testing `refund_of_occurred_on is None` therefore selects exactly the
+  deleted/absent-original case; the else branch still handles a live original
+  with a NULL note via `if refund_of_note`. The guard fails for the reason it
+  exists.
+- **Reproduced the original crash.** `f'{None:%d %b}'` →
+  `TypeError: unsupported format string passed to NoneType.__format__`. The
+  pre-fix line formatted the date whether or not the note fell back, so a
+  deleted original crashed. Confirmed directly rather than trusting the message.
+- **The new test catches it.**
+  `test_recent_list_refund_row_falls_back_when_the_original_is_deleted`
+  (`tests/test_webapp.py:1026`) passes a 12-column refund row with both
+  `refund_of_note` and `refund_of_occurred_on` as `None` and asserts
+  "Refund of a deleted expense" renders. Column count matches the unpack in
+  `recent.py:267-271`. Without the fix the row would raise the `TypeError`
+  above instead of returning markup, so the test goes red — silent breakage
+  (a blanked list, no exception surfaced to the user) made observable.
+- **Ran the suites.** `uv run pytest tests/test_webapp.py -q` → **113 passed**;
+  `uv run pytest -q` → **508 passed**.
+- **No spec violations.** Reads still go through `active_transactions` (§6);
+  money untouched (`Decimal`); the change is display text only. No `float`, no
+  new dependency, no port/secret concerns.
+
+No findings.
+
+---
+
+## 2026-08-16 — `51d1712` render a refund row as a refund, not uncategorised income
+
+**Scope:** `recent_transactions` gains columns 11/12 (`refund_of_note`,
+`refund_of_occurred_on`) via a `LEFT JOIN active_transactions orig ON
+orig.txn_id = t.refund_of_txn_id`; `recent_list`/`_txn_panel` render a `refund`
+row with a neutral (transfer-style) sign+tint, its inherited category checked
+against `expense`'s set, a "Refund of …" note lane, and the refunded expense
+gets a `· refunded` / `· ₹N refunded` suffix.
+
+**Status: ⚠️ CHANGES REQUESTED → ✅ RESOLVED** (see the block below) — finding 1
+(the crash) fixed in the follow-up commit.
+
+> **RESOLVED.** `kanakko/webapp/recent.py`'s refund branch now checks
+> `refund_of_occurred_on is None` before formatting it — a soft-deleted
+> original (both joined columns NULL together) renders "Refund of a deleted
+> expense" instead of raising. New guard
+> `test_recent_list_refund_row_falls_back_when_the_original_is_deleted`
+> (`tests/test_webapp.py`) passes a refund row with both `refund_of_note` and
+> `refund_of_occurred_on` as `None` and asserts the row renders without
+> raising — reverting the fix reproduces the exact `TypeError` this review
+> found, confirmed live before restoring it.
+
+### What I checked
+
+- `git show HEAD` — read the whole diff across `reports.py`, `recent.py`, the
+  two test files, and `TASKS.md`.
+- `uv run pytest` → **507 passed**, 1 warning. Matches the commit claim.
+- **The join reads the view, not the base table (§6).** The added join is
+  `LEFT JOIN active_transactions orig` (`kanakko/db/reports.py:139`), so a
+  soft-deleted original yields `NULL`/`NULL` rather than resurrecting deleted
+  text — the §6 bypass stays closed. Verified live (see below): after the
+  original is soft-deleted, the refund row's columns 11/12 come back
+  `(None, None)`.
+- **Neutral sign/tint and inherited category.** Read `recent.py:272-298`. A
+  `refund` takes `sign, amt_cls = "", "amt"` (no `+`, no `amt in`), and
+  `_category_known("refund", cat)` (`recent.py:50-59`) looks the category up in
+  `expense`'s set — the covering tests
+  (`test_recent_list_refund_row_is_neutral_not_income_tinted`,
+  `…_shows_its_inherited_category…`) assert the *effect*, not a string, and pass.
+- **Money stays `Decimal`.** The `amt_suffix` branch (`recent.py:288-293`) uses
+  `format_amount(refunded_so_far)` on the `Decimal` the DB returns; no `float`
+  enters. Fine.
+- **Reproduced the crash end-to-end** with a scratch integration test
+  (`migrate` → confirm expense → `create_refund` → `soft_delete_transaction`
+  the original → `recent_transactions` → `recent_list`). The DB step returned
+  `(None, None)` for columns 11/12 as expected, and `recent_list` then raised
+  `TypeError: unsupported format string passed to NoneType.__format__` at
+  `kanakko/webapp/recent.py:296`. Also reproduced at unit level by passing a
+  refund row with `refund_of_note=None, refund_of_occurred_on=None`. Scratch
+  test removed after confirming; not committed.
+
+### Findings
+
+**1 — `file: kanakko/webapp/recent.py:296` — a refund of a later-deleted expense
+crashes the entire recent list.** *(blocking)*
+
+The refund branch is:
+
+```python
+if type_ == "refund":
+    detail = f'Refund of "{html.escape(refund_of_note)}"' if refund_of_note else "Refund of an expense"
+    note_html = f'<div class="txn-note">{detail} · {refund_of_occurred_on:%d %b}</div>'
+```
+
+The `detail` text falls back when `refund_of_note` is `NULL`, but the date
+format `{refund_of_occurred_on:%d %b}` is applied unconditionally. When the
+refunded expense has since been soft-deleted, the `LEFT JOIN active_transactions
+orig` yields `NULL` for **both** columns (they always travel together — a live
+original has a non-null `occurred_on`), so `refund_of_occurred_on` is `None` and
+`format(None, "%d %b")` raises `TypeError`, aborting the whole `recent_list`
+render — the entire dashboard recent panel goes blank/500 for that household.
+
+- **Reachability:** `soft_delete_transaction` (`kanakko/db/edits.py:15`) deletes
+  any one live row by id with no cascade and no block on refunds, so an expense
+  that already has a refund can be deleted (or `/undo`'d) while the refund stays
+  live. Steps: log expense → refund part of it → delete the expense → open the
+  dashboard.
+- **Inputs → wrong result:** refund row `(…, "refund", …, refund_of_note=None,
+  refund_of_occurred_on=None)` → `TypeError`, not the intended "Refund of an
+  expense" fallback.
+- **The commit claims this case is handled** (message and `TASKS.md:1863`+: "a
+  soft-deleted original just falls back to 'Refund of an expense' instead of
+  surfacing deleted-row text") — but only the *text* falls back, not the date.
+  The guarding test `test_recent_list_refund_row_falls_back_when_the_original_has_no_note`
+  (`tests/test_webapp.py:485`) passes `refund_of_note=None` together with a
+  **real** `date(2026, 8, 10)`, so it exercises a note-less-but-live original and
+  never the both-`NULL` soft-deleted case. The guard does not fail for the reason
+  it exists.
+- **Suggested fix:** treat the missing original as a whole and don't format a
+  `None` date, e.g.
+
+  ```python
+  if type_ == "refund":
+      if refund_of_occurred_on is None:          # original soft-deleted
+          detail = "Refund of a deleted expense"
+      else:
+          name = f'"{html.escape(refund_of_note)}"' if refund_of_note else "an expense"
+          detail = f"Refund of {name} · {refund_of_occurred_on:%d %b}"
+      note_html = f'<div class="txn-note">{detail}</div>'
+  ```
+
+  Add a test with a refund row whose `refund_of_occurred_on` is `None` (the
+  soft-deleted-original case) asserting the row renders without raising.
+
+### Not blocking (noted, not required)
+
+- A `refund` row's **amount** is still an editable `<input>` in `_txn_panel`
+  (`recent.py:157-161`) even though the commit's own rationale for rendering the
+  *category* as text is that editing a refund independently "would desync the
+  category totals both rows feed into." The same desync argument applies to the
+  amount. This is **pre-existing** (not introduced by this commit) and outside
+  the task's scope, so it is not a finding here — flagging only so a later task
+  can decide whether a refund's amount should be read-only too.
+
+---
+
+## 2026-08-16 — `3927149` refund panel offers what remains, not the full amount
+
+**Scope:** `_refund_panel` no longer pre-fills the amount input with the row's
+full original value; the input is empty with the still-refundable ceiling
+(amount − refunds already recorded) as `placeholder` and native `max`.
+`recent_transactions` gains a 10th column `refunded_so_far` to carry it.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked
+
+- `git show HEAD` — read the full diff across `reports.py`, `recent.py`, the
+  two test files, and `TASKS.md`.
+- **The new column matches the trigger it defers to.** The subquery is
+  `coalesce((SELECT sum(r.amount) FROM active_transactions r WHERE
+  r.refund_of_txn_id = t.txn_id), 0)` (`kanakko/db/reports.py:126-127`). This
+  is the same "sum of live refunds against this row" aggregate that migration
+  014's trigger enforces (`014_refunds.sql:67-71`, summing
+  `deleted_at IS NULL` refund rows) and that `refund_candidates` computes
+  (`refunds.py:105`). `remaining = amount − refunded_so_far` is therefore
+  exactly the ceiling the trigger will accept, not a second guess at it.
+- **Reads through the view, no float.** Both `t` and the correlated `r` read
+  `active_transactions`, never base `transactions` — a soft-deleted refund can't
+  understate the remainder, matching §6 and `refund_candidates`. `sum` over
+  `NUMERIC` → `Decimal`; `amount − refunded_so_far` stays `Decimal` end to end.
+  No `float` on the amount path.
+- `uv run pytest` → **500 passed** (22.3s). Targeted run of the three new/edited
+  guards → 3 passed.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Both guards fail red without the fix — verified live, not trusted:**
+  - Reverted the 10th column in `reports.py`;
+    `test_recent_transactions_reports_what_remains_refundable` → **FAILED**
+    (falls back to reading `account_id` in the last column). Restored.
+  - Reintroduced `value="{remaining}"` (dropping `placeholder`/`max`) in
+    `_refund_panel`; both `test_refund_panel_amount_is_empty_not_prefilled` and
+    `test_refund_panel_placeholder_is_what_remains_not_the_original` → **FAILED**.
+    Restored. Working tree clean (`git status --short` empty) after both reverts.
+
+### Findings
+
+None blocking.
+
+- **Non-issue, noted for the record:** a fully-refunded expense (remaining 0)
+  still renders the refund toggle, now with `max="0"` / `placeholder="0"` so no
+  valid amount can be entered. That is pre-existing toggle behaviour and this
+  change strictly improves it (before, it offered `value="50.00"`, which the
+  trigger would reject). Not a regression, not in scope for task 1799.
+
+The task 1799 box in `TASKS.md` is correctly ticked: real behaviour change,
+not a stub, with the money-path guard and the placeholder guard both proven to
+redden without their respective fix.
+
+---
+
+## 2026-08-16 — `4c3a67e` undo a dashboard delete instead of confirming it
+
+**Scope:** Task 1771. Migration `020`, `kanakko/db/edits.py`
+(`restore_transaction`), `kanakko/db/__init__.py`, `kanakko/db/reports.py`
+(docstring), `kanakko/webapp/routes.py` (`POST /app/restore`),
+`kanakko/webapp/recent.py` (`data-amount` on `.del`), `kanakko/webapp/shell.py`
+(`showUndoToast`, `mutate(onSuccess)`, toast listener), and the matching tests.
+A dashboard delete already fired immediately with no confirmation; this replaces
+a would-be `confirm()` with a 5s "Deleted ₹X · Undo" toast that restores the
+row via a new soft-delete-reversing write.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run, actual output)
+
+- `git show HEAD` — read the full diff (10 files, +392/−23).
+- `uv run pytest -q` → **497 passed, 1 warning in 20.56s**.
+- `uv run ruff check kanakko/ tests/` → **All checks passed!**
+- **Guard is real, not a claim.** Temp-removed `AND deleted_at IS NOT NULL` from
+  `restore_transaction`'s WHERE and re-ran the noop guard:
+  `pytest -k restore_of_a_live_row` → **1 failed**
+  (`test_restore_of_a_live_row_is_a_noop`), then restored the file
+  (`git diff kanakko/db/edits.py` empty). Without the clause, replaying a stale
+  id against a live row would return a dict → a spurious `restore` audit row and
+  a false 204 instead of 404. The guard fails for the reason it exists.
+- **Migration 020 constraint** (`grep "action IN" migrations/`): the widened set
+  is `013→014→018`'s set plus `'restore'` — no prior value dropped
+  (`confirm, undo, delete, recategorise, edit, refund, adjustment, restore`).
+  `020` is the correct next number. The audit test asserting a `restore` row
+  passes, so the constraint accepts the value it needs to.
+- **Scoping matches its siblings and §16.** `restore_transaction` scopes to
+  `user_id = %s AND txn_id = %s AND household_id = (SELECT … WHERE user_id = %s)`
+  — same shape as `soft_delete_transaction`/`set_transaction_category`, so only
+  the entering member can revive their own row. Verified live by
+  `test_restore_is_scoped_to_the_user` / `test_restore_route_cannot_undelete_another_users_row`
+  (a housemate's deleted row stays deleted, route returns 404).
+- **The one direct `transactions` read is the legitimate exception.**
+  `docs/DECISIONS.md` §6: the view is `WHERE deleted_at IS NULL`, so the row a
+  restore must find is exactly the one the view hides. Reading `transactions`
+  here with `deleted_at IS NOT NULL` is correct, not a "reads go through the
+  view" violation. Every other function in `edits.py` still goes through
+  `active_transactions`.
+- **Money stays `Decimal`.** `restore` returns `amount` straight from
+  `NUMERIC` → `Decimal`; the audit `after` serializes it as `"20.00"` (asserted).
+  No `float` anywhere on the path. `showUndoToast` displays a server-rendered
+  `format_amount(amount)` string carried on `data-amount` — presentation only,
+  never fed back into a sum.
+- **Route mirrors `/app/delete`.** `authenticated_user(max_age=24h)`, 400 on a
+  non-integer `id`, 404 on no match (already restored / never existed / still
+  live — no enumeration difference vs delete), 204 on success.
+  `test_restore_route_rejects_a_stale_init_data` confirms a 2023 `auth_date` is
+  401. No new secret, no unbounded query.
+- **No XSS via the toast.** `showUndoToast` uses `innerHTML`, but both
+  interpolations are safe: `id` is `Number(btn.dataset.id)` and `amount` is a
+  server-generated `₹…` string, never free user text.
+- **Failure-toast path intact.** `#toast` is now empty in HTML and populated by
+  JS in both branches; `showToast` resets `className=''` and re-sets the red
+  "Couldn't save" text, so a failed restore after an undo offer still surfaces
+  red. `test_a_failed_mutation_is_surfaced_not_swallowed` (updated to the new
+  `mutate` body and the seven call sites) passes.
+
+### Findings
+
+None blocking. Two notes for the record, neither a finding for this task:
+
+- Restoring a transaction whose account was hard-deleted between the delete and
+  the undo would bring the row back onto a gone account. Out of scope here and
+  its siblings (`edit`/`category`) don't guard the symmetric case either; noting
+  only so it isn't mistaken for covered.
+- The synchronous `log_event` write inside the async route is carried over from
+  `/app/delete` and is marked with a `ponytail:` comment pointing at the same
+  ceiling. Consistent with the existing route; not new debt.
+
+The ticked box in `TASKS.md` matches real, tested behaviour — the restore
+actually clears `deleted_at`, writes its audit row, and is scoped; the guards
+fail for their stated reasons.
+
+---
+
+## 2026-08-16 — `5e90ba8` rebuild the dashboard row (actions out, category in, labelled)
+
+**Scope:** Task 1704. `kanakko/webapp/recent.py`, `kanakko/webapp/shell.py`,
+`tests/test_webapp.py`. The collapsed recent-transactions row was three
+always-visible action glyphs (✕/✎/↩), each pinned to its own 44px grid lane, so
+every expense row was ≥132px tall. Rebuilt so the collapsed row is one
+`.txn-head` button showing data only (date · category-as-text, amount, note),
+tapping it toggles a sibling `.txn-panel` holding the five labelled correction
+fields (Amount/Category/Date/Account/Note) and, below a rule, labelled
+Delete/Refund. Pure presentation — no money math, timezone, or SQL touched.
+
+**Status: ✅ DONE** — no blocking issues.
+
+### What I checked (commands run, actual output)
+
+- `git show HEAD` — read the full diff for all four files.
+- `uv run pytest -q` → **487 passed**, 1 warning (pre-existing starlette/httpx
+  deprecation). Matches the commit message.
+- `uv run pytest tests/test_webapp.py -q` → **98 passed**.
+- `uv run ruff check` on the three changed source files → **All checks passed!**
+- Exercised `recent_list` directly (`uv run python`) across row types to confirm
+  behaviour rather than trust the tests:
+  - **transfer** `(…,'transfer',…,'Bank','SIP',None)` → head shows `Bank → SIP`,
+    **no** `Category</span>` label, **no** account field, **no** `refund-toggle`,
+    Delete present. Correct: a transfer has no category and no single account to
+    reassign (§18).
+  - **income** `(…,'income','Salary',…)` → **no** `refund-toggle` (only expenses
+    are refundable, §18/task 1082); amount carries `amt in` accent class.
+  - **expense, null category** → collapsed head reads `Uncategorised`, panel
+    still carries `cat-select`. Matches the panel's own null-category handling.
+- Confirmed money/format invariants preserved: the editable amount input still
+  emits the plain `Decimal` string (`value="50.00"`), display amounts still go
+  through `format_amount`; no `float` introduced.
+- Confirmed the note is still `html.escape`d on the summary line and in the note
+  input — stored-XSS guard intact.
+- `grep _edit_panel|txn-edit|edit-toggle` — no *live* code still references the
+  removed markup; only TASKS.md/REVIEWS.md history and the new test's
+  `"edit-toggle" not in out` negative assertion. The surviving
+  `test_recent_list_edit_panel_hides_account_select_for_a_single_account` was
+  updated to the new panel and passes.
+
+### Guards — do they fail for the right reason?
+
+- `test_collapsed_row_height_no_longer_depends_on_which_actions_it_has` replaces
+  the old grid-placement test. It pins the *mechanism* (no `grid-row` anywhere in
+  the CSS; `.txn-head` has a bounded `min-height: 44px` and no fixed `height:`;
+  neither a note-carrying nor a note-less collapsed row exposes `.del`/
+  `.refund-toggle`). This is the honest shape the review guide asks for — it does
+  not claim to assert a rendered pixel height, which is explicitly left to eyes on
+  a phone. Reintroducing a fixed-lane rule reddens it.
+- `test_recent_list_delete_and_refund_are_labelled_and_only_inside_the_panel`
+  partitions on `class="txn-panel"` and asserts the destructive buttons are absent
+  from the collapsed head and present (as words `>Delete<`/`>Refund<`) in the
+  panel — reddens if either button leaks back into the always-visible row, which
+  is the exact regression that caused the height bug.
+- Field order/label and aria-expanded guards are structural and would fail if the
+  labels or ordering regressed.
+
+### Non-blocking observation (not a finding)
+
+- `recent.py:243` nests the note `<div class="txn-note">` inside the
+  `<button class="txn-head">`. A block-level `<div>` inside a `<button>` is
+  invalid HTML (button's content model is phrasing content). Every current
+  browser tolerates it and renders the note below the flex summary as intended,
+  and the button's `aria-label` carries the full announcement so no assistive
+  tech reads the nested div — so there is no observed breakage. If it ever wants
+  to be strictly valid, `<span class="txn-note">` with `display:block` would do
+  the same job. Not blocking.
+
+---
+
+## 2026-08-16 — `63eaa67` show account balances in the dashboard
+
+**Scope:** Adds `account_balances_section` (`kanakko/webapp/render.py`) — one
+`.stat` row per live, non-`external` account — and wires it into
+`dashboard_html`, fed by `account_balances(conn, user_id)` in `mini_app_data`
+(`kanakko/webapp/routes.py`). Two tests added; the Phase 11 box ticked.
+
+**Status: ✅ DONE** — no blocking issues.
+
+**What I checked (commands and their output):**
+
+- `git show HEAD` — read the whole diff: the new section function, its
+  `__init__` export, the `balances` param threaded through `dashboard_html`
+  and `mini_app_data`, two tests, one `TASKS.md` box.
+- **Money stays `Decimal`, never float (§9).** The section only formats: each
+  balance goes through `_stat` → `format_amount(b["balance"])`, and
+  `account_balances` (`kanakko/db/accounts.py:139`) returns `NUMERIC` →
+  `Decimal`. No arithmetic in the render path, so nothing to demote to float.
+- **`external` is hidden.** `account_balances` returns *all* live accounts
+  (including `external`, unlike `household_accounts`), so the section's own
+  `b["kind"] != "external"` filter is what excludes it. Verified the guard is
+  real: edited the filter to `rows = list(balances)`, ran
+  `uv run pytest -k "account_balances_section_renders or dashboard_route_shows_account_balances"`
+  → **2 failed**, with `External</span><span class="value">₹0.00` leaking into
+  the output. Restored the filter (`git checkout`).
+- **The `credit` sign convention (§18) is correct end to end.**
+  `set_account_opening_balance` stores a credit opening balance negated
+  (`signed = -amount`, `accounts.py:78`), and the `account_balances` query
+  negates again for `credit` (`CASE WHEN a.kind = 'credit' THEN -1 ELSE 1 END`),
+  so a card reported as owing ₹2,000 renders `₹2,000.00` positively — the
+  route-level test confirms this against real Postgres.
+- **XSS.** Account names are user-typed for `spending` accounts
+  (`/account cash 2000`), so the `html.escape(b["name"])` in the section is
+  genuine defense, and it is present. The balance value is a `Decimal` through
+  `format_amount`, not user text.
+- **Reads through `active_transactions` (§6), household-scoped (§16).** Both
+  hold in `account_balances`'s query — unchanged by this commit, and this
+  commit adds no new SQL of its own.
+- `uv run pytest` → **484 passed** (matches the commit's claim).
+
+**Findings:** none. The change is a thin, well-scoped read surface; the one
+guard it adds (the `external` filter) fails for the reason it exists, verified
+red. The empty-list branch (`test_account_balances_section_empty_renders_nothing`)
+is covered.
+
+---
+
+## 2026-08-16 — `fedd5da` gate the dashboard row editor's account dropdown on account count
+
+**Scope:** Dashboard row editor. `_edit_panel` (`kanakko/webapp/recent.py`) now
+only renders the per-row account `<select>` when `type_ != "transfer" and
+len(accounts) > 1`, matching the `show_accounts = bool(accounts) and
+len(accounts) > 1` gate `confirm.py:126` already applies (§18: "accounts become
+visible only when a second one exists"). One test added.
+
+**Status: ✅ DONE** — no blocking issues.
+
+**What I checked (commands and their output):**
+
+- `git show HEAD` — read the whole diff: three lines in `recent.py` (the gate
+  plus a docstring update), one new test, one `TASKS.md` box ticked.
+- Confirmed the gate matches the reference. `grep -n show_accounts kanakko/` and
+  `sed -n '115,140p' kanakko/confirm.py` — `confirm.py:126` is `show_accounts =
+  bool(accounts) and len(accounts) > 1`. The new `len(accounts) > 1` is
+  equivalent (the `bool(accounts)` conjunct is redundant with `> 1`, not a
+  behaviour difference). `accounts` is already the non-`external` live list per
+  the docstring, so the two surfaces gate on the same population.
+- Confirmed the spec. `docs/DECISIONS.md:785-786` — "Accounts become visible
+  only when a second one exists." The change makes the row editor obey the rule
+  the confirm card already did.
+- Exercised the function directly (`uv run python`): a 1-account household →
+  `edit-account` absent; 2 accounts → present; 0 accounts → absent. Correct on
+  all three.
+- Guard is genuinely red without the fix. Reverted the `and len(accounts) > 1`
+  clause and ran
+  `test_recent_list_edit_panel_hides_account_select_for_a_single_account` → it
+  **FAILED** on a live `class="edit-account"` in the output; restored the fix
+  (`git checkout`) and it passes. So the guard fails for the reason it exists,
+  not on a surface string.
+- Checked the fix doesn't regress the sibling tests: the pre-existing
+  `test_recent_list_renders_edit_toggle_and_hidden_panel` supplies two accounts
+  (`[(3,"Bank"),(4,"Wallet")]`), so it still asserts the `<select>` renders; the
+  transfer test still gets no `<select>` for the separate `type_` reason.
+- `uv run pytest` → **481 passed** (matches the commit's claim);
+  `tests/test_webapp.py` → 92 passed.
+
+**Findings:** none. The change is a three-line behavioural fix that reuses the
+existing `confirm.py` rule rather than inventing a second one, the docstring was
+updated to match, no money/timezone/soft-delete path is touched, and the guard
+was verified red-then-green by hand. Nothing to fix.
+
+---
+
+## 2026-08-16 — `05e67c5` point at `/account bank` from welcome and `/help`
+
+**Scope:** Docs/UX only. Adds one `WELCOME` line ("Want your balance to be
+right? Tell me what you have: `/account bank 52000`.") and a matching
+`HELP_TEXT` entry (`/account bank 52000 — set what a spending account like Bank
+or Cash holds`) so the spending-account onboarding shipped in `f97355c` is
+discoverable. New guard `test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help`.
+Ticks the Phase 11 "Point at it once from the welcome message" task.
+
+**Status:** ✅ DONE — no blocking issues.
+
+### What I checked
+
+- **The copy points at a real command.** `/account bank <amount>` is implemented
+  in `kanakko/commands/account.py:110` (`handle_account`), added and separately
+  reviewed at `f97355c` (✅ DONE). String concatenation renders cleanly:
+  `"...bank "` + `"52000`.\n\n"` → `/account bank 52000`. The help/welcome wording
+  matches the command's actual `ACCOUNT_USAGE` semantics ("what's in it").
+- **Guard reddens for the reason it exists.** Reverted `kanakko/handlers.py` to
+  `HEAD~1` and ran the new test:
+  `FAILED ... test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help`
+  (1 failed). Restored the file (`git diff --stat` → clean) and it passes. This
+  is a copy task, so asserting the string is present in `WELCOME`/`HELP_TEXT` is
+  the right guard — the risk *is* the copy being absent, not a hidden behaviour.
+- **Full suite:** `uv run pytest` → **480 passed, 1 warning** (matches the
+  commit's claim; `tests/test_help.py` → 3 passed).
+- **Spec fit.** Deliberately no onboarding questionnaire — consistent with §5's
+  rejection of multi-step state machines. No money, timezone, `active_transactions`,
+  or category paths touched.
+
+### Findings
+
+None. This is a two-line copy change with a matching guard that verifiably
+fails without it.
+
+---
+
+## 2026-08-16 — `f97355c` let `/account` set a spending account's opening balance
+
+**Scope:** `/account bank 52000` / `/account cash 2000` now set (creating on
+first use) a `spending` account by name, closing the §18 gap where only
+`credit`/`locked` could be onboarded. `set_account_opening_balance`
+(`kanakko/db/accounts.py`) gains a `name` param and keys its lookup on `kind`
+*and* `lower(name)`, not `kind` alone. `handle_account`
+(`kanakko/commands/account.py`) routes any non-`credit`/`locked` first word +
+amount to the spending-set branch; `ACCOUNT_BAD_KIND` removed as unreachable.
+Ticks the Phase 11 "Opening balances" task in `TASKS.md`.
+
+**Status:** ✅ DONE — correct, spec-fitting, and the new collision guard
+verifiably reddens for the reason it exists.
+
+### What I checked
+
+- `git show HEAD` — touches `TASKS.md`, `kanakko/commands/account.py`,
+  `kanakko/db/accounts.py`, `tests/test_account_command.py`,
+  `tests/test_accounts.py`. No new dependency, no `float`, no direct
+  `transactions` read (balances still go through `active_transactions`, view
+  unchanged).
+- `uv run pytest -q` → **479 passed** (matches the commit message).
+- **Collision guard is real, not a surface assertion.** Reverted the `WHERE`
+  clause in `set_account_opening_balance` back to `kind`-only
+  (`AND kind = %s AND deleted_at IS NULL`) and ran
+  `test_set_account_opening_balance_keys_on_name_not_just_kind` →
+  **1 failed**; restored → passes. The guard fails precisely when the name
+  filter is dropped, i.e. when `/account cash 2000` would find and overwrite
+  the household's existing `Bank` spending row. `git status` clean afterwards.
+- **Money/sign.** `amount` is `Decimal` from `parse_amount`; `signed =
+  -amount if kind == 'credit' else amount` — a spending account stores what's
+  in it as a positive opening balance, and `account_balances` (multiplier +1
+  for non-credit) reads it back correctly. No float anywhere on the path.
+- **Routing traced by hand:**
+  - `/account cash 2000` → not credit/locked → no live `locked` named
+    "cash 2000" → two parts, amount parses → `spending`/"cash" created. ✔
+  - `/account bank 52000` → matches the default `Bank` case-insensitively via
+    `lower(name)` → **updates** it, no duplicate. ✔ (covered by
+    `test_a_spending_account_matched_case_insensitively_updates_not_duplicates`).
+  - `/account Goa 2026` where a `locked` pool "Goa 2026" exists → the
+    `_find_locked_account` lookup runs *before* the spending branch, so the
+    query still wins (`test_year_suffixed_locked_account_name_is_reachable_as_a_query`
+    still green). The F4 regression stays fixed.
+  - `credit`/`locked` still pass `name=None` and fall back to the fixed
+    `ACCOUNT_ONBOARDING_KINDS` name, so every prior call site is unchanged.
+  - No-household path: `set_account_opening_balance` returns `None` (empty
+    `RETURNING`) → `ACCOUNT_NO_HOUSEHOLD`, not a crash. ✔
+- **Cross-kind collision** the docstring claims to prevent: a spending account
+  a user names "card" and the fixed `credit` "Card" — keeping `kind` in the
+  `WHERE` keeps them distinct, no clobber. Confirmed by reading the SQL.
+- `ACCOUNT_BAD_KIND` fully removed; only a stale prose mention of the
+  "bad-kind heuristic" survives in a test comment
+  (`tests/test_account_command.py:232`) — cosmetic, not a finding.
+
+### Findings
+
+None blocking.
+
+- **Observation, not a defect (behaviour change, documented in the docstring):**
+  a *typo'd* `locked` pool name whose trailing word parses as an amount —
+  e.g. `/account Goq 2026` (misspelled "Goa 2026") when no locked account
+  matches — now silently mints a `spending` account "Goq" at ₹2026 instead of
+  the old `ACCOUNT_BAD_KIND` refusal. No total is corrupted and no existing
+  account is touched; it is the accepted cost of making any-name-plus-amount
+  mean "set a spending account." The exact-match locked lookup guards the
+  common case. No test pins this branch, but it is not a silent money error.
+
+- **Latent trap (not on any live path):** `set_account_opening_balance` with
+  `kind="spending"` and `name=None` would raise `KeyError` on
+  `ACCOUNT_ONBOARDING_KINDS["spending"]`. `handle_account` always passes a
+  name for the spending branch and the docstring says so, so no caller hits
+  it today — noting it only so a future caller doesn't reintroduce it.
+
+---
+
+## 2026-08-16 — `66d28f2` surface a failed dashboard mutation instead of swallowing it
+
+**Scope:** Mini App JS/CSS. Collapses the six inlined `.then(r => { if (r.ok)
+load(); })` mutating fetches in `kanakko/webapp/shell.py` (edit, delete, refund,
+category, recurring pause, recurring delete) into one `mutate(url, body)` helper
+that `.finally(load)`s unconditionally and toasts (`#toast`) on `!r.ok` or a
+thrown/network error. Adds `test_a_failed_mutation_is_surfaced_not_swallowed`.
+Ticks the first Phase 11 task in `TASKS.md`.
+
+**Status:** ✅ DONE — correct, well-scoped, and the guard verifiably fails for
+the reason it exists.
+
+### What I checked
+
+- `git show HEAD` — touches only `TASKS.md`, `kanakko/webapp/shell.py`, and
+  `tests/test_webapp.py`. No server/money/SQL code, no new dependency.
+- `uv run pytest tests/test_webapp.py -q` → **91 passed**.
+- **Guard reddens against the real bug** (not just a renamed symptom). I
+  reverted `mutate`'s body back to the old `.then(r => { if (r.ok) load(); })`
+  single-copy pattern and ran the new test in isolation → **1 failed**;
+  restored the file and reran → **1 passed**. `git diff --stat` afterward is
+  empty, so the tree is back to the committed state. The test also explicitly
+  rejects the plausible half-fix `if (r.ok) load(); else showToast()` (which
+  still skips the reload on failure) by pinning `load` to a single occurrence
+  inside `.finally`.
+- Read the full `shell.py` (all six call sites now route through `mutate(`,
+  confirmed by the test's per-route assertions and by eye at
+  `shell.py:240,249,254,259,264,276`).
+- **Correctness of the always-reload change.** Old code reloaded only on
+  success, so a rejected write left the typed value on screen until the next
+  re-activation silently reverted it. `mutate` reloads in `.finally` regardless
+  of outcome, so a failed write snaps back to server state immediately and the
+  toast distinguishes "reverted because it failed" from an ordinary refresh —
+  exactly what the task asked. No call site relied on reload-only-on-success.
+- **CSS specificity guard is real, not cosmetic.** `#toast` sets
+  `position: fixed` (id specificity), which would out-specify the UA
+  `[hidden] { display: none }`; the added `#toast[hidden] { display: none; }`
+  (id+attribute) restores the hide. Same class of fix already documented for
+  `.txn-edit[hidden]` at `shell.py:123`. Without it the toast would never hide.
+- **Security:** unchanged. `initData` still travels in the `tma` Authorization
+  header on every mutate; no payload trusted before the server validates it.
+
+### Findings
+
+**Low — the failure toast is not announced to assistive tech (`shell.py:159`).**
+`#toast` is a plain `<div hidden>` with no `role="alert"` / `aria-live`, so a
+screen-reader user gets no notification that a write was rejected and reverted —
+the one signal this commit exists to add is silent for them. The CSS throughout
+this file is scrupulous about WCAG (2.5.8 targets, 1.4.1 colour, contrast in two
+themes), so this is a gap in that same standard rather than a nitpick.
+Non-blocking. Suggested fix: `<div id="toast" role="alert" hidden>` (and set the
+text via `toast.textContent` on show so the live region re-announces).
+
+Everything else is correct. No money, timezone, soft-delete, categories, or
+`initData`-validation path is touched by this change.
+
+---
+
 ## 2026-08-13 — `4f2646e` 9.6's manual-test money check reworked as a delta
 
 **Scope:** docs-only. Reworks `docs/TESTING.md` row 9.6 and the money-path callout

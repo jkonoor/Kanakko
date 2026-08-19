@@ -9,14 +9,18 @@ from datetime import date
 import psycopg
 
 
-def get_or_create_user(conn: psycopg.Connection, telegram_user_id: int) -> int:
+def get_or_create_user(
+    conn: psycopg.Connection, telegram_user_id: int, display_name: str | None = None
+) -> int:
     """Resolve `telegram_user_id` to its internal `users.user_id`, creating it once.
 
     Every table keys on the internal `user_id` (§1), so the message handler turns
     the Telegram id it sees into that id here. `ON CONFLICT DO NOTHING` makes a
     second message from the same user a no-op insert rather than a unique
     violation; the `UNION ALL … LIMIT 1` then returns the existing row on that
-    path. Does not commit — the caller owns the transaction.
+    path. `display_name` is Telegram's `from.first_name` when the caller has it
+    (§16, migration 022) — refreshed on every update so a rename shows up, and a
+    no-op write when unchanged. Does not commit — the caller owns the transaction.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -31,6 +35,18 @@ def get_or_create_user(conn: psycopg.Connection, telegram_user_id: int) -> int:
             (telegram_user_id, telegram_user_id),
         )
         (user_id,) = cur.fetchone()
+        # Kept fresh rather than written once: people rename themselves in
+        # Telegram, and a roster showing a name they abandoned is worse than one
+        # showing none. `IS DISTINCT FROM` makes the unchanged case — every
+        # message after the first — touch no row at all. Optional because most
+        # call sites resolve a user from an id they already have and have no name
+        # to offer; the webhook passes it once per update at the §16 gate.
+        if display_name is not None:
+            cur.execute(
+                "UPDATE users SET display_name = %s WHERE user_id = %s"
+                " AND display_name IS DISTINCT FROM %s",
+                (display_name, user_id, display_name),
+            )
     return user_id
 
 

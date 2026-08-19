@@ -15,6 +15,7 @@ from kanakko.db import (
 )
 from kanakko.handlers import TextMessage, handle_household
 from kanakko.migrate import migrate
+from tests.conftest import join_household
 
 OWNER_TG = 111
 MEMBER_TG = 222
@@ -66,7 +67,7 @@ def test_roster_lists_the_household_owner_first_with_member_labels(conn):
 
     roster = household_roster(conn, owner)
 
-    assert roster == [(owner, True, None), (member, False, "ravi")]
+    assert roster == [(owner, True, None, None), (member, False, "ravi", None)]
     # Queried from the member: same household, same rows — scope is the household,
     # not the caller.
     assert household_roster(conn, member) == roster
@@ -141,3 +142,84 @@ def test_household_footer_names_the_commands_and_hides_owner_only_ones(conn, mon
     assert "/invite" not in member_view, "a member cannot invite — don't offer it"
     assert "/transfer" not in member_view, "a member cannot transfer — don't offer it"
     conn.rollback()
+
+
+def test_the_roster_names_the_owner_instead_of_the_bare_word_owner(conn, monkeypatch):
+    """The bug this fixes, from a live screenshot: a member ran `/household` and
+    read "• Owner" — no name, no way to tell who owned it.
+
+    There was nothing to print. Member names come from the *invite label* the
+    owner typed, and the owner joined by creating the household, so they carry no
+    label; nothing else about a person was stored at all. Telegram sends
+    `from.first_name` on every update, and it was being dropped.
+
+    Also guards the subtler half: a member's own Telegram name beats the label the
+    inviter chose for them. `/invite wife` must not show "wife" to the person
+    themselves.
+    """
+    migrate(conn)
+    owner = get_or_create_user(conn, OWNER_TG, "Joshy")
+    hid = create_household_of_one(conn, owner)
+    member = get_or_create_user(conn, MEMBER_TG, "Diana")
+    join_household(conn, hid, member)
+    with conn.cursor() as cur:  # the inviter labelled her something else
+        cur.execute(
+            "INSERT INTO invites (code, kind, household_id, label, created_by,"
+            " used_by, used_at) VALUES ('c1', 'household', %s, 'wife', %s, %s, now())",
+            (hid, owner, member),
+        )
+
+    sent = []
+    monkeypatch.setattr(handlers, "send_message",
+                        lambda chat_id, text, **kw: sent.append(text))
+    handle_household(conn, TextMessage(chat_id=MEMBER_TG, message_id=1,
+                                      text="/household", from_id=MEMBER_TG))
+
+    assert "Joshy (owner)" in sent[0]  # the owner has a name at last
+    assert "• Owner" not in sent[0]  # and it is not the bare role
+    assert "Diana" in sent[0]  # her own name...
+    assert "wife" not in sent[0]  # ...not the label chosen for her
+    conn.rollback()
+
+
+def test_a_rename_in_telegram_shows_up_and_costs_nothing_when_unchanged(conn):
+    """Kept fresh, not written once — a roster showing a name someone abandoned is
+    worse than one showing none. The `IS DISTINCT FROM` makes the unchanged case
+    (every message after the first) touch no row, so this is not one write per
+    message forever."""
+    migrate(conn)
+    uid = get_or_create_user(conn, OWNER_TG, "Joshy")
+    assert get_or_create_user(conn, OWNER_TG, "Joshy Sunny") == uid
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT display_name FROM users WHERE user_id = %s", (uid,))
+        assert cur.fetchone()[0] == "Joshy Sunny"
+        # Resolving without a name never blanks the one already stored.
+        get_or_create_user(conn, OWNER_TG)
+        cur.execute("SELECT display_name FROM users WHERE user_id = %s", (uid,))
+        assert cur.fetchone()[0] == "Joshy Sunny"
+    conn.rollback()
+
+
+def test_dispatch_carries_the_senders_name_off_both_update_shapes():
+    """A name that never reaches a handler cannot be stored. Both shapes read it
+    off the same `from` object they already read the id from."""
+    msg = handlers.dispatch({
+        "update_id": 1,
+        "message": {"message_id": 1, "chat": {"id": 7}, "text": "hi",
+                    "from": {"id": 7, "first_name": "Diana"}},
+    })
+    assert msg.display_name == "Diana"
+    press = handlers.dispatch({
+        "update_id": 2,
+        "callback_query": {"id": "cb", "data": "confirm",
+                           "from": {"id": 7, "first_name": "Diana"},
+                           "message": {"message_id": 2, "chat": {"id": 7}}},
+    })
+    assert press.display_name == "Diana"
+    # An update with no name at all must not explode.
+    bare = handlers.dispatch({
+        "update_id": 3,
+        "message": {"message_id": 3, "chat": {"id": 7}, "text": "hi", "from": {"id": 7}},
+    })
+    assert bare.display_name is None

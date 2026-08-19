@@ -12,7 +12,10 @@ from kanakko.db.users import get_or_create_user
 
 
 def consume_invite(
-    conn: psycopg.Connection, code: str, telegram_user_id: int
+    conn: psycopg.Connection,
+    code: str,
+    telegram_user_id: int,
+    display_name: str | None = None,
 ) -> str:
     """Consume an invite `code` for a Telegram user, admitting them (§16).
 
@@ -51,7 +54,9 @@ def consume_invite(
             return "spent"
         if expired:
             return "expired"
-        user_id = get_or_create_user(conn, telegram_user_id)
+        # The name arrives with the same update, so the roster reads correctly
+        # from their very first `/household` rather than after their next message.
+        user_id = get_or_create_user(conn, telegram_user_id, display_name)
         cur.execute(
             "UPDATE invites SET used_by = %s, used_at = now()"
             " WHERE invite_id = %s AND used_by IS NULL",

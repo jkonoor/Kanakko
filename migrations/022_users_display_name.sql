@@ -1,0 +1,16 @@
+-- Who is who: a name to show in the household roster (§16).
+--
+-- `/household` listed the owner as the bare word "Owner". It had nothing else to
+-- print: member names come from the *invite label* the owner typed (`/invite
+-- Diana` makes her "Diana"), and the owner joined by creating the household, so
+-- they carry no label. A member reading the roster could not tell who owned it.
+--
+-- The labels were never the person's own name either — `/invite wife` would have
+-- shown "wife" to the person themselves. Telegram sends `from.first_name` on
+-- every message and every button tap, always, so the name people actually go by
+-- is already arriving and was simply being dropped.
+--
+-- Nullable: a user minted before this column existed has no name until their next
+-- message, and the roster falls back to the invite label and then to
+-- "Owner"/"Member", so nothing regresses in the meantime.
+ALTER TABLE users ADD COLUMN display_name TEXT;

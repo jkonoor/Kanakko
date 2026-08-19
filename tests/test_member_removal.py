@@ -121,7 +121,7 @@ def test_owner_removes_a_member_retaining_their_entries_and_re_homing_them(conn)
     assert remove_member(conn, owner, member) == "removed"
 
     # Gone from the shared roster.
-    assert household_roster(conn, owner) == [(owner, True, None)]
+    assert household_roster(conn, owner) == [(owner, True, None, None)]
     # Re-homed into a fresh household of one (not the one they left).
     new_hid = _household_of(conn, member)
     assert new_hid is not None and new_hid != hid
@@ -140,7 +140,7 @@ def test_a_member_removes_themselves(conn):
 
     assert remove_member(conn, member, member) == "removed"
 
-    assert household_roster(conn, owner) == [(owner, True, None)]
+    assert household_roster(conn, owner) == [(owner, True, None, None)]
     assert _household_of(conn, member) != hid  # re-homed
     conn.rollback()
 
@@ -155,7 +155,7 @@ def test_a_member_cannot_remove_another_member(conn):
     assert remove_member(conn, ravi, priya) == "not_owner"
 
     # Nobody removed — both still in the household.
-    assert {m for m, _o, _l in household_roster(conn, owner)} == {owner, ravi, priya}
+    assert {m for m, _o, _l, _n in household_roster(conn, owner)} == {owner, ravi, priya}
     conn.rollback()
 
 
@@ -169,7 +169,7 @@ def test_the_owner_cannot_leave_without_transferring_ownership(conn):
 
     # Still there, still the owner.
     assert _household_of(conn, owner) == hid
-    assert household_roster(conn, owner)[0] == (owner, True, None)
+    assert household_roster(conn, owner)[0] == (owner, True, None, None)
     conn.rollback()
 
 
@@ -234,7 +234,7 @@ def test_handle_remove_asks_before_removing_by_label(conn, monkeypatch):
     datas = {b.callback_data for row in keyboard.inline_keyboard for b in row}
     assert datas == {f"{REMOVE_PREFIX}{REMOVE_RETAIN}:{ravi}",
                      f"{REMOVE_PREFIX}{REMOVE_DELETE}:{ravi}"}
-    assert ravi in {m for m, _o, _l in household_roster(conn, owner)}
+    assert ravi in {m for m, _o, _l, _n in household_roster(conn, owner)}
     conn.rollback()
 
 
@@ -247,7 +247,7 @@ def test_handle_remove_bare_asks_before_leaving(conn, monkeypatch):
     assert handle_remove(conn, _msg(MEMBER_TG)) == member
     _chat, text, keyboard = sent[-1]
     assert "Leave the household" in text
-    assert member in {m for m, _o, _l in household_roster(conn, owner)}  # not yet gone
+    assert member in {m for m, _o, _l, _n in household_roster(conn, owner)}  # not yet gone
     conn.rollback()
 
 
@@ -261,7 +261,7 @@ def test_handle_remove_choice_retain_keeps_entries(conn, monkeypatch):
 
     assert handle_remove_choice(conn, _tap(OWNER_TG, REMOVE_RETAIN, ravi)) == ravi
     assert "stay in the shared ledger" in edits[-1]
-    assert ravi not in {m for m, _o, _l in household_roster(conn, owner)}
+    assert ravi not in {m for m, _o, _l, _n in household_roster(conn, owner)}
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM active_transactions WHERE household_id = %s", (hid,))
         assert cur.fetchone()[0] == 1  # retained
@@ -297,7 +297,7 @@ def test_handle_remove_choice_reauthorizes_a_forged_button(conn, monkeypatch):
     # ravi (a member) forges a delete tap targeting priya.
     assert handle_remove_choice(conn, _tap(MEMBER_TG, REMOVE_DELETE, priya)) is None
     assert acks[-1] == remove_command.REMOVE_NOT_OWNER
-    assert priya in {m for m, _o, _l in household_roster(conn, owner)}  # untouched
+    assert priya in {m for m, _o, _l, _n in household_roster(conn, owner)}  # untouched
     conn.rollback()
 
 
@@ -323,7 +323,7 @@ def test_handle_remove_member_cannot_remove_another_via_label(conn, monkeypatch)
     # ravi (a member) tries to remove priya by label — refused before the ask.
     assert handle_remove(conn, _msg(MEMBER_TG, "/remove priya")) is None
     assert sent[-1][:2] == (MEMBER_TG, remove_command.REMOVE_NOT_OWNER)
-    assert priya in {m for m, _o, _l in household_roster(conn, owner)}
+    assert priya in {m for m, _o, _l, _n in household_roster(conn, owner)}
     conn.rollback()
 
 
@@ -394,5 +394,5 @@ def test_roster_label_is_scoped_to_the_current_household(conn):
         )
 
     roster = household_roster(conn, mover)
-    assert roster == [(owner_b, True, None), (mover, False, "new")]
+    assert roster == [(owner_b, True, None, None), (mover, False, "new", None)]
     conn.rollback()

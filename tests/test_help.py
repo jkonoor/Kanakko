@@ -72,7 +72,10 @@ def test_greeting_and_help_short_circuit_the_parser_but_an_expense_still_reaches
     parsed = []
     monkeypatch.setattr(app_module, "handle_text", lambda conn, msg: parsed.append(msg.text))
     sent = []
-    monkeypatch.setattr(handlers, "send_message", lambda chat_id, text: sent.append(text))
+    # `**kw` because `handle_help` passes `parse_mode="HTML"` and the other
+    # senders on this path pass nothing — the stub must accept both shapes.
+    monkeypatch.setattr(handlers, "send_message",
+                        lambda chat_id, text, **kw: sent.append(text))
 
     for update_id, text in [(1, "hi"), (2, "/help"), (3, "How do I use this?")]:
         sent.clear()
@@ -134,14 +137,15 @@ def test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help(
 
 
 def test_no_sent_message_contains_a_literal_backtick():
-    """`tg.send_message` sets no `parse_mode`, so a backtick reaches Telegram as a
-    backtick — every usage hint read `/invite ravi` with the marks visible, across
-    21 strings, for months.
+    """`tg.send_message` sends plain text unless a call opts in, so a backtick
+    reaches Telegram as a backtick — every usage hint read `/invite ravi` with the
+    marks visible, across 21 strings, for months.
 
-    Markdown mode is not the alternative: these messages interpolate user-typed
-    labels and account names, and one unbalanced `*` in a label would make
-    Telegram reject the whole send, leaving the bot silent on that path. So the
-    rule is plain text everywhere, and this is what holds it.
+    A markup mode is not the general alternative: most of these messages
+    interpolate user-typed labels and account names, and one unbalanced `*` or
+    stray `<` in a label would make Telegram reject the whole send, leaving the
+    bot silent on that path. `HELP_TEXT` is the single exception, and only
+    because it is entirely static — see the HTML guard below.
 
     Scoped to the strings that are *sent*: `parse.py`'s system prompt goes to the
     model, and `shell.py`'s backticks are JavaScript template literals.
@@ -185,3 +189,49 @@ def test_help_names_the_two_things_the_flat_list_never_did():
     assert "Tap any row in Dashboard" in handlers.HELP_TEXT
     # /invite_signup stays out: operator-only (§16).
     assert "/invite_signup" not in handlers.HELP_TEXT
+
+
+def test_help_text_is_html_telegram_will_accept():
+    """`HELP_TEXT` is the one message sent with `parse_mode="HTML"`, and a markup
+    mistake there fails *harder* than the plain-text problems above: Telegram
+    answers 400 and the user gets **nothing at all** rather than an ugly
+    character. So this parses it the way Telegram will.
+
+    Three rules, each with a way it has nearly gone wrong: every `&` must open a
+    real entity (`Bills & Utilities` had to become `Bills &amp; Utilities`); every
+    `<` must open a tag Telegram supports, which is why the `<name>`/`<amount>`
+    placeholders were replaced with concrete examples rather than escaped; and
+    the tags must balance.
+    """
+    import re
+    from html.parser import HTMLParser
+
+    # Telegram's supported subset, minus the ones this text has no use for.
+    ALLOWED = {"b", "strong", "i", "em", "u", "s", "code", "pre", "a"}
+
+    class Check(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack, self.bad = [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in ALLOWED:
+                self.bad.append(f"unsupported tag <{tag}>")
+            self.stack.append(tag)
+
+        def handle_endtag(self, tag):
+            if not self.stack or self.stack.pop() != tag:
+                self.bad.append(f"unbalanced </{tag}>")
+
+    parser = Check()
+    parser.feed(handlers.HELP_TEXT)
+    assert parser.bad == [], parser.bad
+    assert parser.stack == [], f"unclosed tags: {parser.stack}"
+
+    # A bare `&` is the easiest one to reintroduce and Telegram rejects it.
+    bare = re.findall(r"&(?!(?:amp|lt|gt|quot|#\d+);)", handlers.HELP_TEXT)
+    assert bare == [], "unescaped & in HELP_TEXT — Telegram will 400 the send"
+
+    # Commands must stay bare so Telegram auto-links them; <code> would buy a
+    # monospace font and lose the tap.
+    assert "<code>" not in handlers.HELP_TEXT

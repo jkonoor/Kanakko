@@ -46,7 +46,8 @@ def find_user(conn: psycopg.Connection, telegram_user_id: int) -> int | None:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT user_id FROM users WHERE telegram_user_id = %s",
+            "SELECT user_id FROM users WHERE telegram_user_id = %s"
+            "   AND deleted_at IS NULL",
             (telegram_user_id,),
         )
         row = cur.fetchone()
@@ -128,5 +129,98 @@ def all_users(conn: psycopg.Connection) -> list[tuple[int, int]]:
     read, so it goes straight to `users`.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT user_id, telegram_user_id FROM users ORDER BY user_id")
+        cur.execute(
+            "SELECT user_id, telegram_user_id FROM users"
+            " WHERE deleted_at IS NULL ORDER BY user_id"
+        )
         return cur.fetchall()
+
+
+def delete_account(conn: psycopg.Connection, user_id: int) -> str:
+    """Erase this user's data and sever their identity (§16, migration 021).
+
+    The way out of the *product*, distinct from `remove_member`'s way out of a
+    *household*. Returns `"ok"`, or `"owner_must_transfer"` when they own a
+    household someone else is still in — the same rule §16 already applies to
+    leaving, for the same reason: a household always has an owner, and erasing
+    one out from under its members is not the leaver's call to make. A **solo**
+    owner is not blocked, and that is the point: they are the case that had no
+    exit at all.
+
+    What goes: every transaction they entered and its audit rows, their pending
+    cards, reminder log, recurring rules, and their membership. If that empties
+    the household, the household goes too, with its accounts and its invites.
+
+    What stays: the `users` row, scrubbed. Eleven tables reference it and
+    `invites.created_by` is NOT NULL on rows belonging to *other* people's
+    history, so a cascade would delete evidence that is not this user's to take.
+    `telegram_user_id` becomes `-user_id` — negative, so it can never match a
+    real Telegram id again; unique, because `user_id` is; and it frees the real
+    id so a later invite starts this person genuinely fresh.
+
+    `processed_updates.user_id` is nulled rather than deleted: those rows are
+    §14's redelivery guard, and dropping them would let Telegram replay an
+    update this user's deletion just erased.
+
+    Irreversible on purpose — no soft delete, no undo. Does not commit; the
+    caller owns the transaction, so a failure part-way leaves the account whole.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT hm.household_id, h.owner,"
+            "  (SELECT count(*) FROM household_members WHERE household_id = hm.household_id)"
+            " FROM household_members hm"
+            " JOIN households h USING (household_id)"
+            " WHERE hm.user_id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        household_id, owner, members = row if row else (None, None, 0)
+        if owner == user_id and members > 1:
+            return "owner_must_transfer"
+
+        cur.execute(
+            "DELETE FROM transaction_events WHERE txn_id IN"
+            " (SELECT txn_id FROM transactions WHERE user_id = %s)",
+            (user_id,),
+        )
+        for table in ("transactions", "pending_transactions", "reminder_log"):
+            cur.execute(f"DELETE FROM {table} WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM recurring_rules WHERE created_by = %s", (user_id,))
+        cur.execute(
+            "UPDATE processed_updates SET user_id = NULL WHERE user_id = %s", (user_id,)
+        )
+        cur.execute("DELETE FROM household_members WHERE user_id = %s", (user_id,))
+
+        if household_id is not None:
+            cur.execute(
+                "SELECT count(*) FROM household_members WHERE household_id = %s",
+                (household_id,),
+            )
+            (remaining,) = cur.fetchone()
+            if remaining == 0:
+                # Nobody left to own it. Its rows go in FK order: invites and
+                # recurring rules point at the household, accounts are pointed
+                # at by transactions (already gone with their owner).
+                for table in ("invites", "recurring_rules", "accounts"):
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE household_id = %s", (household_id,)
+                    )
+                cur.execute(
+                    "DELETE FROM households WHERE household_id = %s", (household_id,)
+                )
+            else:
+                # A member leaving a household that lives on: anything of theirs
+                # the household still needs is re-owned by whoever owns it now,
+                # or the FK would point at a scrubbed row.
+                cur.execute(
+                    "UPDATE accounts SET owner = %s WHERE household_id = %s AND owner = %s",
+                    (owner, household_id, user_id),
+                )
+
+        cur.execute(
+            "UPDATE users SET telegram_user_id = -user_id, deleted_at = now()"
+            " WHERE user_id = %s",
+            (user_id,),
+        )
+    return "ok"

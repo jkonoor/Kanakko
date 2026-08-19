@@ -21,6 +21,12 @@ from kanakko import __version__, configure_logging
 from kanakko.auth import is_authorized, within_daily_cap
 from kanakko.categories import CATEGORY_PREFIX
 from kanakko.commands.account import _is_account, handle_account
+from kanakko.commands.erase import (
+    ERASE_PREFIX,
+    _is_erase,
+    handle_erase,
+    handle_erase_choice,
+)
 from kanakko.commands.invite import (
     _is_invite,
     _is_invite_signup,
@@ -210,6 +216,7 @@ async def webhook(request: Request) -> dict[str, bool]:
                 or _is_remove(action.text)
                 or _is_transfer(action.text)
                 or _is_account(action.text)
+                or _is_erase(action.text)
                 or _is_recurring(action.text)
                 or _is_refund(action.text)
             )
@@ -248,6 +255,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                     handle_remove(conn, action)
                 elif _is_transfer(action.text):
                     handle_transfer(conn, action)
+                elif _is_erase(action.text):
+                    handle_erase(conn, action)
                 elif _is_account(action.text):
                     handle_account(conn, action)
                 elif _is_recurring(action.text):
@@ -266,6 +275,8 @@ async def webhook(request: Request) -> dict[str, bool]:
                 handle_category(conn, action)
             elif action.data.startswith(ACCOUNT_PREFIX):
                 handle_account_choice(conn, action)
+            elif action.data.startswith(ERASE_PREFIX):
+                handle_erase_choice(conn, action)
             elif action.data.startswith(REMOVE_PREFIX):
                 handle_remove_choice(conn, action)
             elif action.data.startswith(REFUND_PREFIX):

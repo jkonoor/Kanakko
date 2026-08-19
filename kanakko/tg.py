@@ -61,12 +61,27 @@ def answer_callback_query(callback_query_id: str, text: str | None = None) -> di
 
 
 def send_message(
-    chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None
+    chat_id: int,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    *,
+    parse_mode: str | None = None,
 ) -> dict:
-    """Send `text` to `chat_id`, optionally with an inline keyboard."""
+    """Send `text` to `chat_id`, optionally with an inline keyboard.
+
+    `parse_mode` is **opt-in per call and stays that way.** Plain text is the
+    default because most messages here interpolate something a user typed — an
+    account name, an invite label, a note — and in any markup mode a stray `<`
+    or an unbalanced `*` in that value makes Telegram reject the whole send with
+    a 400. The user then gets *nothing*, which is a worse failure than an ugly
+    character. Only a fully static string may pass a mode, and today only
+    `HELP_TEXT` does.
+    """
     payload: dict = {"chat_id": chat_id, "text": text}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup.to_dict()
+    if parse_mode is not None:
+        payload["parse_mode"] = parse_mode
     return _call("sendMessage", payload)
 
 

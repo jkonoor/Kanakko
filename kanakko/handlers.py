@@ -169,28 +169,43 @@ REPHRASE_PROMPT = (
 # Telegram reject the whole send.
 HELP_TEXT = (
     "I track what you spend, earn, and put away.\n\n"
-    "Just tell me:\n"
-    '  "spent 500 on groceries"     "got 20000 salary"\n'
-    '  "put 5000 in SIP"            "paid the credit card bill"\n'
+    "<b>\N{SPEECH BALLOON} Just tell me</b>\n"
+    '"spent 500 on groceries"\n'
+    '"got 20000 salary"\n'
+    '"put 5000 in SIP"\n'
+    '"paid the credit card bill"\n'
     "One tap confirms it.\n\n"
-    "Fix something\n"
-    "  /undo — remove your last entry\n"
-    "  /refund 200 — money back on something you bought\n"
-    "  Tap any row in Dashboard to change its amount, date or category\n\n"
-    "Your household\n"
-    "  /household — who's in it\n"
-    "  /invite <name> — a single-use link to add someone (owner only)\n"
-    "  /remove <name> — remove a member, or /remove alone to leave\n"
-    "  /transfer <name> — hand over ownership\n\n"
-    "Set up an account (once)\n"
-    "  /account bank <amount> — what your bank actually holds\n"
-    "  /account credit <amount> — a card, what you currently owe\n"
-    "  /account locked <amount> — an FD/SIP/chit, what's already in it\n"
-    "  /account <name> — what a pot has taken in and paid out\n"
-    "  /recurring 5000 5 Bills & Utilities Bank — a monthly auto-debit I ask "
+    "<b>\N{PENCIL} Fix something</b>\n"
+    "/undo — remove your last entry\n"
+    "/refund 200 — money back on something you bought\n"
+    "Tap any row in Dashboard to change its amount, date or category\n\n"
+    "<b>\N{BUSTS IN SILHOUETTE} Your household</b>\n"
+    "/household — who's in it\n"
+    "/invite ravi — a single-use link to add someone (owner only)\n"
+    "/remove ravi — remove a member, or /remove alone to leave\n"
+    "/transfer ravi — hand over ownership\n\n"
+    "<b>\N{GEAR} Set up an account (once)</b>\n"
+    "/account bank 52000 — what your bank actually holds\n"
+    "/account credit 5000 — a card, what you currently owe\n"
+    "/account locked 20000 — an FD/SIP/chit, what's already in it\n"
+    "/account SIP — what a pot has taken in and paid out\n"
+    "/recurring 5000 5 Bills &amp; Utilities Bank — a monthly auto-debit I ask "
     "you about on the day\n\n"
-    "Tap Dashboard at the bottom-left of the chat to see where your money went."
+    "Tap <b>Dashboard</b> at the bottom-left of the chat to see where your money went."
 )
+
+# HELP_TEXT is sent with `parse_mode="HTML"`, which only `handle_help` passes —
+# see `tg.send_message`. Three consequences that are easy to get wrong:
+#
+# 1. **`&` must be `&amp;` and there must be no bare `<`.** An unescaped one is a
+#    400 from Telegram and the user gets *nothing* — a worse failure than the
+#    literal backticks this replaced. `test_help.py` holds both rules.
+# 2. **The `<name>`/`<amount>` placeholders are gone**, replaced by real examples
+#    (`/invite ravi`, `/account bank 52000`). They would each need escaping to
+#    `&lt;name&gt;`, and a concrete example teaches the shape at least as well.
+# 3. **Commands are never wrapped in `<code>`.** Telegram auto-detects a bare
+#    `/undo` and renders it as a tappable link; monospacing it would buy a font
+#    and lose the tap.
 
 PARSER_DOWN_PROMPT = (
     "I can't reach my parser right now — your message wasn't saved. "
@@ -455,7 +470,7 @@ def handle_help(conn: psycopg.Connection, msg: TextMessage) -> None:
     """
     start = time.perf_counter()
     user_id = get_or_create_user(conn, msg.from_id)
-    send_message(msg.chat_id, HELP_TEXT)
+    send_message(msg.chat_id, HELP_TEXT, parse_mode="HTML")
     log_event("help.sent", status="ok", update_id=msg.update_id, source=msg.source,
               user_id=user_id, duration_ms=ms_since(start))
 

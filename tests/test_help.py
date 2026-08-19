@@ -131,3 +131,57 @@ def test_setting_a_spending_account_balance_is_pointed_at_from_welcome_and_help(
     """
     assert "/account bank" in handlers.WELCOME
     assert "/account bank" in handlers.HELP_TEXT
+
+
+def test_no_sent_message_contains_a_literal_backtick():
+    """`tg.send_message` sets no `parse_mode`, so a backtick reaches Telegram as a
+    backtick — every usage hint read `/invite ravi` with the marks visible, across
+    21 strings, for months.
+
+    Markdown mode is not the alternative: these messages interpolate user-typed
+    labels and account names, and one unbalanced `*` in a label would make
+    Telegram reject the whole send, leaving the bot silent on that path. So the
+    rule is plain text everywhere, and this is what holds it.
+
+    Scoped to the strings that are *sent*: `parse.py`'s system prompt goes to the
+    model, and `shell.py`'s backticks are JavaScript template literals.
+    """
+    import ast
+    from pathlib import Path
+
+    offenders = []
+    for path in sorted(Path("kanakko").rglob("*.py")):
+        if path.name in ("parse.py", "shell.py"):
+            continue
+        tree = ast.parse(path.read_text())
+        docstrings = {
+            node.body[0].value.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and "`" in node.value
+                and node.lineno not in docstrings
+            ):
+                offenders.append(f"{path}:{node.lineno}")
+    assert offenders == [], f"literal backticks reach the user from: {offenders}"
+
+
+def test_help_names_the_two_things_the_flat_list_never_did():
+    """The old help listed commands only, so the flagship feature was invisible:
+    nothing said a transfer is something you *type*, and nothing said an entry
+    older than the last one is edited by tapping its row (§5's whole answer to
+    having no field editor). Both are capabilities, not commands, which is
+    exactly why a command list lost them."""
+    assert "put 5000 in SIP" in handlers.HELP_TEXT
+    assert "paid the credit card bill" in handlers.HELP_TEXT
+    assert "Tap any row in Dashboard" in handlers.HELP_TEXT
+    # /invite_signup stays out: operator-only (§16).
+    assert "/invite_signup" not in handlers.HELP_TEXT

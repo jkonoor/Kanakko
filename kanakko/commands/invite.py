@@ -23,7 +23,7 @@ from kanakko.tg import get_bot_username, send_message
 INVITE_COMMAND = "/invite"
 
 INVITE_USAGE = (
-    "Add a label so you can tell who's who — e.g. `/invite ravi`. Each invite is "
+    "Add a label so you can tell who's who — e.g. /invite ravi. Each invite is "
     "a single-use link to join your household."
 )
 
@@ -78,12 +78,12 @@ def handle_invite(conn: psycopg.Connection, msg: TextMessage) -> str | None:
 INVITE_SIGNUP_COMMAND = "/invite_signup"
 
 INVITE_SIGNUP_USAGE = (
-    "Add a label so you can tell who's who — e.g. `/invite_signup ravi`. Each link "
+    "Add a label so you can tell who's who — e.g. /invite_signup ravi. Each link "
     "is single-use and gives that person their own household."
 )
 
 INVITE_SIGNUP_NOT_ADMIN = (
-    "Only the operator can issue signup invites. `/invite <name>` adds someone to "
+    "Only the operator can issue signup invites. /invite <name> adds someone to "
     "your own household."
 )
 

@@ -211,11 +211,19 @@ The command list must stay in step with `kanakko/handlers.py::HELP_TEXT`:
 start - Start using Kanakko
 help - What I can do
 undo - Remove your last entry
+refund - Money back on something you bought
+account - Set an account's balance, or check a savings pot
+recurring - Set up a monthly auto-debit
 household - Who's in your household
 invite - Add someone to your household (owner only)
 remove - Remove a member, or leave
 transfer - Hand over household ownership
 ```
+
+Ordered by how often it is used, not alphabetically — the "/" menu is a list a
+user scans, and `/undo` and `/refund` are reached far more often than
+`/transfer`. `refund` earns its slot only because it is now `/refund` as well as
+the bare word: BotFather registers commands, not vocabulary.
 
 `/remove` and `/transfer` are listed deliberately. Leaving a destructive command
 out of the menu does not make it safer — it makes it unfindable — and `/remove`

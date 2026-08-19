@@ -21,20 +21,20 @@ REMOVE_COMMAND = "/remove"
 # Bare `/remove` leaves the household yourself; `/remove <label>` is the owner
 # removing that member. So there is no "usage" error — the bare form is an action.
 REMOVE_NO_MATCH = (
-    "No member is labelled {label!r}. Check `/household` for the exact labels, or "
-    "send `/remove` on its own to leave the household yourself."
+    "No member is labelled {label!r}. Check /household for the exact labels, or "
+    "send /remove on its own to leave the household yourself."
 )
 REMOVE_AMBIGUOUS = (
     "More than one member is labelled {label!r}, so I won't guess which to remove. "
-    "Give them distinct invite labels first (`/invite`)."
+    "Give them distinct invite labels first (/invite)."
 )
 REMOVE_NOT_OWNER = (
     "Only the household owner can remove other members. To leave the household "
-    "yourself, send `/remove` on its own."
+    "yourself, send /remove on its own."
 )
 REMOVE_OWNER_MUST_TRANSFER = (
     "You own this household, so you can't leave it — a household always needs an "
-    "owner. Hand ownership to someone first with `/transfer <name>`, then you can "
+    "owner. Hand ownership to someone first with /transfer <name>, then you can "
     "leave."
 )
 REMOVE_NOT_MEMBER = "That person isn't in your household."

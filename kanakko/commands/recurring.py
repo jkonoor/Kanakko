@@ -19,15 +19,15 @@ from kanakko.tg import send_message
 RECURRING_COMMAND = "/recurring"
 
 RECURRING_USAGE = (
-    "Set up an auto-debit — e.g. `/recurring 5000 5 Bills & Utilities Bank` "
+    "Set up an auto-debit — e.g. /recurring 5000 5 Bills & Utilities Bank "
     "(amount, day of month, category, account)."
 )
 RECURRING_BAD_AMOUNT = (
     "That doesn't look like an amount — try "
-    "`/recurring 5000 5 Bills & Utilities Bank`."
+    "/recurring 5000 5 Bills & Utilities Bank."
 )
 RECURRING_BAD_DAY = (
-    "Day of month should be 1-31 — try `/recurring 5000 5 Bills & Utilities Bank`."
+    "Day of month should be 1-31 — try /recurring 5000 5 Bills & Utilities Bank."
 )
 RECURRING_BAD_CATEGORY_ACCOUNT = (
     'I couldn\'t find a category and account in "{rest}" — category has to be '

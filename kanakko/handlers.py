@@ -154,22 +154,41 @@ REPHRASE_PROMPT = (
 #
 # Deliberately no `web_app` button here: help exists to *teach* the permanent way
 # in, and a shortcut on a message nobody revisits teaches "type /help first".
+#
+# Grouped, not a flat list. A flat eleven-line list gave `/account` four of the
+# eleven — a one-time setup action outweighing everything done daily — and buried
+# the two things a user actually repeats. The headings also make room for the two
+# capabilities the list never mentioned at all: that a transfer ("put 5000 in
+# SIP", "paid the credit card bill") is something you *type*, and that an entry
+# older than the last one is edited by tapping its row in the dashboard, which is
+# §5's whole answer to having no field editor.
+#
+# No backticks anywhere in a sent string: `tg.send_message` sets no `parse_mode`,
+# so Telegram renders them literally. Markdown mode is not the fix — these
+# messages interpolate user-typed labels, and one unbalanced `*` would make
+# Telegram reject the whole send.
 HELP_TEXT = (
-    "I track what you spend and earn.\n\n"
-    'Just tell me: "spent 500 on groceries", "got 20000 salary" — I\'ll show a '
-    "card, and one tap confirms it.\n\n"
-    "/undo — remove your last entry\n"
-    "/household — who's in your household\n"
-    "/invite <name> — a single-use link to add someone (owner only)\n"
-    "/remove <name> — remove a member, or /remove on its own to leave\n"
-    "/transfer <name> — hand over ownership\n"
-    "/account credit <amount> — add a credit card, what you currently owe\n"
-    "/account locked <amount> — add an FD/SIP/chit, what's already in it\n"
-    "/account bank 52000 — set what a spending account like Bank or Cash holds\n"
-    "/account <name> — what an FD/SIP/chit has received and paid out\n"
-    "/recurring <amount> <day> <category> <account> — an auto-debit I'll ask "
-    "you to confirm each month, e.g. `/recurring 5000 5 Bills & Utilities Bank`\n"
-    "refund <amount> — get money back on something you spent, no leading /\n\n"
+    "I track what you spend, earn, and put away.\n\n"
+    "Just tell me:\n"
+    '  "spent 500 on groceries"     "got 20000 salary"\n'
+    '  "put 5000 in SIP"            "paid the credit card bill"\n'
+    "One tap confirms it.\n\n"
+    "Fix something\n"
+    "  /undo — remove your last entry\n"
+    "  /refund 200 — money back on something you bought\n"
+    "  Tap any row in Dashboard to change its amount, date or category\n\n"
+    "Your household\n"
+    "  /household — who's in it\n"
+    "  /invite <name> — a single-use link to add someone (owner only)\n"
+    "  /remove <name> — remove a member, or /remove alone to leave\n"
+    "  /transfer <name> — hand over ownership\n\n"
+    "Set up an account (once)\n"
+    "  /account bank <amount> — what your bank actually holds\n"
+    "  /account credit <amount> — a card, what you currently owe\n"
+    "  /account locked <amount> — an FD/SIP/chit, what's already in it\n"
+    "  /account <name> — what a pot has taken in and paid out\n"
+    "  /recurring 5000 5 Bills & Utilities Bank — a monthly auto-debit I ask "
+    "you about on the day\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went."
 )
 
@@ -196,14 +215,13 @@ _START_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
 WELCOME = (
     "Welcome to Kanakko — your personal finance tracker.\n\n"
-    'Just tell me what you spent or earned — like "spent 500 on groceries" or '
-    '"got 20000 salary" — and I\'ll log it after a one-tap confirm. Everyday '
-    "spending already has a default account, so this works right away.\n\n"
-    "Got a credit card or an FD/SIP/chit? `/account credit 5000` (what you owe) "
-    "or `/account locked 20000` (what's already in it) adds it — skip this if "
-    "you don't, nothing else needs it.\n\n"
-    "Want your balance to be right? Tell me what you have: `/account bank "
-    "52000`.\n\n"
+    'Just tell me what you spent, earned, or put away — "spent 500 on '
+    'groceries", "got 20000 salary", "put 5000 in SIP" — and I\'ll log it after '
+    "a one-tap confirm. Everyday spending already has a default account, so this "
+    "works right away.\n\n"
+    "Want your balance to be right? Tell me what you have: /account bank 52000. "
+    "Got a card or an FD/SIP/chit? /account credit 5000 (what you owe) or "
+    "/account locked 20000 (what's in it) — skip these if you don't.\n\n"
     "Tap Dashboard at the bottom-left of the chat to see where your money went, "
     "and send /help any time for everything I can do."
 )
@@ -445,7 +463,7 @@ def handle_help(conn: psycopg.Connection, msg: TextMessage) -> None:
 HOUSEHOLD_COMMAND = "/household"
 
 HOUSEHOLD_SOLO = (
-    "👥 Your household — just you so far. Use `/invite <name>` to add someone."
+    "👥 Your household — just you so far. Use /invite <name> to add someone."
 )
 
 
@@ -482,13 +500,13 @@ def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
         # else in it. Owner-only commands are shown only to the owner, so a member
         # is never told to try something that will refuse them.
         viewer_owns = any(m == user_id and owns for m, owns, _ in members)
-        footer = ["`/invite <name>` — add someone"] if viewer_owns else []
+        footer = ["/invite <name> — add someone"] if viewer_owns else []
         footer.append(
-            "`/remove <name>` — remove a member" if viewer_owns
-            else "`/remove` — leave this household"
+            "/remove <name> — remove a member" if viewer_owns
+            else "/remove — leave this household"
         )
         if viewer_owns:
-            footer.append("`/transfer <name>` — hand over ownership")
+            footer.append("/transfer <name> — hand over ownership")
         reply = (
             f"👥 Your household — {len(members)} members\n\n"
             + "\n".join(lines)

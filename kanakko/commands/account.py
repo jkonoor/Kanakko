@@ -19,17 +19,17 @@ from kanakko.tg import send_message
 ACCOUNT_COMMAND = "/account"
 
 ACCOUNT_USAGE = (
-    "Set an account's balance — e.g. `/account bank 52000` or `/account cash "
-    "2000` (what's in it), `/account credit 5000` (what you currently owe) or "
-    "`/account locked 20000` (what's already in an FD, SIP or chit). A new name "
+    "Set an account's balance — e.g. /account bank 52000 or /account cash "
+    "2000 (what's in it), /account credit 5000 (what you currently owe) or "
+    "/account locked 20000 (what's already in an FD, SIP or chit). A new name "
     "creates that account."
 )
 
-ACCOUNT_BAD_AMOUNT = "That doesn't look like an amount — try `/account credit 5000`."
+ACCOUNT_BAD_AMOUNT = "That doesn't look like an amount — try /account credit 5000."
 
 ACCOUNT_NO_HOUSEHOLD = "Send /start first — I need your household set up before I can add an account."
 
-ACCOUNT_NOT_LOCKED = 'I don\'t have a locked account named "{name}" — set one up with `/account locked <amount>`.'
+ACCOUNT_NOT_LOCKED = 'I don\'t have a locked account named "{name}" — set one up with /account locked <amount>.'
 
 
 def _is_account(text: str) -> bool:

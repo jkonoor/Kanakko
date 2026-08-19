@@ -23,7 +23,7 @@ from kanakko.tg import answer_callback_query, edit_message_text, send_message
 REFUND_WORD = "refund"
 REFUND_PREFIX = "rf:"
 
-REFUND_USAGE = 'Say how much to refund — e.g. "refund 500".'
+REFUND_USAGE = 'Say how much to refund — e.g. /refund 500.'
 REFUND_BAD_AMOUNT = 'That doesn\'t look like an amount — try "refund 500".'
 REFUND_NO_CANDIDATES = "I can't find a live expense that could take a refund like that."
 REFUND_GONE = "That expense is gone — nothing to refund."
@@ -31,12 +31,19 @@ REFUND_OVER_LIMIT = "That's more than's left to refund on that expense."
 
 
 def _is_refund(text: str) -> bool:
-    """True when `text` opens with the bare word `refund` — deliberately not a
-    slash command (§18): "refund 500" needs a predicate in `app.py`'s `is_parse`
-    exclusion list, the same shape `/undo`/`/remove` already carve out of the
-    LLM parse path and the daily cap, but with no leading `/` to match on."""
+    """True for `/refund 500` or the bare `refund 500` — either opener.
+
+    `/refund` is the canonical form: every other action here is a slash command,
+    it is the only spelling BotFather can register, and a manual that has to
+    explain "no leading /" is describing an inconsistency rather than removing
+    one. The bare word keeps working because it shipped that way and reads
+    naturally; `_command_arg` splits on whitespace, so both forms yield the same
+    amount. Like `/undo`/`/remove` this needs its predicate in `app.py`'s
+    `is_parse` exclusion list, or the LLM sees it and the daily cap counts it."""
     words = text.split()
-    return bool(words) and words[0].lower() == REFUND_WORD
+    if not words:
+        return False
+    return words[0].split("@", 1)[0].lower() in (REFUND_WORD, f"/{REFUND_WORD}")
 
 
 def _refund_keyboard(candidates: list[dict], amount: Decimal) -> InlineKeyboardMarkup:

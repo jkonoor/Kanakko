@@ -19,21 +19,21 @@ from kanakko.tg import send_message
 TRANSFER_COMMAND = "/transfer"
 
 TRANSFER_USAGE = (
-    "Name the member to hand ownership to — e.g. `/transfer ravi`. Check "
-    "`/household` for the exact labels."
+    "Name the member to hand ownership to — e.g. /transfer ravi. Check "
+    "/household for the exact labels."
 )
 TRANSFER_NO_MATCH = (
-    "No member is labelled {label!r}. Check `/household` for the exact labels."
+    "No member is labelled {label!r}. Check /household for the exact labels."
 )
 TRANSFER_AMBIGUOUS = (
     "More than one member is labelled {label!r}, so I won't guess which to hand it "
-    "to. Give them distinct invite labels first (`/invite`)."
+    "to. Give them distinct invite labels first (/invite)."
 )
 TRANSFER_NOT_OWNER = "Only the household owner can transfer ownership."
 TRANSFER_NOT_MEMBER = "That person isn't in your household."
 TRANSFER_DONE = (
     "Ownership transferred to {label}. They own the household now — you can leave "
-    "it with `/remove` if you like."
+    "it with /remove if you like."
 )
 
 

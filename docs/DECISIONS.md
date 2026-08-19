@@ -494,6 +494,61 @@ Telegram recognises only `a-z 0-9 _` in a command: `/invite-signup` would split 
 the hyphen, so BotFather could not register it and the client would not render it
 as tappable — a command that works only for whoever already knows to type it.
 
+### Leaving a household is not leaving the product
+
+Added 2026-08-17, from a question the rules above could not answer: *what happens
+when the only member of a household leaves?*
+
+Nothing did. §16 gave a member two exits from a household — remove yourself, or
+be removed — and both **re-home you into a fresh household of one**, because
+`transactions.household_id` is NOT NULL and a user with no household 500s on
+their next confirm. For a solo user that exit is a no-op with extra steps, and it
+was not even reachable: they own the household, "an owner must transfer first",
+and there is nobody to transfer to. They were told to do something impossible.
+
+Two things follow, and they are different:
+
+**A solo owner's refusal names its own case.** `_authorize_removal` returns
+`owner_alone` rather than `owner_must_transfer` when the household has one
+member. Advice that cannot be followed reads as a bug in the product, not as a
+rule being enforced.
+
+**`/delete_account` is the exit from the product**, and the only irreversible
+thing a user can do to themselves. It asks twice — the typed command only ever
+shows the warning, a tap performs it — the same shape `/remove` uses for
+retain-or-delete, and for the same reason.
+
+**Erasure deletes the data and severs the identity; it does not delete the
+`users` row.** Eleven tables carry `REFERENCES users (user_id)`, and several
+hold rows that are *other people's* history — `invites.created_by` above all: the
+invite a member consumed is that member's record of how they joined, and a
+cascade from the issuer would take it. So every transaction the leaver entered
+goes, with its audit rows, pending cards, reminder log and recurring rules; their
+membership goes; and if that empties the household, the household goes with its
+accounts and invites. The row that remains has `telegram_user_id` rewritten to
+`-user_id` — negative, so no lookup can ever match it again; unique, because
+`user_id` is; and it frees the real id, so the same person admitted later starts
+genuinely fresh rather than inheriting a tombstone. `users.deleted_at` (migration
+021) is what stops that row behaving like a live user: without it the evening job
+fans out over `all_users` and posts a summary to chat id `-42`.
+
+**An owner whose household still has members cannot erase themselves.** Same rule
+as leaving, same reason — a household always has an owner, and removing one out
+from under its members is not the leaver's decision.
+
+**Rejected:**
+
+- *Letting a solo owner "leave".* It would move them from a household of one into
+  a household of one. The request behind it is erasure; answering it with a
+  no-op would be answering a different question.
+- *`ON DELETE CASCADE` on the eleven foreign keys.* Fewer lines, and it deletes
+  other people's invite history along with the leaver.
+- *A soft-deleted user who can be restored.* "Delete my account" is not "suspend
+  my account", and a product that quietly keeps the data has not honoured the
+  request. There is no undo for this one, which is why it asks twice.
+- *Typing a confirmation word.* A tap sits directly under the warning; a typed
+  DELETE is read after the warning has scrolled away.
+
 **A known bug this exposes:** `handle_text` uses `msg.chat_id` as identity and
 never reads `message.from.id`. In a private chat the two coincide, so it works
 today; with households it is wrong. Identity and delivery address are different

@@ -218,6 +218,7 @@ household - Who's in your household
 invite - Add someone to your household (owner only)
 remove - Remove a member, or leave
 transfer - Hand over household ownership
+delete_account - Erase your account and all your data
 ```
 
 Ordered by how often it is used, not alphabetically — the "/" menu is a list a

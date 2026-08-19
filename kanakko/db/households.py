@@ -109,7 +109,16 @@ def _authorize_removal(
         if actor_user_id != owner and actor_user_id != target_user_id:
             return "not_owner", None
         if target_user_id == owner:
-            return "owner_must_transfer", None
+            # A solo owner gets its own answer. "Transfer to someone first" is
+            # advice they cannot follow — there is nobody to transfer to — and
+            # a refusal that tells you to do the impossible reads as a bug.
+            # Erasure is the real exit for them (`users.delete_account`).
+            cur.execute(
+                "SELECT count(*) FROM household_members WHERE household_id = %s",
+                (household_id,),
+            )
+            (members,) = cur.fetchone()
+            return ("owner_alone" if members == 1 else "owner_must_transfer"), None
     return "ok", household_id
 
 
@@ -121,8 +130,8 @@ def check_removal(
     The same authorization as `remove_member`, without acting, so `handle_remove`
     can present the retain/delete warning *only* when the removal will go through —
     and `remove_member` re-runs it when the button is tapped, since a callback is
-    untrusted. Returns `"ok"`, `"not_owner"`, `"owner_must_transfer"`, or
-    `"not_member"`.
+    untrusted. Returns `"ok"`, `"not_owner"`, `"owner_must_transfer"`, `"owner_alone"`
+    (the sole member, who has nobody to transfer to), or `"not_member"`.
     """
     return _authorize_removal(conn, actor_user_id, target_user_id)[0]
 

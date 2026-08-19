@@ -1,0 +1,32 @@
+-- Account erasure: a user can take their data and their identity out (§16).
+--
+-- §16 gave a member two ways out of a *household* — remove themselves, or be
+-- removed — and no way out of the *product*. Leaving re-homes you into a fresh
+-- household of one, so a solo user could not even do that: they own their
+-- household, an owner must transfer first, and there is nobody to transfer to.
+-- The dead end and the missing erasure are the same gap seen from two sides.
+--
+-- The `users` row is **kept and scrubbed**, not deleted. Eleven tables carry a
+-- `REFERENCES users (user_id)` — invites (twice), processed_updates,
+-- transactions, pending_transactions, reminder_log, transaction_events,
+-- households, household_members, accounts, recurring_rules — and several of
+-- those columns are NOT NULL on rows that must survive, `invites.created_by`
+-- above all: the invite another member consumed is that member's history, not
+-- the leaver's, and a cascade would take it. So erasure deletes the *data* and
+-- severs the *identity*, which is what "delete my account" actually asks for.
+--
+-- Severing the identity is the `telegram_user_id = -user_id` rewrite in
+-- `db.users.delete_account`: negative because every real Telegram id is
+-- positive, so a scrubbed row can never again match a lookup, and unique
+-- because `user_id` is. It also frees the real id, so the same person admitted
+-- again later starts genuinely fresh rather than inheriting a tombstone.
+--
+-- This column is what stops that scrubbed row behaving like a live user. The
+-- sign alone would work and is exactly the kind of clever nobody should have to
+-- decode at 3am; a `deleted_at` reads as what it is, and matches §6's soft
+-- delete on `transactions`.
+ALTER TABLE users ADD COLUMN deleted_at TIMESTAMPTZ;
+
+-- The scheduled jobs fan out over `all_users` and send to the Telegram id as a
+-- chat id. Without this they would post a summary to chat -42 every evening.
+CREATE INDEX users_live_idx ON users (user_id) WHERE deleted_at IS NULL;

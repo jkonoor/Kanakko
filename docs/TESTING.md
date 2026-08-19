@@ -330,6 +330,21 @@ someone else's entry.
 | 6c.5 | Remove a member and choose **delete** | A warning first, saying past reports will stop reconciling | ⬜ | |
 | 6c.6 | Confirm the deletion, then re-open last month | The total is **lower than the summary you were sent at the time** | ⬜ | |
 
+| 6c.7 | As the **only** member of your household, send `/remove` | "You're the only one here, so there's no household to leave" — and it points at `/delete_account`. It must **not** tell you to transfer ownership to someone: there is nobody to transfer to, and that is advice you cannot follow | ⬜ | |
+| 6c.8 | From a throwaway account with a few entries, send `/delete_account` | A warning naming what goes, and a single **Delete everything** button. Nothing is deleted yet — check the entries are still there | ⬜ | |
+| 6c.9 | Ignore that card and keep using the bot | Everything still works. Ignoring the card is how you cancel; there is deliberately no Cancel button beside a destructive one | ⬜ | |
+| 6c.10 | Send `/delete_account` again and tap **Delete everything** | "Your account is gone." Their entries, accounts and household are all removed | ⬜ | |
+| 6c.11 | From that same account, send `spent 100 on tea` | The invite-only refusal — the bot no longer knows them. **They must need a fresh invite**, not resume where they left off | ⬜ | |
+| 6c.12 | Tap the erasure button a second time on the old card | "That button's expired". No crash, no second deletion | ⬜ | |
+| 6c.13 | As an owner **with** another member, send `/delete_account` and confirm | Refused — hand ownership over first. Erasing an owner out from under their household is not the leaver's call (§16) | ⬜ | |
+| 6c.14 | *(operator)* After 6c.10, `select telegram_user_id, deleted_at from users where user_id = <theirs>` | A **negative** `telegram_user_id` and a `deleted_at`. The row is kept so eleven foreign keys stay valid — including invites belonging to other people's history — but the identity is severed | ⬜ | |
+| 6c.15 | *(operator)* Wait for the 21:00 evening job after 6c.10, or run it by hand | **No message is sent to the deleted account.** The fan-out reads `all_users`, and a scrubbed row would mean posting a summary to a negative chat id | ⬜ | |
+
+**6c.11 and 6c.15 are the two that matter.** If a deleted person can carry on
+using the bot, nothing was deleted; if the jobs still fan out to them, the row
+was scrubbed but not retired. **6c.13 is the rule 6c.2 already enforces for
+leaving**, applied to erasure — it should fail the same way for the same reason.
+
 **6c.6 is expected, not a bug** — it is the accepted price of real deletion (§16),
 and the warning in 6c.5 must have said so. If 6c.5 warned only "this cannot be
 undone", **that is a finding**.

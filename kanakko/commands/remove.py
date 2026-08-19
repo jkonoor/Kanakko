@@ -37,6 +37,11 @@ REMOVE_OWNER_MUST_TRANSFER = (
     "owner. Hand ownership to someone first with /transfer <name>, then you can "
     "leave."
 )
+REMOVE_OWNER_ALONE = (
+    "You're the only one here, so there's no household to leave. If you want to "
+    "stop using Kanakko altogether, /delete_account erases your entries and this "
+    "household for good."
+)
 REMOVE_NOT_MEMBER = "That person isn't in your household."
 
 # The retain/delete choice a removal asks (§16). The button carries the target's
@@ -115,6 +120,7 @@ def handle_remove(conn: psycopg.Connection, msg: TextMessage) -> int | None:
         send_message(msg.chat_id, {
             "not_owner": REMOVE_NOT_OWNER,
             "owner_must_transfer": REMOVE_OWNER_MUST_TRANSFER,
+            "owner_alone": REMOVE_OWNER_ALONE,
             "not_member": REMOVE_NOT_MEMBER,
         }[verdict])
         log_event("member.removed", status="noop", update_id=msg.update_id,
@@ -161,6 +167,7 @@ def handle_remove_choice(conn: psycopg.Connection, press: ButtonPress) -> int | 
         answer_callback_query(press.callback_query_id, {
             "not_owner": REMOVE_NOT_OWNER,
             "owner_must_transfer": REMOVE_OWNER_MUST_TRANSFER,
+            "owner_alone": REMOVE_OWNER_ALONE,
             "not_member": REMOVE_NOT_MEMBER,
         }[outcome])
         log_event("member.removed", status="noop", update_id=press.update_id,

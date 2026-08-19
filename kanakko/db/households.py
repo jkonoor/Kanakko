@@ -49,7 +49,7 @@ def create_household_of_one(conn: psycopg.Connection, user_id: int) -> int | Non
 
 def household_roster(
     conn: psycopg.Connection, user_id: int
-) -> list[tuple[int, bool, str | None]]:
+) -> list[tuple[int, bool, str | None, str | None]]:
     """The members of `user_id`'s household — `(member_user_id, is_owner, label)` (§16).
 
     Answers `/household`'s "who is in it, who owns it". Scoped on the household
@@ -57,7 +57,9 @@ def household_roster(
     households. Each member carries their household-invite `label` (`ravi`,
     `priya`) — the attribution §16 keeps so the operator can tell who is active;
     the owner joined by creating the household, not by an invite, so their label
-    is NULL. The label join is scoped to *this* household (`i.household_id =
+    is NULL — which is why the owner rendered as the bare word "Owner" until
+    `display_name` (migration 022) gave every member a name of their own. The
+    label join is scoped to *this* household (`i.household_id =
     m.household_id`): once a member can leave one household and join another
     (removal, §16) they carry a used household invite from each, and an unscoped
     join would stamp them with a stale label from the household they left. Owner
@@ -66,9 +68,10 @@ def household_roster(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT m.user_id, hh.owner = m.user_id AS is_owner, i.label"
+            "SELECT m.user_id, hh.owner = m.user_id AS is_owner, i.label, u.display_name"
             " FROM household_members m"
             " JOIN households hh ON hh.household_id = m.household_id"
+            " JOIN users u ON u.user_id = m.user_id"
             " LEFT JOIN invites i"
             "   ON i.used_by = m.user_id AND i.kind = 'household'"
             "   AND i.household_id = m.household_id"
@@ -77,7 +80,10 @@ def household_roster(
             " ORDER BY is_owner DESC, m.joined_at",
             (user_id,),
         )
-        return [(uid, is_owner, label) for uid, is_owner, label in cur.fetchall()]
+        return [
+                (uid, is_owner, label, name)
+                for uid, is_owner, label, name in cur.fetchall()
+            ]
 
 
 def _authorize_removal(

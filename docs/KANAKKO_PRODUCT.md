@@ -169,6 +169,10 @@ Worth knowing before anyone writes a claim we can't back.
 - **It is not for business accounting.** No GST, no invoices, no clients.
 - **It requires Telegram.** That's the whole delivery mechanism.
 
+**What it stores about a person:** their Telegram id, their first name (so a
+household roster can say who is who), and the money they log. No email, no phone
+number, no bank credentials, no contacts. `/delete_account` erases all of it.
+
 ---
 
 ## Where it's going

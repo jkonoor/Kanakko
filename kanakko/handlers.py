@@ -69,6 +69,7 @@ class TextMessage:
     update_id: int | None = None
     source: str = "webhook"
     reply_to_message_id: int | None = None
+    display_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.from_id is None:
@@ -90,6 +91,7 @@ class ButtonPress:
     from_id: int | None = None
     update_id: int | None = None
     source: str = "webhook"
+    display_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.from_id is None:
@@ -116,6 +118,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             from_id=(message.get("from") or {}).get("id"),
             update_id=update_id,
             reply_to_message_id=(message.get("reply_to_message") or {}).get("message_id"),
+            display_name=(message.get("from") or {}).get("first_name"),
         )
 
     callback = update.get("callback_query") or {}
@@ -129,6 +132,7 @@ def dispatch(update: dict) -> TextMessage | ButtonPress | None:
             data=callback["data"],
             from_id=(callback.get("from") or {}).get("id"),
             update_id=update_id,
+            display_name=(callback.get("from") or {}).get("first_name"),
         )
     return None
 
@@ -281,7 +285,7 @@ def handle_start(conn: psycopg.Connection, msg: TextMessage) -> str:
     payload = _command_arg(msg.text)
     if payload:
         if _START_PAYLOAD_RE.match(payload):
-            outcome = consume_invite(conn, payload, msg.from_id)
+            outcome = consume_invite(conn, payload, msg.from_id, msg.display_name)
         else:
             outcome = "unknown"  # a garbage payload — never a valid code (§16)
         reply = {
@@ -291,7 +295,9 @@ def handle_start(conn: psycopg.Connection, msg: TextMessage) -> str:
             "unknown": START_BAD_CODE,
         }[outcome]
     elif signup_mode() == "open":
-        create_household_of_one(conn, get_or_create_user(conn, msg.from_id))
+        create_household_of_one(
+            conn, get_or_create_user(conn, msg.from_id, msg.display_name)
+        )
         outcome, reply = "ok", WELCOME
     elif user_exists(conn, msg.from_id):
         outcome, reply = "ok", WELCOME  # a known user, already in a household
@@ -504,8 +510,19 @@ def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
         reply = HOUSEHOLD_SOLO
     else:
         lines = []
-        for member_id, is_owner, label in members:
-            name = "Owner" if is_owner else (label or "Member")
+        for member_id, is_owner, label, display_name in members:
+            # Their own Telegram name beats the label the *inviter* typed —
+            # `/invite wife` would otherwise show "wife" to the person themselves
+            # — and the role is only a last resort, which is all the owner used
+            # to get (§16, migration 022).
+            name = display_name or label
+            if name is None:
+                # Nothing to call them by: a user minted before migration 022 who
+                # has not messaged since, and (for the owner) never had a label.
+                # The role stands in on its own — "Owner (owner)" is not a name.
+                name = "Owner" if is_owner else "Member"
+            elif is_owner:
+                name = f"{name} (owner)"
             if member_id == user_id:
                 name += " (you)"
             lines.append(f"• {name}")
@@ -515,7 +532,7 @@ def handle_household(conn: psycopg.Connection, msg: TextMessage) -> str:
         # the one moment they mean anything — looking at a household with someone
         # else in it. Owner-only commands are shown only to the owner, so a member
         # is never told to try something that will refuse them.
-        viewer_owns = any(m == user_id and owns for m, owns, _ in members)
+        viewer_owns = any(m == user_id and owns for m, owns, _label, _name in members)
         footer = ["/invite <name> — add someone"] if viewer_owns else []
         footer.append(
             "/remove <name> — remove a member" if viewer_owns

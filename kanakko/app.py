@@ -177,7 +177,9 @@ async def webhook(request: Request) -> dict[str, bool]:
             log_event("update.refused", status="noop", update_id=update_id,
                       source="webhook", duration_ms=ms_since(start))
             return {"ok": True}
-        user_id = get_or_create_user(conn, action.from_id)
+        # The one place a name is written: every update passes through this gate
+        # (§16), so one call keeps it fresh for the whole app.
+        user_id = get_or_create_user(conn, action.from_id, action.display_name)
         # §18: a "Change amount" tap marks its card `awaiting_amount` (below), so
         # the *next* text message this user sends is a replacement amount, not a
         # transaction to parse — checked once, up front, for every TextMessage.

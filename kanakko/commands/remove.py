@@ -104,7 +104,7 @@ def handle_remove(conn: psycopg.Connection, msg: TextMessage) -> int | None:
     else:
         matches = [
             member_id
-            for member_id, _is_owner, member_label in household_roster(conn, user_id)
+            for member_id, _is_owner, member_label, _name in household_roster(conn, user_id)
             if member_label and member_label.lower() == label.lower()
         ]
         if len(matches) != 1:

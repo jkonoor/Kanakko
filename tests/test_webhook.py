@@ -136,7 +136,7 @@ def test_webhook_returns_200_for_a_text_update(monkeypatch):
     # left to 500 so Telegram redelivers a transiently-failed transaction.
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -807,7 +807,7 @@ def test_webhook_logs_exactly_one_error_line_when_a_handler_raises(monkeypatch):
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -849,7 +849,7 @@ def test_webhook_routes_confirm_and_cancel_to_their_handlers(monkeypatch):
     opened = []
     monkeypatch.setattr(app_module, "connect", lambda: opened.append(True) or _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     confirmed, cancelled, texted, categorised = [], [], [], []
     monkeypatch.setattr(app_module, "handle_confirm", lambda conn, press: confirmed.append(press))
@@ -922,7 +922,7 @@ def test_webhook_routes_undo_to_handle_undo_not_handle_text(monkeypatch):
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -959,7 +959,7 @@ def test_webhook_routes_invite_to_handle_invite_and_never_meters_it(monkeypatch)
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -996,7 +996,7 @@ def test_webhook_routes_household_to_handle_household_and_never_meters_it(monkey
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -1028,7 +1028,7 @@ def test_webhook_routes_remove_to_handle_remove_and_never_meters_it(monkeypatch)
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -1060,7 +1060,7 @@ def test_webhook_routes_transfer_to_handle_transfer_and_never_meters_it(monkeypa
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -1093,7 +1093,7 @@ def test_webhook_routes_account_to_handle_account_and_never_meters_it(monkeypatc
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -1127,7 +1127,7 @@ def test_webhook_routes_recurring_to_handle_recurring_and_never_meters_it(monkey
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -1160,7 +1160,7 @@ def test_webhook_routes_refund_to_handle_refund_and_never_meters_it(monkeypatch)
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
@@ -1664,7 +1664,7 @@ def test_webhook_routes_an_awaited_amount_reply_and_never_meters_it(monkeypatch)
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: 909)
     replied, texted, claims = [], [], []
@@ -1691,7 +1691,7 @@ def test_webhook_routes_an_awaited_reconcile_reply_and_never_meters_it(monkeypat
     _set_secret(monkeypatch)
     monkeypatch.setattr(app_module, "connect", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "is_authorized", lambda conn, uid: True)
-    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid: 1)
+    monkeypatch.setattr(app_module, "get_or_create_user", lambda conn, uid, name=None: 1)
     monkeypatch.setattr(app_module, "within_daily_cap", lambda conn, uid: True)
     monkeypatch.setattr(app_module, "pending_awaiting_amount", lambda conn, uid: None)
     monkeypatch.setattr(
